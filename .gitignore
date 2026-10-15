@@ -1,0 +1,10 @@
+/target/
+/dist/
+**/*.rs.bk
+*.pdb
+.env
+.idea/
+.vscode/
+.claude/
+CLAUDE.md
+docs/
