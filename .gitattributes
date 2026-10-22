@@ -1,0 +1,6 @@
+* text=auto
+# Executed inside Linux containers from a bind mount: must stay LF on Windows checkouts.
+*.sh text eol=lf
+*.Dockerfile text eol=lf
+compose*.yaml text eol=lf
+*.ps1 text eol=crlf
