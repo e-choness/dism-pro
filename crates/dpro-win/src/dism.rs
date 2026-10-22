@@ -5,7 +5,12 @@
 //! outlive `DismShutdown`. Buffers the API returns are freed with `DismDelete` in `Drop`.
 //! The DISM API requires an elevated process.
 
-use std::{ffi::OsString, marker::PhantomData, path::Path, ptr};
+use std::{
+    ffi::{OsStr, OsString},
+    marker::PhantomData,
+    path::Path,
+    ptr,
+};
 
 use dpro_core::OsError;
 use dpro_sys::{
@@ -156,6 +161,74 @@ impl<'api> Session<'api> {
                 Ok(FeatureInfo { name, state })
             })
             .collect()
+    }
+}
+
+/// Mutations: only for `Backend::apply` implementations (TD-0001; services never call these).
+/// No progress callback or cancel event yet (CAVEATS.md §7).
+impl Session<'_> {
+    /// `DismEnableFeature`. `sources` are extra payload locations (`/Source`); with
+    /// `limit_access` Windows Update isn't contacted.
+    ///
+    /// # Errors
+    /// The `HRESULT` with DISM's error message.
+    pub fn enable_feature(&self, name: &OsStr, sources: &[&Path], limit_access: bool) -> Result<()> {
+        let name = WideCString::new(name)?;
+        let sources: Vec<WideCString> = sources.iter().map(|p| WideCString::new(long_path(p))).collect::<Result<_>>()?;
+        let source_ptrs: Vec<*const u16> = sources.iter().map(WideCString::as_ptr).collect();
+        let count = u32::try_from(source_ptrs.len()).unwrap_or(u32::MAX);
+        let sources_arg = if source_ptrs.is_empty() { ptr::null() } else { source_ptrs.as_ptr() };
+        // SAFETY: every string is NUL-terminated and outlives the call; `sources_arg` points to
+        // `count` valid string pointers (or is null with count 0).
+        let hr = unsafe {
+            dism::DismEnableFeature(
+                self.id,
+                name.as_ptr(),
+                ptr::null(),
+                dism::DismPackageNone,
+                i32::from(limit_access),
+                sources_arg,
+                count,
+                0,
+                ptr::null_mut(),
+                None,
+                ptr::null_mut(),
+            )
+        };
+        check(hr, "DismEnableFeature")
+    }
+
+    /// `DismDisableFeature`, keeping the payload so the change stays reversible.
+    ///
+    /// # Errors
+    /// The `HRESULT` with DISM's error message.
+    pub fn disable_feature(&self, name: &OsStr) -> Result<()> {
+        let name = WideCString::new(name)?;
+        // SAFETY: `name` is NUL-terminated and outlives the call; null package name = any.
+        let hr = unsafe {
+            dism::DismDisableFeature(self.id, name.as_ptr(), ptr::null(), 0, ptr::null_mut(), None, ptr::null_mut())
+        };
+        check(hr, "DismDisableFeature")
+    }
+
+    /// `DismRemovePackage` by package identity name.
+    ///
+    /// # Errors
+    /// The `HRESULT` with DISM's error message.
+    pub fn remove_package(&self, identity: &OsStr) -> Result<()> {
+        let identity = WideCString::new(identity)?;
+        // SAFETY: `identity` is NUL-terminated and outlives the call.
+        let hr = unsafe {
+            dism::DismRemovePackage(
+                self.id,
+                identity.as_ptr(),
+                dism::DismPackageName,
+                ptr::null_mut(),
+                None,
+                ptr::null_mut(),
+            )
+        };
+        check(hr, "DismRemovePackage")
     }
 }
 

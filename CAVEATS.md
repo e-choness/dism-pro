@@ -93,3 +93,23 @@ it's empty.
       no engine facade (`Engine::plan/apply/undo`, TD-0001 §5.5) on top of them yet.
 - [ ] A panicking request ends the actor thread; callers then get `ActorGone`. Release builds abort on
       panic anyway (`panic = "abort"`).
+
+## 9. CLI (2.5) — `dpro-cli-fmt`, `dismpro-cli`, `schemas/`
+- [ ] Messages come from `i18n/en-US/cli.ftl` through an **interim loader** (simple messages + `{ $var }`
+      only), replaced by the Fluent runtime in roadmap 3.4. Only en-US exists.
+- [ ] Not implemented from TD-0002 yet: `job-event.v1` JSON Lines streaming (apply prints a final `job.v1`),
+      progress line, colors (`--color` is parsed but ignored), Ctrl+C → cancel token (Ctrl+C currently kills
+      the process; the job then reads as interrupted and stays undoable), `targets.v1` ids, `drivers`
+      commands, `purge` (2.8), `mcp`, snapshot tests + schema validation of every `--json` document,
+      `render_table` baseline, `xtask perf cli-*`, arg-parser fuzzing.
+- [ ] The CLI runs DISM inline on the main thread, not through `TargetActor` (one target per process).
+- [ ] `TargetId`/`OsBuild` fall back to zeros when the registry can't be read (offline hive in use);
+      undo compares only the build number (not UBR).
+- [ ] Journal folder `<volume>\ProgramData\DismPro\journal` is created without the SYSTEM+Admins ACL
+      TD-0001 §8 requires.
+- [ ] `DismEnableFeature`/`DismDisableFeature`/`DismRemovePackage` bindings are from memory (ffi-check gates them);
+      no progress callback or cancel event is passed.
+- [ ] Feature plans mark every change `reboot_required` (conservative); DISM's real answer isn't read back.
+- [ ] Table widths count `char`s, so CJK/emoji columns misalign.
+- [ ] `schemas/*.v1.json` are hand-written and not yet validated against real output.
+- [ ] `winpe-dlls.txt` gained `advapi32.dll` and `dismapi.dll` (verify).

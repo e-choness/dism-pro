@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/e-choness/dism-pro/schemas/targets.v1.json",
+  "title": "dismpro-cli targets list --json",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": "targets.v1"
+    },
+    "targets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "enum": [
+              "online",
+              "offline",
+              "image"
+            ]
+          },
+          "selector": {
+            "type": "string"
+          },
+          "windows_dir": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "selector",
+          "windows_dir"
+        ]
+      }
+    }
+  },
+  "required": [
+    "schema",
+    "targets"
+  ],
+  "additionalProperties": true
+}

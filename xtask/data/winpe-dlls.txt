@@ -10,3 +10,6 @@ kernel32.dll                        # core Win32; present in every Windows image
 ntdll.dll                           # NT native API used by std; present in every image (verify)
 bcryptprimitives.dll                # std random numbers (ProcessPrng) (verify)
 api-ms-win-core-synch-l1-2-0.dll    # std locks (WaitOnAddress); API set resolved by the loader (verify)
+# Added with the CLI (roadmap 2.5): registry/token APIs and the DISM API.
+advapi32.dll                        # registry + token APIs (windows-sys); core DLL in WinPE (verify)
+dismapi.dll                         # DISM API; WinPE ships DISM (verify the DLL name/location in the ADK WinPE file list)

@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/e-choness/dism-pro/schemas/features.v1.json",
+  "title": "dismpro-cli features list --json",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": "features.v1"
+    },
+    "features": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "not-present",
+              "uninstall-pending",
+              "staged",
+              "removed",
+              "installed",
+              "install-pending",
+              "superseded",
+              "partially-installed",
+              "unknown"
+            ]
+          },
+          "enabled": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "state",
+          "enabled"
+        ]
+      }
+    }
+  },
+  "required": [
+    "schema",
+    "features"
+  ],
+  "additionalProperties": true
+}

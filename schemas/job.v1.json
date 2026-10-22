@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/e-choness/dism-pro/schemas/job.v1.json",
+  "title": "Outcome of an apply / content of a journal",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": "job.v1"
+    },
+    "job": {
+      "type": "string",
+      "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "target": {
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "completed",
+        "cancelled",
+        "aborted",
+        "interrupted"
+      ]
+    },
+    "applied": {
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "minimum": 0
+      }
+    },
+    "failed": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "index": {
+            "type": "integer"
+          },
+          "code": {
+            "type": "string",
+            "pattern": "^0x[0-9a-f]{8}$"
+          }
+        },
+        "required": [
+          "index",
+          "code"
+        ]
+      }
+    },
+    "without_outcome": {
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "minimum": 0
+      }
+    },
+    "journal": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema",
+    "job",
+    "target",
+    "status",
+    "applied",
+    "failed",
+    "without_outcome",
+    "journal"
+  ],
+  "additionalProperties": true
+}

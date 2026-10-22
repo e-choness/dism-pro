@@ -14,8 +14,8 @@ use crate::{
     units::{Bytes, UnixMillis},
 };
 
-/// Current plan schema (TD-0001 §5.1, bumped with a reader for N-1).
-pub const PLAN_SCHEMA: u16 = 1;
+/// Current plan schema name (TD-0002 §5.4: every JSON document names its schema).
+pub const PLAN_SCHEMA: &str = "plan.v1";
 
 /// Windows build the plan was made against; re-checked at apply time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -351,7 +351,7 @@ impl Plan {
             .map(|c| c.clone().try_map(&mut resolve))
             .collect::<Result<_, _>>()?;
         Ok(PlanDoc {
-            schema: PLAN_SCHEMA,
+            schema: PLAN_SCHEMA.to_owned(),
             target: self.target,
             os_build: self.os_build,
             op: self.op.clone(),
@@ -366,7 +366,7 @@ impl Plan {
     /// [`Error::Parse`] for an unknown schema; otherwise as [`PlanBuilder::push`].
     pub fn from_doc(doc: PlanDoc) -> Result<Self, Error> {
         if doc.schema != PLAN_SCHEMA {
-            return Err(Error::Parse { what: "plan schema", value: doc.schema.to_string() });
+            return Err(Error::Parse { what: "plan schema", value: doc.schema });
         }
         let mut b = PlanBuilder::new(doc.target, doc.os_build, doc.op);
         for c in doc.changes {
@@ -380,7 +380,7 @@ impl Plan {
 /// Serialized plan (`plan.v1`); the JSON schema is pinned in TD-0002.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlanDoc {
-    pub schema: u16,
+    pub schema: String,
     pub target: TargetId,
     pub os_build: OsBuild,
     pub op: OpDescriptor,
@@ -585,7 +585,7 @@ mod tests {
     #[test]
     fn unknown_schema_is_rejected() {
         let mut doc = builder().finish().to_doc().unwrap();
-        doc.schema = 99;
+        doc.schema = "plan.v99".into();
         assert!(Plan::from_doc(doc).is_err());
     }
 }

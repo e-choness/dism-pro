@@ -11,7 +11,7 @@
 
 use crate::types::{PCWSTR, PVOID, SYSTEMTIME, UINT};
 #[cfg(windows)]
-use crate::types::{DWORD, HANDLE, HRESULT};
+use crate::types::{BOOL, DWORD, HANDLE, HRESULT};
 
 /// Opaque session handle (`typedef UINT DismSession`).
 pub type DismSession = UINT;
@@ -120,6 +120,36 @@ unsafe extern "system" {
         Progress: DISM_PROGRESS_CALLBACK,
         UserData: PVOID,
     ) -> HRESULT;
+    pub fn DismEnableFeature(
+        Session: DismSession,
+        FeatureName: PCWSTR,
+        Identifier: PCWSTR,
+        PackageIdentifier: DismPackageIdentifier,
+        LimitAccess: BOOL,
+        SourcePaths: *const PCWSTR,
+        SourcePathCount: UINT,
+        EnableAll: BOOL,
+        CancelEvent: HANDLE,
+        Progress: DISM_PROGRESS_CALLBACK,
+        UserData: PVOID,
+    ) -> HRESULT;
+    pub fn DismDisableFeature(
+        Session: DismSession,
+        FeatureName: PCWSTR,
+        PackageName: PCWSTR,
+        RemovePayload: BOOL,
+        CancelEvent: HANDLE,
+        Progress: DISM_PROGRESS_CALLBACK,
+        UserData: PVOID,
+    ) -> HRESULT;
+    pub fn DismRemovePackage(
+        Session: DismSession,
+        Identifier: PCWSTR,
+        PackageIdentifier: DismPackageIdentifier,
+        CancelEvent: HANDLE,
+        Progress: DISM_PROGRESS_CALLBACK,
+        UserData: PVOID,
+    ) -> HRESULT;
     pub fn DismUnmountImage(
         MountPath: PCWSTR,
         Flags: DWORD,
@@ -147,6 +177,19 @@ pub const C_PROTOTYPES: &[(&str, &str)] = &[
         "DismMountImage",
         "HRESULT (WINAPI *)(PCWSTR, PCWSTR, UINT, PCWSTR, DismImageIdentifier, DWORD, HANDLE, \
          DISM_PROGRESS_CALLBACK, PVOID)",
+    ),
+    (
+        "DismEnableFeature",
+        "HRESULT (WINAPI *)(DismSession, PCWSTR, PCWSTR, DismPackageIdentifier, BOOL, PCWSTR *, UINT, BOOL, \
+         HANDLE, DISM_PROGRESS_CALLBACK, PVOID)",
+    ),
+    (
+        "DismDisableFeature",
+        "HRESULT (WINAPI *)(DismSession, PCWSTR, PCWSTR, BOOL, HANDLE, DISM_PROGRESS_CALLBACK, PVOID)",
+    ),
+    (
+        "DismRemovePackage",
+        "HRESULT (WINAPI *)(DismSession, PCWSTR, DismPackageIdentifier, HANDLE, DISM_PROGRESS_CALLBACK, PVOID)",
     ),
     (
         "DismUnmountImage",
