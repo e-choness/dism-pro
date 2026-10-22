@@ -1,0 +1,33 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "xtask"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+license = "Apache-2.0"
+repository = "https://github.com/e-choness/dism-pro"
+publish = false
+
+# Coding standards §1. CI runs clippy with -D warnings, so "warn" lints also block merges.
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+dbg_macro = "deny"
+print_stdout = "deny"
+undocumented_unsafe_blocks = "deny"
+cast_possible_truncation = "deny"
+
+[profile.release]
+# A panic is a bug that produces a minidump (coding standards §3).
+panic = "abort"

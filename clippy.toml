@@ -1,0 +1,6 @@
+# Coding standards §1: unwrap/expect/panic/print/dbg are denied outside tests only.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-print-in-tests = true
+allow-dbg-in-tests = true

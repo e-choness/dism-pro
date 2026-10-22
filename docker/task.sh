@@ -17,6 +17,8 @@ win_targets=(x86_64-pc-windows-msvc aarch64-pc-windows-msvc)
 
 case "${task}" in
   fmt)
+    # `fmt -- --fix` rewrites files instead of checking them.
+    if [[ "${1:-}" == "--fix" ]]; then exec cargo fmt --all; fi
     exec cargo fmt --all -- --check "$@"
     ;;
   lint)
@@ -25,6 +27,8 @@ case "${task}" in
     for t in "${win_targets[@]}"; do
       cargo xwin clippy --workspace --all-targets --locked --target "${t}" -- -D warnings
     done
+    cargo xtask layering
+    cargo xtask i18n-check
     ;;
   test)
     exec cargo nextest run --workspace --locked "$@"
@@ -47,6 +51,9 @@ case "${task}" in
       exes=(target/"${t}"/release/*.exe)
       if (( ${#exes[@]} )); then cp "${exes[@]}" "dist/${t}/"; fi
     done
+    size_args=()
+    for t in "${win_targets[@]}"; do size_args+=(--target "${t}"); done
+    cargo xtask size "${size_args[@]}"
     ;;
   *)
     echo "unknown task: ${task}" >&2

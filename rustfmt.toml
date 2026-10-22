@@ -1,0 +1,3 @@
+# Stable rustfmt only. `imports_granularity` and `group_imports` (coding standards §1)
+# are nightly-only options and are left out until the toolchain question is decided.
+edition = "2024"
