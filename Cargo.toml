@@ -13,6 +13,18 @@ publish = false
 # New dependencies need a justification in the PR (coding standards §7).
 [workspace.dependencies]
 dpro-core = { path = "crates/dpro-core" }
+dpro-engine = { path = "crates/dpro-engine" }
+dpro-sys = { path = "crates/dpro-sys" }
+dpro-win = { path = "crates/dpro-win" }
+# Win32 FFI for dpro-win (coding standards §7: windows-sys over windows). MIT OR Apache-2.0.
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Registry",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+] }
 # Error enums per crate (coding standards §3). MIT OR Apache-2.0, proc-macro only.
 thiserror = "2.0.21"
 # Plan/JSON model (TD-0001 G1). MIT OR Apache-2.0.
