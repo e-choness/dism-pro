@@ -1,0 +1,71 @@
+# CI on the GitHub Actions free tier (ADR-0003, decision #16). Every job runs the same
+# `docker compose run` services a developer runs locally.
+name: ci
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+  push:
+    branches: [master]
+  schedule:
+    - cron: "17 3 * * *" # nightly
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  linux:
+    name: T1 + T2 (ubuntu)
+    # Adding a label other than needs-windows doesn't need a new run.
+    if: github.event.action != 'labeled' || github.event.label.name == 'needs-windows'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/toolchain
+        with:
+          t2: "true"
+      - run: docker compose run --rm fmt
+      - run: docker compose run --rm lint
+      - run: docker compose run --rm test
+      - run: docker compose run --rm test-win
+      - run: docker compose run --rm deny
+      - run: docker compose run --rm build
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  windows:
+    name: T3 + G1 (windows-2025)
+    needs: linux
+    # Windows minutes are scarce: master, nightly, manual, or PRs labeled needs-windows.
+    if: >-
+      github.event_name == 'push' || github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.pull_request.labels.*.name, 'needs-windows')
+    runs-on: windows-2025
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist/
+      - name: T3 integration tests
+        if: hashFiles('compose.windows.yaml') != ''
+        run: docker compose -f compose.windows.yaml run --rm itest
+      - name: T3 not set up yet
+        if: hashFiles('compose.windows.yaml') == ''
+        run: echo "::notice::compose.windows.yaml lands with spike S-02 (roadmap 1.5); no T3 tests yet."

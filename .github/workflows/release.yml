@@ -1,0 +1,47 @@
+# Release build: unsigned exes + SHA256SUMS + GitHub artifact attestations (decision #17).
+# Creates a draft so the owner can submit the exes to the Microsoft Defender
+# false-positive portal before announcing (roadmap Phase 6).
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/toolchain
+      - run: docker compose run --rm build
+      - name: Stage files with per-arch names
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          mkdir release
+          for pair in x86_64-pc-windows-msvc:x64 aarch64-pc-windows-msvc:arm64; do
+            triple="${pair%%:*}" arch="${pair##*:}"
+            for exe in dist/"$triple"/*.exe; do
+              name="$(basename "$exe" .exe)"
+              cp "$exe" "release/${name}-${VERSION}-${arch}.exe"
+            done
+          done
+          (cd release && sha256sum -- *.exe > SHA256SUMS)
+          cat release/SHA256SUMS
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: release/*.exe
+      - name: Draft GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ github.ref_name }}
+        run: gh release create "$VERSION" --draft --verify-tag --title "DISM Pro $VERSION" release/*
