@@ -12,6 +12,7 @@ pub mod intern;
 pub mod plan;
 pub mod progress;
 pub mod protected;
+pub mod target;
 pub mod units;
 
 pub use error::{Error, OsError};

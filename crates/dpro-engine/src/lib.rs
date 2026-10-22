@@ -5,6 +5,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod actor;
 mod crc32c;
+pub mod discover;
 pub mod job;
 pub mod journal;

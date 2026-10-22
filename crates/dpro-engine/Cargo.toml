@@ -13,6 +13,9 @@ postcard.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+dpro-win.workspace = true
+
 [dev-dependencies]
 criterion.workspace = true
 proptest.workspace = true

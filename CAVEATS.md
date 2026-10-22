@@ -83,3 +83,13 @@ it's empty.
 - [ ] Not yet: VSS, BCD, WUA, MSI, ETW, SCM, tasks, firewall wrappers; cancel-event bridging
       (`CancelToken` → manual-reset event for DISM's `CancelEvent`); WIMGAPI message callback.
 - [ ] T2 (Wine) runs the pure parts only (registry value encoding, wide strings, long paths).
+
+## 8. Targets & actors (2.4) — `dpro-core::target`, `dpro-engine::{discover, actor}`
+- [ ] Offline installs are detected by `<root>\Windows\System32\config\SYSTEM` only (no other Windows
+      folder names, no BitLocker-locked volumes, no unassigned volumes / `\\?\Volume{…}` paths).
+- [ ] Mounted images aren't discovered yet (needs `DismGetMountedImageInfo`, not bound).
+- [ ] WinPE: the "online" target is the WinPE image itself; nothing marks or hides it yet.
+- [ ] Actors use `std::sync::mpsc` rather than `crossbeam-channel` (coding standards §5 names crossbeam);
+      no engine facade (`Engine::plan/apply/undo`, TD-0001 §5.5) on top of them yet.
+- [ ] A panicking request ends the actor thread; callers then get `ActorGone`. Release builds abort on
+      panic anyway (`panic = "abort"`).
