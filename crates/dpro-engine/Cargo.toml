@@ -7,5 +7,19 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[dependencies]
+dpro-core.workspace = true
+postcard.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+proptest.workspace = true
+
+[[bench]]
+name = "journal_append"
+harness = false
+
 [lints]
 workspace = true

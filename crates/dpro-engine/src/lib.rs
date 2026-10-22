@@ -4,3 +4,7 @@
 //! Allowed workspace dependencies: `dpro-core`, `dpro-rules`, `dpro-win`.
 
 #![forbid(unsafe_code)]
+
+mod crc32c;
+pub mod job;
+pub mod journal;

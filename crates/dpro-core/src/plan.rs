@@ -41,7 +41,7 @@ pub struct OpDescriptor {
 
 /// Registry value data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum RegData<S> {
     Sz(S),
     ExpandSz(S),
@@ -81,8 +81,12 @@ pub enum ExternalKind {
 }
 
 /// One mutation. Strings are `S`; see the module docs.
+///
+/// **Never reorder or remove variants**: the journal's binary encoding stores the variant
+/// index. Add new kinds at the end. (Serde's default external tagging is used because the
+/// journal format, postcard, can't decode internally tagged enums.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum ChangeKind<S> {
     /// Same-volume rename into the job's quarantine folder.
     FileQuarantine { path: S, bytes: Bytes, unique_bytes: Bytes },
@@ -113,11 +117,14 @@ pub enum ChangeKind<S> {
     Native { api: S, args: S },
     /// Third-party code. Always irreversible; journaled for audit only.
     ExternalProgram { command: S, kind: ExternalKind },
+    /// Moves a quarantined file back: the inverse of `FileQuarantine`, produced by undo.
+    /// Not in TD-0001 §5.1's list (needs an addendum).
+    FileRestore { quarantined: S, path: S },
 }
 
-/// Whether and how a change can be undone.
+/// Whether and how a change can be undone. Variant order is part of the journal format.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum Reversibility<S> {
     /// The exact inverse is captured in the journal at apply time.
     Reversible,
@@ -161,6 +168,7 @@ impl<S> ChangeKind<S> {
             Self::MsiRegistrationDelete { .. } => "msi_registration_delete",
             Self::Native { .. } => "native",
             Self::ExternalProgram { .. } => "external_program",
+            Self::FileRestore { .. } => "file_restore",
         }
     }
 
@@ -226,6 +234,9 @@ impl<S> ChangeKind<S> {
             K::Native { api, args } => K::Native { api: f(api)?, args: f(args)? },
             K::ExternalProgram { command, kind } => {
                 K::ExternalProgram { command: f(command)?, kind }
+            }
+            K::FileRestore { quarantined, path } => {
+                K::FileRestore { quarantined: f(quarantined)?, path: f(path)? }
             }
         })
     }
@@ -562,8 +573,8 @@ mod tests {
 
         let doc = plan.to_doc().unwrap();
         let json = serde_json::to_string(&doc).unwrap();
-        assert!(json.contains(r#""kind":"reg_set""#));
-        assert!(json.contains(r#""type":"dword","data":0"#));
+        assert!(json.contains(r#""reg_set":{"#));
+        assert!(json.contains(r#""new":{"dword":0}"#));
         let back: PlanDoc = serde_json::from_str(&json).unwrap();
         assert_eq!(back, doc);
         let rebuilt = Plan::from_doc(back).unwrap();
