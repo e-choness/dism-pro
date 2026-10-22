@@ -6,6 +6,7 @@
 // xtask reports to the terminal.
 #![allow(clippy::print_stdout)]
 
+mod ffi_check;
 mod i18n;
 mod layering;
 mod manifest;
@@ -25,7 +26,8 @@ const USAGE: &str = "usage: cargo xtask <task>
   layering                     crate layering + unsafe rules (doc 02 §2)
   i18n-check [--release]       Fluent catalog consistency (ADR-0005)
   size --target <triple>...    exact binary-size budgets (doc 04 §2)
-  pe-compat --target <triple>...  WinPE DLL import allowlist (doc 04 §4)";
+  pe-compat --target <triple>...  WinPE DLL import allowlist (doc 04 §4)
+  ffi-check                    dpro-sys layouts/prototypes vs SDK/ADK headers (S-03)";
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -48,6 +50,7 @@ fn run(args: &[String]) -> Result<()> {
         "i18n-check" => i18n::run(&root, rest),
         "size" => size::run(&root, rest),
         "pe-compat" => pe_compat::run(&root, rest),
+        "ffi-check" => ffi_check::run(&root, rest),
         _ => Err(USAGE.into()),
     }
 }

@@ -57,6 +57,12 @@ services:
   build:
     <<: *t1
     entrypoint: ["bash", "/src/docker/task.sh", "build"]
+  ffi-check:
+    <<: *t1
+    entrypoint: ["bash", "/src/docker/task.sh", "ffi-check"]
+    environment:
+      # Extra header dirs inside the container, e.g. a bind-mounted ADK DismApi include dir.
+      DPRO_FFI_INCLUDE: ${DPRO_FFI_INCLUDE:-}
 
 volumes:
   target:
