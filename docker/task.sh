@@ -4,7 +4,7 @@
 # `docker compose run --rm <task> -- <args>` are appended; a leading `--` is dropped.
 set -euo pipefail
 
-task="${1:?usage: task.sh <fmt|lint|test|test-win|bench|deny|build|ffi-check> [args…]}"
+task="${1:?usage: task.sh <fmt|lint|test|test-win|bench|deny|build|ffi-check|lock> [args…]}"
 shift
 if [[ "${1:-}" == "--" ]]; then shift; fi
 
@@ -55,6 +55,10 @@ case "${task}" in
     for t in "${win_targets[@]}"; do size_args+=(--target "${t}"); done
     cargo xtask size "${size_args[@]}"
     cargo xtask pe-compat "${size_args[@]}"
+    ;;
+  lock)
+    # Resolves new dependencies into Cargo.lock (keeps existing pins). Commit the result.
+    exec cargo update --workspace "$@"
     ;;
   ffi-check)
     # S-03: dpro-sys bindings vs Microsoft headers. ADK headers via DPRO_FFI_INCLUDE.

@@ -57,6 +57,9 @@ services:
   build:
     <<: *t1
     entrypoint: ["bash", "/src/docker/task.sh", "build"]
+  lock:
+    <<: *t1
+    entrypoint: ["bash", "/src/docker/task.sh", "lock"]
   ffi-check:
     <<: *t1
     entrypoint: ["bash", "/src/docker/task.sh", "ffi-check"]
