@@ -13,6 +13,8 @@ use crate::job::Backend;
 
 /// `E_NOTIMPL`.
 const E_NOTIMPL: i32 = i32::from_ne_bytes(0x8000_4001_u32.to_ne_bytes());
+/// `E_INVALIDARG`.
+const E_INVALIDARG: i32 = i32::from_ne_bytes(0x8007_0057_u32.to_ne_bytes());
 
 #[derive(Debug)]
 pub struct DismBackend<'s, 'api> {
@@ -37,6 +39,13 @@ impl Backend for DismBackend<'_, '_> {
             }
             ChangeKind::FeatureState { name, enable: false, .. } => self.session.disable_feature(OsStr::new(name)),
             ChangeKind::PackageRemove { identity } => self.session.remove_package(OsStr::new(identity)),
+            ChangeKind::Native { api, args } if api == crate::health::RESTORE_API => {
+                let Some(a) = crate::health::RestoreArgs::decode(args) else {
+                    return Err(OsError { code: E_INVALIDARG, api: "DismBackend::apply" });
+                };
+                let sources: Vec<&Path> = a.sources.iter().map(std::path::PathBuf::as_path).collect();
+                self.session.restore_health(&sources, a.limit_access)
+            }
             _ => return Err(OsError { code: E_NOTIMPL, api: "DismBackend::apply" }),
         };
         result.map_err(|e| match e {

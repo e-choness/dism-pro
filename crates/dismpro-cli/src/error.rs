@@ -8,7 +8,6 @@ pub(crate) enum CliError {
     Usage(String),
     NeedsElevation,
     Unsupported,
-    NotImplemented(&'static str),
     UnknownName(String),
     Os(OsError, String),
     Journal(String),
@@ -20,9 +19,7 @@ impl CliError {
         match self {
             Self::Usage(_) => ExitCode::Usage,
             Self::NeedsElevation => ExitCode::NeedsElevation,
-            Self::Unsupported | Self::NotImplemented(_) | Self::UnknownName(_) | Self::Os(..) | Self::Journal(_) | Self::Io(_) => {
-                ExitCode::Failed
-            }
+            Self::Unsupported | Self::UnknownName(_) | Self::Os(..) | Self::Journal(_) | Self::Io(_) => ExitCode::Failed,
         }
     }
 
@@ -32,7 +29,6 @@ impl CliError {
             Self::Usage(_) => "cli-error-usage",
             Self::NeedsElevation => "cli-error-elevation",
             Self::Unsupported => "cli-error-unsupported",
-            Self::NotImplemented(_) => "cli-error-not-implemented",
             Self::UnknownName(_) | Self::Os(..) | Self::Journal(_) | Self::Io(_) => "cli-error",
         }
     }
@@ -48,7 +44,6 @@ impl CliError {
     pub(crate) fn detail(&self) -> String {
         match self {
             Self::Usage(m) | Self::UnknownName(m) | Self::Os(_, m) | Self::Journal(m) => m.clone(),
-            Self::NotImplemented(what) => (*what).to_owned(),
             Self::Io(e) => e.to_string(),
             Self::NeedsElevation | Self::Unsupported => String::new(),
         }

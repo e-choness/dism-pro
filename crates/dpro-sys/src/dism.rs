@@ -46,6 +46,11 @@ pub const DismStatePartiallyInstalled: DismPackageFeatureState = 7;
 
 pub type DismReleaseType = i32;
 
+pub type DismImageHealthState = i32;
+pub const DismImageHealthy: DismImageHealthState = 0;
+pub const DismImageRepairable: DismImageHealthState = 1;
+pub const DismImageNonRepairable: DismImageHealthState = 2;
+
 pub const DISM_MOUNT_READWRITE: u32 = 0x0000_0000;
 pub const DISM_MOUNT_READONLY: u32 = 0x0000_0001;
 pub const DISM_MOUNT_OPTIMIZE: u32 = 0x0000_0002;
@@ -150,6 +155,23 @@ unsafe extern "system" {
         Progress: DISM_PROGRESS_CALLBACK,
         UserData: PVOID,
     ) -> HRESULT;
+    pub fn DismCheckImageHealth(
+        Session: DismSession,
+        ScanImage: BOOL,
+        CancelEvent: HANDLE,
+        Progress: DISM_PROGRESS_CALLBACK,
+        UserData: PVOID,
+        ImageHealth: *mut DismImageHealthState,
+    ) -> HRESULT;
+    pub fn DismRestoreImageHealth(
+        Session: DismSession,
+        SourcePaths: *const PCWSTR,
+        SourcePathCount: UINT,
+        LimitAccess: BOOL,
+        CancelEvent: HANDLE,
+        Progress: DISM_PROGRESS_CALLBACK,
+        UserData: PVOID,
+    ) -> HRESULT;
     pub fn DismUnmountImage(
         MountPath: PCWSTR,
         Flags: DWORD,
@@ -190,6 +212,14 @@ pub const C_PROTOTYPES: &[(&str, &str)] = &[
     (
         "DismRemovePackage",
         "HRESULT (WINAPI *)(DismSession, PCWSTR, DismPackageIdentifier, HANDLE, DISM_PROGRESS_CALLBACK, PVOID)",
+    ),
+    (
+        "DismCheckImageHealth",
+        "HRESULT (WINAPI *)(DismSession, BOOL, HANDLE, DISM_PROGRESS_CALLBACK, PVOID, DismImageHealthState *)",
+    ),
+    (
+        "DismRestoreImageHealth",
+        "HRESULT (WINAPI *)(DismSession, PCWSTR *, UINT, BOOL, HANDLE, DISM_PROGRESS_CALLBACK, PVOID)",
     ),
     (
         "DismUnmountImage",

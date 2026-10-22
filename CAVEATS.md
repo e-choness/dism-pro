@@ -113,3 +113,18 @@ it's empty.
 - [ ] Table widths count `char`s, so CJK/emoji columns misalign.
 - [ ] `schemas/*.v1.json` are hand-written and not yet validated against real output.
 - [ ] `winpe-dlls.txt` gained `advapi32.dll` and `dismapi.dll` (verify).
+
+## 10. Health & Repair (2.6) — `dpro-core::health`, `dpro-engine::health`, CLI `health`/`reboot-reasons`
+- [ ] `DismCheckImageHealth`/`DismRestoreImageHealth` bindings and `DismImageHealthState` values are from memory
+      (ffi-check gates them); no progress callback or cancel event.
+- [ ] CBS.log line shape, the HRESULT markers (`HRESULT = 0x`, `hr = 0x`, `hr: 0x`), the decode table
+      (0x800F081F, 0x800F0906, 0x800F0907, 0x800F0831, 0x80073712, 0x80070005) and the "Payload Corrupt"
+      pattern all need checking against real logs / Microsoft Learn.
+- [ ] Findings come from the CBS.log bytes written during the check; line numbers are relative to that
+      offset. Rotated logs (`CbsPersist_*.cab`) and DISM.log aren't read. CBS.log is decoded as UTF-8 (lossy).
+- [ ] Reboot-reason registry paths (TD-0006 §3 table) are the community-known list (verify in T3);
+      `PendingFileRenameOperations` count = entries/2.
+- [ ] `health restore` encodes its arguments as lines in `Native.args`; the op title doubles as the
+      Windows Update note. SFC isn't wired yet (TD-0006 §12.2 accepted it as an `ExternalProgram` change).
+- [ ] Not yet: auto-check on page open (GUI), MCP exposure, `xtask perf health-check`, iai-callgrind for the
+      parser, fuzz targets `cbs_line`/`cbs_file`, fixture logs under `tests/fixtures/cbs/`.

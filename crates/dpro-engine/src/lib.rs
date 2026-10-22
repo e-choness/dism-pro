@@ -10,6 +10,7 @@ mod crc32c;
 pub mod discover;
 #[cfg(windows)]
 pub mod dism_backend;
+pub mod health;
 pub mod identity;
 pub mod job;
 pub mod journal;

@@ -7,6 +7,7 @@
 
 pub mod cancel;
 pub mod error;
+pub mod health;
 pub mod id;
 pub mod intern;
 pub mod plan;

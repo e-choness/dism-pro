@@ -44,6 +44,7 @@ pub const DISMAPI: Header = Header {
         scalar("DismPackageIdentifier", size_of::<dism::DismPackageIdentifier>()),
         scalar("DismPackageFeatureState", size_of::<dism::DismPackageFeatureState>()),
         scalar("DismReleaseType", size_of::<dism::DismReleaseType>()),
+        scalar("DismImageHealthState", size_of::<dism::DismImageHealthState>()),
         Layout {
             c_type: "DismString",
             size: size_of::<dism::DismString>(),

@@ -211,6 +211,45 @@ impl Session<'_> {
         check(hr, "DismDisableFeature")
     }
 
+    /// `DismCheckImageHealth`: `scan = false` is the quick check, `true` the full scan.
+    /// Read-only; returns the raw `DismImageHealthState`.
+    ///
+    /// # Errors
+    /// The `HRESULT` with DISM's error message.
+    pub fn check_health(&self, scan: bool) -> Result<i32> {
+        let mut state = dism::DismImageHealthy;
+        // SAFETY: `self.id` is open; `state` is a valid out pointer; no cancel event/callback.
+        let hr = unsafe {
+            dism::DismCheckImageHealth(self.id, i32::from(scan), ptr::null_mut(), None, ptr::null_mut(), &mut state)
+        };
+        check(hr, "DismCheckImageHealth")?;
+        Ok(state)
+    }
+
+    /// `DismRestoreImageHealth` with optional repair sources.
+    ///
+    /// # Errors
+    /// The `HRESULT` with DISM's error message.
+    pub fn restore_health(&self, sources: &[&Path], limit_access: bool) -> Result<()> {
+        let sources: Vec<WideCString> = sources.iter().map(|p| WideCString::new(long_path(p))).collect::<Result<_>>()?;
+        let ptrs: Vec<*const u16> = sources.iter().map(WideCString::as_ptr).collect();
+        let count = u32::try_from(ptrs.len()).unwrap_or(u32::MAX);
+        let arg = if ptrs.is_empty() { ptr::null() } else { ptrs.as_ptr() };
+        // SAFETY: `arg` points to `count` NUL-terminated strings that outlive the call (or is null).
+        let hr = unsafe {
+            dism::DismRestoreImageHealth(
+                self.id,
+                arg,
+                count,
+                i32::from(limit_access),
+                ptr::null_mut(),
+                None,
+                ptr::null_mut(),
+            )
+        };
+        check(hr, "DismRestoreImageHealth")
+    }
+
     /// `DismRemovePackage` by package identity name.
     ///
     /// # Errors

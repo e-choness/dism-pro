@@ -79,6 +79,35 @@ pub(crate) struct OsJson {
     pub(crate) api: &'static str,
 }
 
+#[derive(Debug, Serialize)]
+pub(crate) struct HealthDoc {
+    pub(crate) schema: &'static str,
+    /// `healthy`, `repairable`, `non-repairable`.
+    pub(crate) state: dpro_core::health::ImageHealth,
+    pub(crate) scanned: bool,
+    pub(crate) findings: Vec<FindingJson>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct FindingJson {
+    pub(crate) severity: dpro_core::health::Severity,
+    pub(crate) diagnosis: &'static str,
+    pub(crate) message: String,
+    pub(crate) code: Option<String>,
+    pub(crate) log: dpro_core::health::LogFile,
+    /// Relative to where the log was when the check started.
+    pub(crate) first_line: u64,
+    pub(crate) last_line: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct RebootDoc {
+    pub(crate) schema: &'static str,
+    pub(crate) pending: bool,
+    pub(crate) reasons: Vec<dpro_core::health::RebootReason>,
+    pub(crate) messages: Vec<String>,
+}
+
 /// `0x80070005` form for HRESULTs in JSON.
 pub(crate) fn hresult(code: i32) -> String {
     format!("{:#010x}", u32::from_ne_bytes(code.to_ne_bytes()))

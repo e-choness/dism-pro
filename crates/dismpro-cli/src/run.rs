@@ -14,6 +14,11 @@ use dpro_core::{
 };
 use dpro_engine::{
     discover::{self, WindowsSystem},
+    health::{
+        self,
+        logs,
+        reboot::{self as reboot_mod, RealFiles},
+    },
     dism_backend::DismBackend,
     identity,
     job::{self, MonotonicClock, RunConfig},
@@ -30,16 +35,17 @@ use dpro_win::{
 use crate::{
     args::{Cli, Command, TargetSel},
     error::CliError,
-    json::{FeatureJson, FeaturesDoc, PackageJson, PackagesDoc, TargetJson, TargetsDoc, state_name},
+    json::{
+        FeatureJson, FeaturesDoc, FindingJson, HealthDoc, PackageJson, PackagesDoc, RebootDoc, TargetJson, TargetsDoc,
+        hresult, state_name,
+    },
     out::{self, Confirm, Decision},
 };
 
 pub(crate) fn run(cli: &Cli, m: &Messages) -> Result<ExitCode, CliError> {
     match &cli.command {
         Command::TargetsList => targets(cli, m),
-        Command::Health { .. } | Command::HealthRestore | Command::RebootReasons => {
-            Err(CliError::NotImplemented("health commands"))
-        }
+        Command::RebootReasons => reboot_reasons(cli, m),
         Command::Help | Command::Version | Command::JournalShow(_) => Ok(ExitCode::Ok),
         dism_command => {
             if !privilege::is_elevated()? {
@@ -67,6 +73,11 @@ pub(crate) fn run(cli: &Cli, m: &Messages) -> Result<ExitCode, CliError> {
                     ctx.apply(ops::plan_package_removal(target_id, os_build, &current, ids)?)
                 }
                 Command::JournalUndo(path) => ctx.undo(path),
+                Command::Health { scan } => ctx.health(*scan),
+                Command::HealthRestore => {
+                    let args = health::RestoreArgs { sources: cli.global.sources.clone(), limit_access: cli.global.limit_access };
+                    ctx.apply(health::plan_restore(target_id, os_build, &args)?)
+                }
                 _ => Ok(ExitCode::Ok),
             }
         }
@@ -103,6 +114,37 @@ fn targets(cli: &Cli, m: &Messages) -> Result<ExitCode, CliError> {
             t.push(vec![r.selector, r.kind.to_owned(), r.windows_dir]);
         }
         print!("{}", table::render(&t, out::width()));
+    }
+    Ok(ExitCode::Ok)
+}
+
+/// `reboot-reasons` (TD-0006 F-16). Online needs no elevation; offline hives do.
+fn reboot_reasons(cli: &Cli, m: &Messages) -> Result<ExitCode, CliError> {
+    let target = Resolved::new(&cli.global.target)?;
+    let reasons = match &target.image_root {
+        None => reboot_mod::reboot_reasons(&OnlineRegistry::open()?, &RealFiles, &target.windows_dir),
+        Some(_) => {
+            if !privilege::is_elevated()? {
+                return Err(CliError::NeedsElevation);
+            }
+            reboot_mod::reboot_reasons(&OfflineRegistry::load(&target.windows_dir)?, &RealFiles, &target.windows_dir)
+        }
+    };
+    let messages: Vec<String> = reasons
+        .iter()
+        .map(|r| match r {
+            dpro_core::health::RebootReason::FileRename { count } => m.get(r.message_id(), &[("count", count)]),
+            _ => m.text(r.message_id()),
+        })
+        .collect();
+    if cli.global.json {
+        out::print_json(&RebootDoc { schema: "reboot-reasons.v1", pending: !reasons.is_empty(), reasons, messages })?;
+    } else if messages.is_empty() {
+        println!("{}", m.text("reboot-none"));
+    } else {
+        for line in messages {
+            println!("- {line}");
+        }
     }
     Ok(ExitCode::Ok)
 }
@@ -233,6 +275,72 @@ impl Ctx<'_, '_, '_> {
                 t.push(vec![r.name, m.text(&format!("state-{}", r.state))]);
             }
             print!("{}", table::render(&t, out::width()));
+        }
+        Ok(ExitCode::Ok)
+    }
+
+    /// `health check|scan` (TD-0006 §5.2): read-only, so no plan. Findings come from the part
+    /// of CBS.log written during the check.
+    fn health(&self, scan: bool) -> Result<ExitCode, CliError> {
+        let log = self.target.windows_dir.join("Logs").join("CBS").join("CBS.log");
+        let start = fs::metadata(&log).map_or(0, |md| md.len());
+        let state = health::image_health(self.session.check_health(scan)?);
+        let findings = match File::open(&log) {
+            Ok(mut f) => {
+                use std::io::{Seek, SeekFrom};
+                // A rotated log is shorter than `start`: read it from the beginning.
+                let len = f.metadata().map_or(0, |md| md.len());
+                f.seek(SeekFrom::Start(if len >= start { start } else { 0 }))?;
+                logs::scan(std::io::BufReader::new(f), dpro_core::health::LogFile::Cbs)?
+            }
+            Err(_) => Vec::new(),
+        };
+        let m = self.m;
+        let state_id = match state {
+            dpro_core::health::ImageHealth::Healthy => "health-state-healthy",
+            dpro_core::health::ImageHealth::Repairable => "health-state-repairable",
+            dpro_core::health::ImageHealth::NonRepairable => "health-state-non-repairable",
+        };
+        let rows: Vec<FindingJson> = findings
+            .iter()
+            .map(|f| FindingJson {
+                severity: f.severity,
+                diagnosis: f.diagnosis,
+                message: m.text(f.diagnosis),
+                code: f.code.map(|c| hresult(c.code)),
+                log: f.source.file,
+                first_line: f.source.first_line,
+                last_line: f.source.last_line,
+            })
+            .collect();
+        if self.cli.global.json {
+            out::print_json(&HealthDoc { schema: "health.v1", state, scanned: scan, findings: rows })?;
+        } else {
+            println!("{}", m.text(state_id));
+            if !rows.is_empty() {
+                let mut t = table::Table::new(&[
+                    (m.text("col-severity"), false),
+                    (m.text("col-finding"), false),
+                    (m.text("col-lines"), true),
+                ]);
+                for r in rows {
+                    let severity = match r.severity {
+                        dpro_core::health::Severity::Info => "severity-info",
+                        dpro_core::health::Severity::Warning => "severity-warning",
+                        dpro_core::health::Severity::Error => "severity-error",
+                    };
+                    let message = match r.code {
+                        Some(code) => format!("{} ({code})", r.message),
+                        None => r.message,
+                    };
+                    t.push(vec![m.text(severity), message, format!("{}-{}", r.first_line, r.last_line)]);
+                }
+                println!();
+                print!("{}", table::render(&t, out::width()));
+            }
+            if state == dpro_core::health::ImageHealth::NonRepairable {
+                println!("{}", m.text("health-next-source"));
+            }
         }
         Ok(ExitCode::Ok)
     }
