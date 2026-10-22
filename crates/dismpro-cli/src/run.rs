@@ -46,6 +46,7 @@ pub(crate) fn run(cli: &Cli, m: &Messages) -> Result<ExitCode, CliError> {
     match &cli.command {
         Command::TargetsList => targets(cli, m),
         Command::RebootReasons => reboot_reasons(cli, m),
+        Command::Purge => purge(cli, m),
         Command::Help | Command::Version | Command::JournalShow(_) => Ok(ExitCode::Ok),
         dism_command => {
             if !privilege::is_elevated()? {
@@ -147,6 +148,51 @@ fn reboot_reasons(cli: &Cli, m: &Messages) -> Result<ExitCode, CliError> {
         }
     }
     Ok(ExitCode::Ok)
+}
+
+/// `purge` (roadmap 2.8): delete every file DISM Pro created on the target's volume. The plan is
+/// irreversible, so it needs `--yes --allow-irreversible` or typing the count.
+fn purge(cli: &Cli, m: &Messages) -> Result<ExitCode, CliError> {
+    if !privilege::is_elevated()? {
+        return Err(CliError::NeedsElevation);
+    }
+    let target = Resolved::new(&cli.global.target)?;
+    let (target_id, os_build) = target.identity();
+    let plan = dpro_engine::purge::plan_purge(target_id, os_build, &target.volume_root)
+        .map_err(|e| CliError::Journal(e.to_string()))?;
+    let doc = plan.to_doc()?;
+    let g = &cli.global;
+    if g.json {
+        out::print_json(&doc)?;
+    } else {
+        print!("{}", render_plan(&doc, m, out::width()));
+    }
+    let confirm =
+        Confirm { dry_run: g.dry_run, yes: g.yes, allow_irreversible: g.allow_irreversible, interactive: !g.json && out::stdin_is_console() };
+    match out::decide(confirm, plan.summary().changes, plan.summary().irreversible, out::ask, m) {
+        Decision::Apply => {}
+        Decision::Stop(ExitCode::ConfirmationRequired) => {
+            eprintln!("{}", m.text("cli-confirmation-required"));
+            return Ok(ExitCode::ConfirmationRequired);
+        }
+        Decision::Stop(code) => return Ok(code),
+    }
+    let begin = Begin { job: paths::new_job_id(), target: target_id, os_build, created: paths::now() };
+    // In-memory journal: a journal file would recreate the state being purged.
+    let writer = JournalWriter::create(Vec::new(), &begin)?;
+    let (result, _) = job::run(
+        &doc.changes,
+        &mut dpro_engine::purge::FsBackend,
+        writer,
+        &CancelToken::new(),
+        &MonotonicClock::new(),
+        RunConfig::default(),
+    )?;
+    for dir in dpro_engine::purge::owned_dirs(&target.volume_root) {
+        dpro_engine::purge::remove_empty_dirs(&dir);
+    }
+    println!("{}", m.get("cli-applied", &[("applied", &result.applied), ("count", &plan.summary().changes)]));
+    Ok(out::job_exit(result.status, result.applied, result.failed))
 }
 
 /// A `--target` resolved to concrete paths.

@@ -61,6 +61,7 @@ pub(crate) enum Command {
     RebootReasons,
     JournalShow(PathBuf),
     JournalUndo(PathBuf),
+    Purge,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -164,6 +165,7 @@ fn command(words: &[String]) -> Result<Command, UsageError> {
         ["reboot-reasons"] => Command::RebootReasons,
         ["journal", "show", file] => Command::JournalShow(PathBuf::from(file)),
         ["journal", "undo", file] => Command::JournalUndo(PathBuf::from(file)),
+        ["purge"] => Command::Purge,
         _ => return Err(UsageError(format!("unknown command {:?}", words.join(" ")))),
     })
 }
@@ -193,6 +195,7 @@ mod tests {
             ("reboot-reasons", Command::RebootReasons),
             ("journal show j.dpj", Command::JournalShow("j.dpj".into())),
             ("journal undo j.dpj", Command::JournalUndo("j.dpj".into())),
+            ("purge", Command::Purge),
         ];
         for (args, expected) in cases {
             assert_eq!(&p(args).unwrap().command, expected, "{args}");

@@ -128,3 +128,12 @@ it's empty.
       Windows Update note. SFC isn't wired yet (TD-0006 §12.2 accepted it as an `ExternalProgram` change).
 - [ ] Not yet: auto-check on page open (GUI), MCP exposure, `xtask perf health-check`, iai-callgrind for the
       parser, fuzz targets `cbs_line`/`cbs_file`, fixture logs under `tests/fixtures/cbs/`.
+
+## 11. Purge (2.8) — `dpro-engine::purge`, CLI `purge`
+- [ ] The purge job's journal is in memory only (writing one would recreate the purged state): a deliberate
+      TD-0001 deviation for this one command.
+- [ ] Folder walk uses `symlink_metadata` and never follows links; NTFS junctions/mount points should be
+      reported as links by std on Windows (verify in T3).
+- [ ] Empty folders are removed after the job without journaling (best effort).
+- [ ] Only the target volume is purged; state on other volumes (offline installs' own journals) needs one
+      `purge --target X:` per volume.

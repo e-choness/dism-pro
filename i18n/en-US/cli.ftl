@@ -12,6 +12,7 @@ cli-help =
       health restore [--source <path>] Plan or apply a component store repair
       reboot-reasons                   Explain why a reboot is pending
       journal show|undo <file>         Inspect or undo a journaled job
+      purge                            Remove all DISM Pro data from the target volume
     Options:
       --target <online|D:|path>        Target to service (default: online)
       --json                           Machine-readable output (schemas/*.v1.json)
@@ -121,3 +122,4 @@ reboot-reason-update-exe = An update installer asked for a restart.
 severity-info = Info
 severity-warning = Warning
 severity-error = Error
+op-purge = Remove all DISM Pro data from this volume
