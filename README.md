@@ -12,7 +12,7 @@ and an MCP server so AI agents can plan changes that a human approves.
 
 Licensed under [Apache-2.0](LICENSE). Not affiliated with Microsoft or Chuyu Team.
 
-> Status: **Phase 0 complete (2026-10-15); Phase 1 (toolchain & spikes) next.** No code yet. See [docs/03-roadmap.md](docs/03-roadmap.md).
+> Status: **early development.** Toolchain, CI, build gates and the first core/engine crates (plan model, write-ahead journal, undo) are written; spikes and the Windows layers are next. Nothing is usable yet.
 
 - Written in Rust ([ADR-0001](docs/adr/0001-language-rust.md))
 - Built, tested and benchmarked **only in Docker** ([ADR-0003](docs/adr/0003-docker-only-toolchain.md))
