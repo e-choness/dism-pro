@@ -58,17 +58,17 @@ fn within(size: Bytes, budget: Bytes) -> bool {
     size <= budget
 }
 
-fn parse_targets(args: &[String]) -> Result<Vec<String>> {
+pub(crate) fn parse_targets(args: &[String]) -> Result<Vec<String>> {
     let mut targets = Vec::new();
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match (arg.as_str(), it.next()) {
             ("--target", Some(t)) => targets.push(t.clone()),
-            _ => return Err(format!("size: unexpected argument {arg:?}").into()),
+            _ => return Err(format!("unexpected argument {arg:?}").into()),
         }
     }
     if targets.is_empty() {
-        return Err("size: pass at least one --target <triple>".into());
+        return Err("pass at least one --target <triple>".into());
     }
     Ok(targets)
 }

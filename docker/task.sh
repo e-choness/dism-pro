@@ -54,6 +54,7 @@ case "${task}" in
     size_args=()
     for t in "${win_targets[@]}"; do size_args+=(--target "${t}"); done
     cargo xtask size "${size_args[@]}"
+    cargo xtask pe-compat "${size_args[@]}"
     ;;
   *)
     echo "unknown task: ${task}" >&2

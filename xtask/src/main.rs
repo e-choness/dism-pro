@@ -9,6 +9,8 @@
 mod i18n;
 mod layering;
 mod manifest;
+mod pe;
+mod pe_compat;
 mod size;
 
 use std::{
@@ -22,7 +24,8 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 const USAGE: &str = "usage: cargo xtask <task>
   layering                     crate layering + unsafe rules (doc 02 §2)
   i18n-check [--release]       Fluent catalog consistency (ADR-0005)
-  size --target <triple>...    exact binary-size budgets (doc 04 §2)";
+  size --target <triple>...    exact binary-size budgets (doc 04 §2)
+  pe-compat --target <triple>...  WinPE DLL import allowlist (doc 04 §4)";
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -44,6 +47,7 @@ fn run(args: &[String]) -> Result<()> {
         "layering" => layering::run(&root),
         "i18n-check" => i18n::run(&root, rest),
         "size" => size::run(&root, rest),
+        "pe-compat" => pe_compat::run(&root, rest),
         _ => Err(USAGE.into()),
     }
 }
