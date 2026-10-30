@@ -42,7 +42,10 @@ pub(crate) fn run(root: &Path, args: &[String]) -> Result<()> {
         let file = out_dir.join(format!("{header}.c"));
         fs::write(&file, source)?;
         for target in TARGETS {
-            let out = Command::new("clang-cl")
+            // `clang --driver-mode=cl` is clang-cl; the image has no clang-cl link (cargo-xwin
+            // creates one only inside its own runs).
+            let out = Command::new("clang")
+                .arg("--driver-mode=cl")
                 .args(["/nologo", "/Zs", "/TC", "-Wno-unused-command-line-argument"])
                 .arg(format!("--target={target}"))
                 .args(
@@ -51,7 +54,8 @@ pub(crate) fn run(root: &Path, args: &[String]) -> Result<()> {
                         .flat_map(|d| [PathBuf::from("/imsvc"), d.clone()]),
                 )
                 .arg(&file)
-                .output()?;
+                .output()
+                .map_err(|e| format!("running clang: {e}"))?;
             let diagnostics = format!(
                 "{}{}",
                 String::from_utf8_lossy(&out.stdout),
@@ -116,7 +120,8 @@ fn generate(header: &str) -> Result<String> {
         ])
         .arg("--")
         .arg(header)
-        .output()?;
+        .output()
+        .map_err(|e| format!("running cargo: {e}"))?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         return Err(format!("generating {header}.c failed: {err}").into());
