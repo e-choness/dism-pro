@@ -1,23 +1,18 @@
 <#
-Diagnoses the T3 offline smoke failure (run 41134716846), second pass. The first pass (run
-41137875399) ruled out dirty hives: the servercore layer's hives are clean with no logs, yet
-RegLoadAppKeyW fails with ERROR_BADDB on copies (read or write access) while DISM.exe services the
-image; and dismpro-cli's DismOpenSession fails with 0x80070032 ("requires the latest DISM") while
-DISM.exe opens the same path.
+Diagnoses the T3 offline smoke failure (run 41134716846), third pass. Passes 1 and 2 found:
+- the servercore layer's hives are clean; RegLoadAppKeyW fails on its SYSTEM, DRIVERS and DEFAULT
+  with ERROR_BADDB, but loads a hive saved from HKCU (with or without mixed security descriptors)
+  and C:\Users\Default\NTUSER.DAT, so "one security descriptor per app hive" isn't the cause;
+- offreg.dll reads the image's hives without changing them; RegLoadKeyW reads them but rewrites the
+  file (sequence numbers, size, logs);
+- the DISM PowerShell module opens the image; dismpro-cli's DismOpenSession doesn't (pass 2's
+  annotation was cut at ~4 KB before the CLI's results).
 
-Hypotheses tested here:
-1. RegLoadAppKeyW refuses hives whose keys don't all share one security descriptor (its docs say
-   so), i.e. every real system hive. Test hives saved from HKCU with uniform vs mixed security,
-   the image's hives, and the Default profile's NTUSER.DAT (TD-0015 loads other profiles' hives).
-2. What can read an offline system hive instead, and does it change the file: the Offline
-   Registry Library (offreg.dll), RegLoadKeyW, NtLoadKeyEx with REG_OPEN_READ_ONLY.
-3. DismOpenSession: dismpro-cli has no application manifest, so the OS reports itself as
-   Windows 8 to it; DISM may then judge a Windows 10+ image newer than the host. Test: the DISM
-   PowerShell module (a manifested host), the CLI as built, the CLI with a side-by-side manifest,
-   and the DISM log lines each run adds.
-
-Everything runs on copies except section 3, which opens the image. One annotation. Throwaway
-(branch diag/t3-hives).
+This pass: (1) dismpro-cli with and without a side-by-side manifest, with the DISM log lines that
+show the host version DISM sees; (2) RegLoadAppKeyW on VSS copies of the runner's live hives (what
+an offline installation looks like); (3) the anatomy of each hive (base block, cell kinds, key
+flags, layered-key bits, symbolic links) to find what the failing hives have in common. One small
+annotation per section. Throwaway (branch diag/t3-hives).
 #>
 param(
     [Parameter(Mandatory)] [string] $Cli,
@@ -31,23 +26,28 @@ $Image = (Resolve-Path $Image).Path
 $config = Join-Path $Image 'Windows\System32\config'
 $work = Join-Path $env:RUNNER_TEMP 't3-diag'
 $null = New-Item -ItemType Directory -Force $work
-$lines = [Collections.Generic.List[string]]::new()
-function Note([string] $Text) { Write-Host $Text; $lines.Add($Text) }
+
+function Format-Annotation([string] $Text) { $Text.Replace('%', '%25').Replace("`r", '').Replace("`n", '%0A') }
+
+function Publish([string] $Title, [string[]] $Lines) {
+    $text = ($Lines -join "`n").TrimEnd()
+    Write-Host $text
+    "## $Title`n`n$text`n" | Add-Content $env:GITHUB_STEP_SUMMARY
+    $t = (Format-Annotation $Title).Replace(':', '%3A').Replace(',', '%2C')
+    Write-Host "::notice title=$t::$(Format-Annotation $text)"
+}
 
 Add-Type -TypeDefinition @'
 using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 
 public static class Hive {
-    static readonly IntPtr HKLM = new IntPtr(unchecked((int)0x80000002));
-
     [DllImport("advapi32.dll", CharSet = CharSet.Unicode)]
     static extern int RegLoadAppKeyW(string file, out IntPtr key, int sam, int options, int reserved);
-    [DllImport("advapi32.dll", CharSet = CharSet.Unicode)]
-    static extern int RegLoadKeyW(IntPtr key, string subKey, string file);
-    [DllImport("advapi32.dll", CharSet = CharSet.Unicode)]
-    static extern int RegUnLoadKeyW(IntPtr key, string subKey);
     [DllImport("advapi32.dll")] static extern int RegCloseKey(IntPtr key);
 
     // The Win32 status of loading `file` as a read-only app hive.
@@ -58,116 +58,77 @@ public static class Hive {
         return status;
     }
 
-    [DllImport("ntdll.dll")]
-    static extern int RtlAdjustPrivilege(int privilege, [MarshalAs(UnmanagedType.U1)] bool enable,
-        [MarshalAs(UnmanagedType.U1)] bool thread, [MarshalAs(UnmanagedType.U1)] out bool was);
-
-    // SeBackupPrivilege (17) and SeRestorePrivilege (18), needed to load hives under HKLM.
-    public static string Privileges() {
-        bool was;
-        return RtlAdjustPrivilege(17, true, false, out was) + "/" + RtlAdjustPrivilege(18, true, false, out was);
+    static string Count(SortedDictionary<int, int> d, string format) {
+        return d.Count == 0 ? "none" : string.Join(" ", d.Select(p => p.Key.ToString(format) + ":" + p.Value));
     }
 
-    public static int Load(string mount, string file) { return RegLoadKeyW(HKLM, mount, file); }
-    public static int Unload(string mount) { return RegUnLoadKeyW(HKLM, mount); }
-
-    [StructLayout(LayoutKind.Sequential)]
-    struct UnicodeString { public ushort Length; public ushort MaximumLength; public IntPtr Buffer; }
-    [StructLayout(LayoutKind.Sequential)]
-    struct ObjectAttributes {
-        public int Length; public IntPtr Root; public IntPtr Name; public uint Attributes;
-        public IntPtr Sd; public IntPtr Qos;
-    }
-    [DllImport("ntdll.dll")]
-    static extern int NtLoadKeyEx(ref ObjectAttributes target, ref ObjectAttributes source, uint flags,
-        IntPtr trustClassKey, IntPtr evt, uint access, out IntPtr root, IntPtr ioStatus);
-    [DllImport("ntdll.dll")] static extern int NtClose(IntPtr handle);
-
-    // Leaks a few bytes per call; this is a throwaway diagnosis.
-    static ObjectAttributes Attributes(string name) {
-        UnicodeString u = new UnicodeString {
-            Length = (ushort)(name.Length * 2), MaximumLength = (ushort)(name.Length * 2 + 2),
-            Buffer = Marshal.StringToHGlobalUni(name)
-        };
-        IntPtr p = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(UnicodeString)));
-        Marshal.StructureToPtr(u, p, false);
-        // OBJ_CASE_INSENSITIVE
-        return new ObjectAttributes { Length = Marshal.SizeOf(typeof(ObjectAttributes)), Name = p, Attributes = 0x40 };
+    static void Add(SortedDictionary<int, int> d, int key) {
+        int n;
+        d[key] = d.TryGetValue(key, out n) ? n + 1 : 1;
     }
 
-    // NtLoadKeyEx of `file` at HKLM\<mount> with `flags`; the NTSTATUS.
-    public static int NtLoad(string mount, string file, uint flags) {
-        ObjectAttributes target = Attributes(@"\Registry\Machine\" + mount);
-        ObjectAttributes source = Attributes(@"\??\" + file);
-        IntPtr root;
-        int status = NtLoadKeyEx(ref target, ref source, flags, IntPtr.Zero, IntPtr.Zero, 0, out root, IntPtr.Zero);
-        if (status >= 0 && root != IntPtr.Zero) NtClose(root);
-        return status;
-    }
-
-    [DllImport("offreg.dll", CharSet = CharSet.Unicode)] static extern int OROpenHive(string path, out IntPtr hive);
-    [DllImport("offreg.dll")] static extern int ORCloseHive(IntPtr hive);
-    [DllImport("offreg.dll", CharSet = CharSet.Unicode)]
-    static extern int ORGetValue(IntPtr key, string subKey, string value, out int type, byte[] data, ref int size);
-
-    // Opens `file` with the Offline Registry Library and reads `subKey`\`value` from it.
-    public static string Offreg(string file, string subKey, string value) {
-        IntPtr hive;
-        int status = OROpenHive(file, out hive);
-        if (status != 0) return "OROpenHive " + status;
-        try {
-            byte[] data = new byte[1024];
-            int size = data.Length, type;
-            status = ORGetValue(hive, subKey, value, out type, data, ref size);
-            if (status != 0) return "ORGetValue " + status;
-            if (type == 1 || type == 2) return Encoding.Unicode.GetString(data, 0, size).TrimEnd('\0');
-            if (type == 4) return BitConverter.ToUInt32(data, 0).ToString();
-            return "type " + type + ", " + size + " B";
-        } finally { ORCloseHive(hive); }
-    }
-
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    static extern IntPtr LoadLibraryExW(string file, IntPtr reserved, int flags);
-    [DllImport("kernel32.dll")] static extern IntPtr FindResourceW(IntPtr module, IntPtr name, IntPtr type);
-    [DllImport("kernel32.dll")] static extern bool FreeLibrary(IntPtr module);
-
-    // Whether `exe` embeds an application manifest (RT_MANIFEST 24, id 1).
-    public static bool HasManifest(string exe) {
-        // LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_IMAGE_RESOURCE
-        IntPtr m = LoadLibraryExW(exe, IntPtr.Zero, 0x2 | 0x20);
-        if (m == IntPtr.Zero) return false;
-        try { return FindResourceW(m, new IntPtr(1), new IntPtr(24)) != IntPtr.Zero; } finally { FreeLibrary(m); }
+    // Base block fields and the cells a regf file uses (layout: the public regf specification).
+    public static string Anatomy(string path) {
+        byte[] f = File.ReadAllBytes(path);
+        if (f.Length < 0x1000 || Encoding.ASCII.GetString(f, 0, 4) != "regf") return "not regf";
+        uint sum = 0;
+        for (int i = 0; i < 0x1FC; i += 4) sum ^= BitConverter.ToUInt32(f, i);
+        bool checksum = sum == BitConverter.ToUInt32(f, 0x1FC);
+        var nkFlags = new SortedDictionary<int, int>();
+        var layer = new SortedDictionary<int, int>();
+        var valueTypes = new SortedDictionary<int, int>();
+        int nk = 0, vk = 0, sk = 0, db = 0, other = 0;
+        long end = Math.Min(f.Length, 0x1000L + BitConverter.ToUInt32(f, 0x28));
+        long bin = 0x1000;
+        string error = "";
+        while (bin + 0x20 <= end) {
+            if (Encoding.ASCII.GetString(f, (int)bin, 4) != "hbin") { error = " BAD hbin @" + bin.ToString("x"); break; }
+            uint size = BitConverter.ToUInt32(f, (int)bin + 8);
+            if (size < 0x1000 || bin + size > f.Length) { error = " BAD hbin size @" + bin.ToString("x"); break; }
+            long c = bin + 0x20;
+            while (c + 8 <= bin + size) {
+                int cs = BitConverter.ToInt32(f, (int)c);
+                if (cs == 0) break;
+                long len = Math.Abs((long)cs);
+                if (cs < 0) {
+                    string sig = Encoding.ASCII.GetString(f, (int)c + 4, 2);
+                    if (sig == "nk" && c + 4 + 0x4C <= bin + size) {
+                        nk++;
+                        int flags = BitConverter.ToUInt16(f, (int)c + 6);
+                        for (int b = 0; b < 16; b++) if ((flags & (1 << b)) != 0) Add(nkFlags, 1 << b);
+                        int bits = f[c + 4 + 0x0D];
+                        if (bits != 0) Add(layer, bits);
+                    } else if (sig == "vk" && c + 4 + 0x14 <= bin + size) {
+                        vk++;
+                        int type = BitConverter.ToInt32(f, (int)c + 4 + 0x0C);
+                        if (type < 0 || type > 11) Add(valueTypes, type);
+                        else if (type == 6) Add(valueTypes, 6);
+                    } else if (sig == "sk") sk++;
+                    else if (sig == "db") db++;
+                    else other++;
+                }
+                c += len;
+            }
+            bin += size;
+        }
+        return string.Format(
+            "v{0}.{1} type {2} format {3} flags@0x90 {4:x} boot {5}/{6} checksum {7}; nk {8} vk {9} sk {10} db {11} other {12}; " +
+            "nk flags {13}; layered-key byte {14}; unusual value types {15}{16}",
+            BitConverter.ToUInt32(f, 0x14), BitConverter.ToUInt32(f, 0x18), BitConverter.ToUInt32(f, 0x1C),
+            BitConverter.ToUInt32(f, 0x20), BitConverter.ToUInt32(f, 0x90), BitConverter.ToUInt32(f, 0xFF8),
+            BitConverter.ToUInt32(f, 0xFFC), checksum ? "ok" : "BAD", nk, vk, sk, db, other,
+            Count(nkFlags, "x"), Count(layer, "x"), Count(valueTypes, "d"), error);
     }
 }
 '@
 
-# regf base block: sequence numbers at 4 and 8 differ while a write is incomplete (dirty).
-function Get-HiveState([string] $Path) {
-    if (-not (Test-Path $Path)) { return 'missing' }
-    $b = [byte[]]::new(512)
-    $fs = [IO.File]::Open($Path, 'Open', 'Read', 'ReadWrite')
-    try { $null = $fs.Read($b, 0, 512) } finally { $fs.Dispose() }
-    $s1 = [BitConverter]::ToUInt32($b, 4)
-    $s2 = [BitConverter]::ToUInt32($b, 8)
-    $logs = foreach ($ext in 'LOG', 'LOG1', 'LOG2') {
-        $l = "$Path.$ext"
-        if (Test-Path $l) { "$ext $((Get-Item $l -Force).Length) B" }
-    }
-    $hash = (Get-FileHash $Path -Algorithm SHA256).Hash.Substring(0, 12)
-    "$((Get-Item $Path -Force).Length) B, seq $s1/$s2, sha $hash, logs: $(if ($logs) { $logs -join ', ' } else { 'none' })"
-}
-
 function Get-Message([int] $Status) { [ComponentModel.Win32Exception]::new($Status).Message }
 
-function Get-Tail([string] $Text, [int] $Count = 2) {
+function Get-Tail([string] $Text, [int] $Count = 1) {
     ($Text -split "`r?`n" | Where-Object { $_.Trim() } | Select-Object -Last $Count) -join ' / '
 }
 
-function Get-Version([string] $Path) {
-    if (Test-Path $Path) { (Get-Item $Path).VersionInfo.FileVersionRaw.ToString() } else { 'missing' }
-}
-
-# A fresh copy of `Path` in its own folder under $work.
+# A fresh copy of `Path` (and its logs, if any) in its own folder under $work.
 function Copy-Hive([string] $Path, [string] $Name) {
     $dir = Join-Path $work $Name
     $null = New-Item -ItemType Directory -Force $dir
@@ -175,26 +136,19 @@ function Copy-Hive([string] $Path, [string] $Name) {
     Join-Path $dir (Split-Path $Path -Leaf)
 }
 
-# A hive saved from HKCU\Software\dpro-diag\<Name> (a root with one value and a subkey `a`).
-function New-TestHive([string] $Name, [switch] $Mixed) {
-    $key = "HKCU:\Software\dpro-diag\$Name"
-    $null = New-Item -Path "$key\a" -Force
-    $null = New-ItemProperty -Path $key -Name v -Value x -Force
-    if ($Mixed) {
-        # An explicit ACE gives `a` its own security descriptor.
-        $acl = Get-Acl "$key\a"
-        $rule = [Security.AccessControl.RegistryAccessRule]::new('Everyone', 'ReadKey', 'Allow')
-        $acl.AddAccessRule($rule)
-        Set-Acl "$key\a" $acl
+# A VSS copy of a hive the kernel holds open (plus its logs), via esentutl.
+function Copy-LiveHive([string] $Path, [string] $Name) {
+    $dir = Join-Path $work $Name
+    $null = New-Item -ItemType Directory -Force $dir
+    foreach ($suffix in '', '.LOG1', '.LOG2') {
+        if (-not (Test-Path "$Path$suffix" -PathType Leaf)) { continue }
+        $out = esentutl.exe /y "$Path$suffix" /vss /d (Join-Path $dir ((Split-Path $Path -Leaf) + $suffix)) 2>&1 | Out-String
+        if ($LASTEXITCODE) { throw "esentutl $Path${suffix}: $(Get-Tail $out 2)" }
     }
-    $file = Join-Path $work "$Name.hiv"
-    Remove-Item $file -ErrorAction SilentlyContinue
-    $out = reg.exe save "HKCU\Software\dpro-diag\$Name" $file /y 2>&1 | Out-String
-    if ($LASTEXITCODE) { throw "reg save ${Name}: $(Get-Tail $out 1)" }
-    $file
+    Join-Path $dir (Split-Path $Path -Leaf)
 }
 
-# The DISM log lines a block adds (errors and version lines), truncated.
+# DISM log lines a block adds: the host/target versions DISM sees and errors.
 function Invoke-WithDismLog([scriptblock] $Body) {
     $log = Join-Path $env:SystemRoot 'Logs\DISM\dism.log'
     $start = if (Test-Path $log) { (Get-Item $log).Length } else { 0 }
@@ -206,79 +160,26 @@ function Invoke-WithDismLog([scriptblock] $Body) {
             $null = $fs.Seek($start, 'Begin')
             $text = [IO.StreamReader]::new($fs).ReadToEnd()
         } finally { $fs.Dispose() }
-        $added = $text -split "`r?`n" | Where-Object { $_ -match 'Error|Warning|[Vv]ersion|0x8' } |
-            Select-Object -First 14 | ForEach-Object {
-                $l = $_ -replace '^\S+ \S+, ', '' -replace '\s+', ' '
-                if ($l.Length -gt 260) { $l.Substring(0, 260) + '…' } else { $l }
+        $added = $text -split "`r?`n" | Where-Object { $_ -match 'Host machine information|Target image information|API Version|^\S+ \S+, Error' } |
+            Select-Object -First 6 | ForEach-Object {
+                $l = ($_ -replace '^\S+ \S+, ', '' -replace 'PID=\d+ TID=\d+ ', '' -replace '\s+', ' ')
+                if ($l.Length -gt 220) { $l.Substring(0, 220) + '…' } else { $l }
             }
     }
     $result
-    foreach ($l in $added) { "    log: $l" }
+    foreach ($l in $added) { "    - log: $l" }
 }
 
 function Invoke-Cli([string] $Exe, [string[]] $Arguments) {
     $out = & $Exe @Arguments --target $Image --json 2>&1 | Out-String
-    "$(Split-Path $Exe -Leaf) $($Arguments -join ' '): exit $LASTEXITCODE $(if ($LASTEXITCODE) { Get-Tail $out 1 } else { "($($out.Length) chars)" })"
+    "$($Arguments -join ' '): exit $LASTEXITCODE $(if ($LASTEXITCODE) { Get-Tail $out } else { "($($out.Length) chars)" })"
 }
 
-$cvKey = 'Microsoft\Windows NT\CurrentVersion'
+# 1. DISM
+$lines = @()
 try {
-    $cv = Get-ItemProperty "HKLM:\SOFTWARE\$cvKey"
-    Note "host: build $($cv.CurrentBuild).$($cv.UBR); DismApi $(Get-Version "$env:SystemRoot\System32\dismapi.dll"); offreg.dll $(Get-Version "$env:SystemRoot\System32\offreg.dll")"
-    Note "privileges (RtlAdjustPrivilege SeBackup/SeRestore NTSTATUS): $([Hive]::Privileges())"
-    Note ''
-    Note '### 1. RegLoadAppKeyW (KEY_READ) vs security descriptors'
-    $uniform = New-TestHive 'uniform'
-    $mixed = New-TestHive 'mixed' -Mixed
-    foreach ($t in @(
-            @{ Name = 'saved from HKCU, one security descriptor'; Path = $uniform },
-            @{ Name = 'saved from HKCU, subkey with its own ACE'; Path = $mixed },
-            @{ Name = 'image DEFAULT'; Path = (Copy-Hive (Join-Path $config 'DEFAULT') 'app-default') },
-            @{ Name = 'image DRIVERS'; Path = (Copy-Hive (Join-Path $config 'DRIVERS') 'app-drivers') },
-            @{ Name = 'image SYSTEM'; Path = (Copy-Hive (Join-Path $config 'SYSTEM') 'app-system') },
-            @{ Name = 'host C:\Users\Default\NTUSER.DAT'; Path = (Copy-Hive 'C:\Users\Default\NTUSER.DAT' 'app-ntuser') })) {
-        $s = [Hive]::App($t.Path)
-        Note "- $($t.Name): $s ($(Get-Message $s))"
-    }
-    reg.exe delete 'HKCU\Software\dpro-diag' /f *> $null
-
-    Note ''
-    Note '### 2. Reading an offline SOFTWARE/SYSTEM hive another way (fresh copies; file state before → after)'
-    foreach ($h in @(@{ Name = 'SOFTWARE'; Key = $cvKey; Value = 'CurrentBuild' }, @{ Name = 'SYSTEM'; Key = 'Select'; Value = 'Current' })) {
-        $src = Join-Path $config $h.Name
-
-        $copy = Copy-Hive $src "offreg-$($h.Name)"
-        $before = Get-HiveState $copy
-        $sw = [Diagnostics.Stopwatch]::StartNew()
-        $v = try { [Hive]::Offreg($copy, $h.Key, $h.Value) } catch { "FAILED: $($_.Exception.Message)" }
-        Note "- offreg $($h.Name): $($h.Value) = $v in $($sw.ElapsedMilliseconds) ms; $before → $(Get-HiveState $copy)"
-
-        foreach ($m in @(@{ Name = 'RegLoadKeyW'; Flags = $null }, @{ Name = 'NtLoadKeyEx REG_OPEN_READ_ONLY'; Flags = 0x2000 })) {
-            $copy = Copy-Hive $src "load-$($h.Name)-$($null -eq $m.Flags)"
-            $before = Get-HiveState $copy
-            $mount = "dpro-diag-$($h.Name)-$(if ($null -eq $m.Flags) { 'w' } else { 'ro' })"
-            $sw = [Diagnostics.Stopwatch]::StartNew()
-            $s = if ($null -eq $m.Flags) { [Hive]::Load($mount, $copy) } else { [Hive]::NtLoad($mount, $copy, [uint32]$m.Flags) }
-            $loadMs = $sw.ElapsedMilliseconds
-            if ($s -eq 0) {
-                $q = reg.exe query "HKLM\$mount\$($h.Key)" /v $h.Value 2>&1 | Out-String
-                $v = if ($q -match "$($h.Value)\s+REG_\w+\s+(\S+)") { $Matches[1] } else { Get-Tail $q 1 }
-                $u = [Hive]::Unload($mount)
-                Note "- $($m.Name) $($h.Name): load $loadMs ms, $($h.Value) = $v, unload $u; $before → $(Get-HiveState $copy)"
-            } else {
-                Note "- $($m.Name) $($h.Name): status $s ($('0x{0:x8}' -f $s)); $before → $(Get-HiveState $copy)"
-            }
-        }
-    }
-
-    Note ''
-    Note '### 3. DismOpenSession on the image'
-    Note "- dismpro-cli embeds a manifest: $([Hive]::HasManifest($Cli))"
-    Invoke-WithDismLog {
-        $out = powershell.exe -NoProfile -Command "try { (Get-WindowsPackage -Path '$Image').Count } catch { 'FAILED: ' + `$_.Exception.Message }" 2>&1 | Out-String
-        "- DISM PowerShell module, Get-WindowsPackage -Path: $(Get-Tail $out 1)"
-    } | ForEach-Object { Note $_ }
-    Invoke-WithDismLog { "- $(Invoke-Cli $Cli 'packages', 'list')" } | ForEach-Object { Note $_ }
+    $lines += "- as built, packages list:"
+    $lines += Invoke-WithDismLog { "  - $(Invoke-Cli $Cli 'packages', 'list')" }
     $sxs = Join-Path $work 'manifested'
     $null = New-Item -ItemType Directory -Force $sxs
     $exe = Join-Path $sxs 'dismpro-cli.exe'
@@ -293,13 +194,35 @@ try {
   </compatibility>
 </assembly>
 '@
-    Note '- with a side-by-side manifest declaring Windows 10/11 support:'
-    Invoke-WithDismLog { "  - $(Invoke-Cli $exe 'packages', 'list')" } | ForEach-Object { Note $_ }
-} catch {
-    Note "ERROR (script line $($_.InvocationInfo.ScriptLineNumber)): $($_.Exception.Message)"
-}
+    $lines += "- with a side-by-side manifest (supportedOS Windows 10+), packages list:"
+    $lines += Invoke-WithDismLog { "  - $(Invoke-Cli $exe 'packages', 'list')" }
+    $lines += "- with the manifest, features list: $(Invoke-Cli $exe 'features', 'list')"
+} catch { $lines += "ERROR (line $($_.InvocationInfo.ScriptLineNumber)): $($_.Exception.Message)" }
+Publish 'T3 diag 3: DismOpenSession' $lines
 
-$text = $lines -join "`n"
-"## T3 diagnosis (2)`n`n$text`n" | Add-Content $env:GITHUB_STEP_SUMMARY
-Write-Host "::notice title=T3 diagnosis 2::$($text.Replace('%', '%25').Replace("`r", '').Replace("`n", '%0A'))"
+# 2. App hives from a live (VSS) installation
+$lines = @()
+$live = @{}
+foreach ($h in 'SYSTEM', 'SOFTWARE', 'DRIVERS', 'DEFAULT', 'COMPONENTS') {
+    try {
+        $live[$h] = Copy-LiveHive "$env:SystemRoot\System32\config\$h" "live-$h"
+        $s = [Hive]::App($live[$h])
+        $lines += "- live $h (VSS copy + logs): $s ($(Get-Message $s))"
+    } catch { $lines += "- live ${h}: ERROR $($_.Exception.Message)" }
+}
+Publish 'T3 diag 3: RegLoadAppKeyW on live hives' $lines
+
+# 3. Anatomy
+$lines = @()
+$samples = [ordered]@{}
+foreach ($h in 'SYSTEM', 'SOFTWARE', 'DRIVERS', 'DEFAULT', 'COMPONENTS') { $samples["image $h"] = Join-Path $config $h }
+foreach ($h in 'SYSTEM', 'DEFAULT') { if ($live[$h]) { $samples["live $h"] = $live[$h] } }
+$samples['Default NTUSER.DAT'] = 'C:\Users\Default\NTUSER.DAT'
+foreach ($k in $samples.Keys) {
+    try {
+        $copy = Copy-Hive $samples[$k] ("anatomy-" + ($k -replace '\W', '-'))
+        $lines += "- ${k}: app $([Hive]::App($copy)); $([Hive]::Anatomy($copy))"
+    } catch { $lines += "- ${k}: ERROR $($_.Exception.Message)" }
+}
+Publish 'T3 diag 3: hive anatomy' $lines
 exit 0
