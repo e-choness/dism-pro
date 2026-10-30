@@ -6,7 +6,8 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, labeled]
   push:
-    branches: [master]
+    # spike/** branches get every job, Windows included, without a PR (roadmap spikes).
+    branches: [master, "spike/**"]
   schedule:
     - cron: "17 3 * * *" # nightly
   workflow_dispatch:
