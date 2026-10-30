@@ -69,6 +69,10 @@ jobs:
       - name: T3 not set up yet
         if: hashFiles('compose.windows.yaml') == ''
         run: echo "::notice::compose.windows.yaml lands with spike S-02 (roadmap 1.5); no T3 tests yet."
+      - name: CLI smoke (runner VM, online target)
+        # Real DISM calls, a feature change and its undo on the throwaway runner VM.
+        shell: pwsh
+        run: ./.github/scripts/smoke-online.ps1 -Cli dist/x86_64-pc-windows-msvc/dismpro-cli.exe
 
   adk-headers:
     name: ADK DISM API headers (windows-2025)
@@ -80,30 +84,54 @@ jobs:
       contains(github.event.pull_request.labels.*.name, 'needs-windows')
     runs-on: windows-2025
     timeout-minutes: 60
+    env:
+      # https://learn.microsoft.com/windows-hardware/get-started/adk-install: "Download the Windows
+      # ADK 10.1.26100.9457 (September 2026)". Bump both together; the version keys the cache.
+      ADK_VERSION: 10.1.26100.9457
+      ADK_URL: https://go.microsoft.com/fwlink/?linkid=2289980
     steps:
       - id: cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: adk-include
-          key: adk-dismapi-headers-v1
+          key: adk-headers-${{ env.ADK_VERSION }}
       - name: Find or install ADK Deployment Tools
         if: steps.cache.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $root = "${env:ProgramFiles(x86)}\Windows Kits\10\Assessment and Deployment Kit"
-          function Find-Header { Get-ChildItem -Path $root -Recurse -Filter dismapi.h -ErrorAction SilentlyContinue | Select-Object -First 1 }
-          $header = Find-Header
-          if (-not $header) {
-            # verify on first run: winget package id and adksetup switches.
-            winget install --id Microsoft.WindowsADK --exact --silent --accept-package-agreements --accept-source-agreements `
-              --override "/features OptionId.DeploymentTools /quiet /norestart /ceip off"
-            $header = Find-Header
+          $kits = "${env:ProgramFiles(x86)}\Windows Kits\10"
+          $adk = Join-Path $kits 'Assessment and Deployment Kit'
+          function Find-Header($dir, $name) {
+            Get-ChildItem -Path $dir -Recurse -Filter $name -ErrorAction SilentlyContinue |
+              Sort-Object FullName -Descending | Select-Object -First 1
           }
-          if (-not $header) { throw "dismapi.h not found under $root after installing the ADK" }
+          $dism = Find-Header $adk dismapi.h
+          if (-not $dism) {
+            # Microsoft's own installer, checked for a valid Microsoft signature before it runs.
+            $setup = Join-Path $env:RUNNER_TEMP adksetup.exe
+            Invoke-WebRequest -Uri $env:ADK_URL -OutFile $setup
+            $sig = Get-AuthenticodeSignature $setup
+            if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notmatch '^CN=Microsoft Corporation,') {
+              throw "adksetup.exe signature: $($sig.Status), $($sig.SignerCertificate.Subject)"
+            }
+            $log = Join-Path $env:RUNNER_TEMP adksetup.log
+            $p = Start-Process -FilePath $setup -Wait -PassThru -ArgumentList `
+              '/quiet', '/norestart', '/ceip', 'off', '/features', 'OptionId.DeploymentTools', '/log', $log
+            Write-Host "adksetup.exe exit code: $($p.ExitCode)"
+            $dism = Find-Header $adk dismapi.h
+            if (-not $dism) {
+              Get-ChildItem "$env:RUNNER_TEMP\adksetup*.log" -ErrorAction SilentlyContinue |
+                ForEach-Object { Write-Host "--- $($_.Name)"; Get-Content $_ -Tail 60 }
+              throw "dismapi.h not found under $adk after installing the ADK"
+            }
+          }
+          # wimgapi.h ships with the Windows SDK (installed on the runner), not the ADK.
+          $wim = (Find-Header $adk wimgapi.h) ?? (Find-Header (Join-Path $kits Include) wimgapi.h)
+          if (-not $wim) { throw "wimgapi.h not found under $kits" }
           New-Item -ItemType Directory -Force adk-include | Out-Null
-          Copy-Item (Join-Path $header.DirectoryName '*.h') adk-include
-          Get-ChildItem adk-include
+          Copy-Item (Join-Path $dism.DirectoryName '*.h'), $wim.FullName adk-include
+          Get-ChildItem adk-include | Format-Table Name, Length
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: adk-include
