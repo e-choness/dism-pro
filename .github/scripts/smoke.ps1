@@ -1,14 +1,17 @@
 <#
-Smoke test of the shipped dismpro-cli.exe against the running Windows of a GitHub windows-2025 runner
-(online target). The runner VM is discarded after the job, so this makes a real feature change and undoes
-it. It doesn't replace the T3 container tests (spike S-02, roadmap 1.5); it's the first time the DISM
-calls run on real Windows.
+Smoke test of the shipped dismpro-cli.exe on a GitHub Windows runner VM, which is discarded after the
+job, so this makes a real feature change and undoes it. Without -Target it services the running Windows
+(online). With -Target it services an offline Windows directory: T3 (roadmap 1.5), whose image comes
+from .github/scripts/offline-image.ps1. Spike S-02 found DISM can't service images inside a container,
+so T3 runs on the VM.
 
 Each check is reported in the log, in the job summary, and as one annotation (readable without signing
 in). Exits 1 if any check fails.
 #>
 param(
     [Parameter(Mandatory)] [string] $Cli,
+    # Offline Windows root passed as --target; empty for the online OS.
+    [string] $Target,
     # A small optional feature whose payload ships with Windows Server; no restart needed.
     [string] $Feature = 'TelnetClient'
 )
@@ -19,10 +22,12 @@ $Cli = (Resolve-Path $Cli).Path
 $errFile = Join-Path ([IO.Path]::GetTempPath()) 'dismpro-cli.stderr.txt'
 $results = [Collections.Generic.List[string]]::new()
 $failures = 0
+$targetArgs = if ($Target) { '--target', (Resolve-Path $Target).Path } else { @() }
+$targetName = if ($Target) { 'offline image' } else { 'online' }
 
 # Runs the CLI with --json and returns the parsed JSON Lines. Throws unless it exits with $Expect.
 function Invoke-Cli([string[]] $Arguments, [int] $Expect = 0) {
-    $lines = & $Cli @Arguments --json 2> $errFile
+    $lines = & $Cli @Arguments @targetArgs --json 2> $errFile
     $code = $LASTEXITCODE
     if ($code -ne $Expect) {
         $err = Get-Content $errFile -Raw -ErrorAction SilentlyContinue
@@ -152,8 +157,8 @@ Test-Step 'purge' {
 $report = $results -join "`n"
 $arch = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture
 if ($env:GITHUB_STEP_SUMMARY) {
-    "### dismpro-cli smoke ($arch runner VM, online)`n``````n$report`n``````" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+    "### dismpro-cli smoke ($arch runner VM, $targetName)`n``````n$report`n``````" | Out-File $env:GITHUB_STEP_SUMMARY -Append
 }
 $kind = if ($failures) { 'error' } else { 'notice' }
-Write-Host "::$kind title=dismpro-cli smoke $arch ($failures failed)::$(Format-Annotation $report)"
+Write-Host "::$kind title=dismpro-cli smoke $arch $targetName ($failures failed)::$(Format-Annotation $report)"
 exit [int] [bool] $failures

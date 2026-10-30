@@ -64,16 +64,17 @@ jobs:
         with:
           name: dist
           path: dist/
-      - name: T3 integration tests
-        if: hashFiles('compose.windows.yaml') != ''
-        run: docker compose -f compose.windows.yaml run --rm itest
-      - name: T3 not set up yet
-        if: hashFiles('compose.windows.yaml') == ''
-        run: echo "::notice::compose.windows.yaml lands with spike S-02 (roadmap 1.5); no T3 tests yet."
       - name: CLI smoke (runner VM, online target)
         # Real DISM calls, a feature change and its undo on the throwaway runner VM.
         shell: pwsh
-        run: ./.github/scripts/smoke-online.ps1 -Cli dist/x86_64-pc-windows-msvc/dismpro-cli.exe
+        run: ./.github/scripts/smoke.ps1 -Cli dist/x86_64-pc-windows-msvc/dismpro-cli.exe
+      - name: T3 offline image (servercore base layer)
+        # On the VM, not in a container: S-02 found DISM can't service images inside one.
+        shell: pwsh
+        run: ./.github/scripts/offline-image.ps1 -Out "$env:RUNNER_TEMP\t3-image"
+      - name: T3 CLI smoke (offline image)
+        shell: pwsh
+        run: ./.github/scripts/smoke.ps1 -Cli dist/x86_64-pc-windows-msvc/dismpro-cli.exe -Target "$env:RUNNER_TEMP\t3-image"
 
   smoke-arm64:
     name: CLI smoke (windows-11-arm)
@@ -95,7 +96,7 @@ jobs:
           path: dist/
       - name: CLI smoke (runner VM, online target)
         shell: pwsh
-        run: ./.github/scripts/smoke-online.ps1 -Cli dist/aarch64-pc-windows-msvc/dismpro-cli.exe
+        run: ./.github/scripts/smoke.ps1 -Cli dist/aarch64-pc-windows-msvc/dismpro-cli.exe
 
   adk-headers:
     name: ADK headers + WinPE file lists (windows-2025)
