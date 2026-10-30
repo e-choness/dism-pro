@@ -1,0 +1,49 @@
+[package]
+name = "s07-tracker"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.99"
+license = "Apache-2.0"
+publish = false
+description = "Spike S-07 (roadmap 1.10): install tracking by ETW, USN delta and registry diff, measured side by side. Never shipped."
+
+# Standalone: not a member of the product workspace, so its dependencies never reach Cargo.lock
+# or cargo-deny there.
+[workspace]
+
+[[bin]]
+name = "tracker"
+path = "src/main.rs"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Diagnostics_Etw",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
+    "Win32_System_JobObjects",
+    "Win32_System_Performance",
+    "Win32_System_Registry",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+    "Win32_System_Time",
+] }
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+undocumented_unsafe_blocks = "deny"
+unwrap_used = "deny"
+cast_possible_truncation = "allow" # sizes and ids from the OS fit; a spike, not product code
+cast_precision_loss = "allow"      # report formatting only
+cast_possible_wrap = "allow"       # FILE_ID_DESCRIPTOR takes the 64-bit reference number as i64
+cast_sign_loss = "allow"           # QPC ticks and USNs are non-negative
+
+[profile.release]
+panic = "abort"

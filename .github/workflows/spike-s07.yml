@@ -1,0 +1,73 @@
+# Spike S-07 (roadmap 1.10): install tracking (ETW kernel providers, USN delta, registry diff,
+# Windows Installer attribution), measured on the windows-2025 runner VM and in a servercore
+# container. Throwaway: lives on spike/s07* branches only and is never merged.
+name: spike-s07
+
+on:
+  push:
+    branches: ["spike/s07*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build tracker (ubuntu)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/toolchain
+      - name: test, lint, build (x64)
+        run: >-
+          docker compose run --rm -e CARGO_TARGET_DIR=/src/target/s07 --entrypoint bash test -c
+          'set -e; cd spikes/s07-tracker;
+          cargo fmt --check;
+          cargo test --locked;
+          cargo clippy --locked --all-targets -- -D warnings;
+          cargo xwin clippy --locked --all-targets --target x86_64-pc-windows-msvc -- -D warnings;
+          cargo xwin build --locked --release --target x86_64-pc-windows-msvc;
+          mkdir -p /src/dist-s07;
+          cp /src/target/s07/x86_64-pc-windows-msvc/release/tracker.exe /src/dist-s07/tracker.exe'
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: tracker
+          path: dist-s07/
+          if-no-files-found: error
+          retention-days: 7
+
+  measure:
+    name: measure (windows-2025 VM)
+    needs: build
+    runs-on: windows-2025
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      TRACKER: dist-s07/tracker.exe
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: tracker
+          path: dist-s07/
+      - name: setup (facts, test MSI)
+        run: ./.github/scripts/spike-s07.ps1 -Step Setup
+      - name: probe
+        if: always()
+        run: ./.github/scripts/spike-s07.ps1 -Step Probe
+      - name: fake installer
+        if: always()
+        run: ./.github/scripts/spike-s07.ps1 -Step Fake
+      - name: MSI
+        if: always()
+        run: ./.github/scripts/spike-s07.ps1 -Step Msi
+      - name: servercore container
+        if: always()
+        run: ./.github/scripts/spike-s07.ps1 -Step Container
