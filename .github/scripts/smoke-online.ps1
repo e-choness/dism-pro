@@ -150,9 +150,10 @@ Test-Step 'purge' {
 }
 
 $report = $results -join "`n"
+$arch = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture
 if ($env:GITHUB_STEP_SUMMARY) {
-    "### dismpro-cli smoke (runner VM, online)`n``````n$report`n``````" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+    "### dismpro-cli smoke ($arch runner VM, online)`n``````n$report`n``````" | Out-File $env:GITHUB_STEP_SUMMARY -Append
 }
 $kind = if ($failures) { 'error' } else { 'notice' }
-Write-Host "::$kind title=dismpro-cli smoke ($failures failed)::$(Format-Annotation $report)"
+Write-Host "::$kind title=dismpro-cli smoke $arch ($failures failed)::$(Format-Annotation $report)"
 exit [int] [bool] $failures
