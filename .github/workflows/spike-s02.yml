@@ -1,0 +1,39 @@
+# Spike S-02 (roadmap 1.5): can T3 run real DISM servicing in a Windows container on the free
+# windows-2025 runner, and where does the test image come from? Runs only on spike branches; each
+# experiment reports one annotation so results are readable without signing in.
+name: spike-s02
+
+on:
+  push:
+    branches: ["spike/s02*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  s02:
+    runs-on: windows-2025
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      BASE: mcr.microsoft.com/windows/servercore:ltsc2025
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: E1 runner and Docker
+        run: ./.github/scripts/spike-s02.ps1 -Experiment E1
+      - name: E2 export servercore as an offline image
+        run: ./.github/scripts/spike-s02.ps1 -Experiment E2
+      - name: E3 DISM on the exported image (runner)
+        if: always()
+        run: ./.github/scripts/spike-s02.ps1 -Experiment E3
+      - name: E4 DISM inside a container
+        if: always()
+        run: ./.github/scripts/spike-s02.ps1 -Experiment E4
+      - name: E5 WIM capture and mount
+        if: always()
+        run: ./.github/scripts/spike-s02.ps1 -Experiment E5
