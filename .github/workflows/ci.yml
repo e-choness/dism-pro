@@ -76,9 +76,10 @@ jobs:
         run: ./.github/scripts/smoke-online.ps1 -Cli dist/x86_64-pc-windows-msvc/dismpro-cli.exe
 
   adk-headers:
-    name: ADK DISM API headers (windows-2025)
-    # dismapi.h ships with the Windows ADK, not the SDK in the toolchain image (decision #22).
-    # Only the headers leave this job, as a short-lived private artifact; never committed.
+    name: ADK headers + WinPE file lists (windows-2025)
+    # dismapi.h ships with the Windows ADK, not the SDK in the toolchain image (decision #22); the
+    # WinPE add-on gives the DLL names behind the pe-compat allowlist. Only derived files leave this
+    # job, as short-lived artifacts; never committed.
     if: >-
       github.event_name == 'push' || github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch' ||
@@ -87,61 +88,49 @@ jobs:
     timeout-minutes: 60
     env:
       # https://learn.microsoft.com/windows-hardware/get-started/adk-install: "Download the Windows
-      # ADK 10.1.26100.9457 (September 2026)". Bump both together; the version keys the cache.
+      # ADK 10.1.26100.9457 (September 2026)" and its WinPE add-on. Bump all three together; the
+      # version keys the caches.
       ADK_VERSION: 10.1.26100.9457
       ADK_URL: https://go.microsoft.com/fwlink/?linkid=2289980
+      WINPE_URL: https://go.microsoft.com/fwlink/?linkid=2289981
+    defaults:
+      run:
+        shell: pwsh
     steps:
-      - id: cache
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: headers
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: adk-include
           key: adk-headers-${{ env.ADK_VERSION }}
-      - name: Find or install ADK Deployment Tools
-        if: steps.cache.outputs.cache-hit != 'true'
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $kits = "${env:ProgramFiles(x86)}\Windows Kits\10"
-          $adk = Join-Path $kits 'Assessment and Deployment Kit'
-          function Find-Header($dir, $name) {
-            Get-ChildItem -Path $dir -Recurse -Filter $name -ErrorAction SilentlyContinue |
-              Sort-Object FullName -Descending | Select-Object -First 1
-          }
-          $dism = Find-Header $adk dismapi.h
-          if (-not $dism) {
-            # Microsoft's own installer, checked for a valid Microsoft signature before it runs.
-            $setup = Join-Path $env:RUNNER_TEMP adksetup.exe
-            Invoke-WebRequest -Uri $env:ADK_URL -OutFile $setup
-            $sig = Get-AuthenticodeSignature $setup
-            if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notmatch '^CN=Microsoft Corporation,') {
-              throw "adksetup.exe signature: $($sig.Status), $($sig.SignerCertificate.Subject)"
-            }
-            $log = Join-Path $env:RUNNER_TEMP adksetup.log
-            $p = Start-Process -FilePath $setup -Wait -PassThru -ArgumentList `
-              '/quiet', '/norestart', '/ceip', 'off', '/features', 'OptionId.DeploymentTools', '/log', $log
-            Write-Host "adksetup.exe exit code: $($p.ExitCode)"
-            $dism = Find-Header $adk dismapi.h
-            if (-not $dism) {
-              Get-ChildItem "$env:RUNNER_TEMP\adksetup*.log" -ErrorAction SilentlyContinue |
-                ForEach-Object { Write-Host "--- $($_.Name)"; Get-Content $_ -Tail 60 }
-              throw "dismapi.h not found under $adk after installing the ADK"
-            }
-          }
-          # wimgapi.h ships with the Windows SDK (installed on the runner), not the ADK.
-          $wim = (Find-Header $adk wimgapi.h) ?? (Find-Header (Join-Path $kits Include) wimgapi.h)
-          if (-not $wim) { throw "wimgapi.h not found under $kits" }
-          New-Item -ItemType Directory -Force adk-include | Out-Null
-          Copy-Item (Join-Path $dism.DirectoryName '*.h'), $wim.FullName adk-include
-          Get-ChildItem adk-include | Format-Table Name, Length
+      - id: winpe
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: winpe-files
+          key: winpe-files-${{ env.ADK_VERSION }}
+      - name: DISM API headers
+        if: steps.headers.outputs.cache-hit != 'true'
+        run: ./.github/scripts/adk.ps1 -Headers adk-include
+      - name: WinPE file lists
+        if: steps.winpe.outputs.cache-hit != 'true'
+        run: ./.github/scripts/adk.ps1 -WinPE winpe-files
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: adk-include
           path: adk-include/
           if-no-files-found: error
           retention-days: 1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: winpe-files
+          path: winpe-files/
+          if-no-files-found: error
+          retention-days: 1
 
   ffi-check:
-    name: S-03 header cross-check (ubuntu)
+    name: S-03 headers + WinPE allowlist (ubuntu)
     needs: adk-headers
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -154,6 +143,13 @@ jobs:
         with:
           name: adk-include
           path: .adk-include/
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: winpe-files
+          path: .winpe-files/
       - run: docker compose run --rm ffi-check
         env:
           DPRO_FFI_INCLUDE: /src/.adk-include
+      - name: WinPE allowlist evidence
+        if: always()
+        run: docker compose run --rm --entrypoint cargo ffi-check xtask pe-compat --winpe-files /src/.winpe-files

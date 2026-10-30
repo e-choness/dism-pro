@@ -1,6 +1,7 @@
 //! `cargo xtask pe-compat --target <triple>…`: fails when a release exe imports (or
 //! delay-loads) a DLL outside the `WinPE` allowlist in `xtask/data/winpe-dlls.txt`.
-//! The substitute for a `WinPE` VM (doc 04 §4).
+//! The substitute for a `WinPE` VM (doc 04 §4). With `--winpe-files <dir>` it checks the allowlist
+//! itself against the DLLs base `WinPE` ships.
 
 use std::{
     env, fs,
@@ -15,6 +16,11 @@ use crate::{
 const ALLOWLIST: &str = include_str!("../data/winpe-dlls.txt");
 
 pub(crate) fn run(root: &Path, args: &[String]) -> Result<()> {
+    if let [flag, dir] = args
+        && flag == "--winpe-files"
+    {
+        return verify_allowlist(Path::new(dir), &parse_allowlist(ALLOWLIST));
+    }
     let targets = parse_targets(args)?;
     let target_dir =
         env::var_os("CARGO_TARGET_DIR").map_or_else(|| root.join("target"), PathBuf::from);
@@ -80,6 +86,69 @@ fn rejected(imports: &[pe::Import], allowlist: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// `pe-compat --winpe-files <dir>`: the evidence check for the allowlist itself. `<dir>` holds one
+/// `<arch>.txt` per architecture with the DLL names in base `WinPE`'s `System32` (written in CI by
+/// `.github/scripts/adk.ps1` from the ADK's `winpe.wim`). Every entry must exist in every
+/// architecture; API sets (`api-ms-*`, `ext-ms-*`) are virtual names the loader resolves, so
+/// they're skipped.
+fn verify_allowlist(dir: &Path, allowlist: &[String]) -> Result<()> {
+    let mut lists = Vec::new();
+    for entry in fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))? {
+        let path = entry?.path();
+        if path.extension().is_some_and(|e| e == "txt") {
+            let arch = path
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            let names: Vec<String> = fs::read_to_string(&path)?
+                .lines()
+                .map(|l| l.trim().to_ascii_lowercase())
+                .filter(|l| !l.is_empty())
+                .collect();
+            lists.push((arch, names));
+        }
+    }
+    if lists.is_empty() {
+        return Err(format!(
+            "pe-compat: no <arch>.txt WinPE file lists in {}",
+            dir.display()
+        )
+        .into());
+    }
+    lists.sort();
+    let missing = missing_from_winpe(allowlist, &lists);
+    for (arch, names) in &lists {
+        println!("pe-compat: WinPE {arch}: {} DLLs listed", names.len());
+    }
+    if missing.is_empty() {
+        println!("pe-compat: ok   every allowlist entry ships in base WinPE");
+        return Ok(());
+    }
+    let text = missing.join(", ");
+    crate::annotate("WinPE allowlist", &format!("not in base WinPE: {text}"));
+    Err(format!("pe-compat: allowlist entries missing from base WinPE: {text}").into())
+}
+
+/// Allowlist entries (with the architecture) that no DLL in that `WinPE` file list matches.
+fn missing_from_winpe(allowlist: &[String], lists: &[(String, Vec<String>)]) -> Vec<String> {
+    let mut missing = Vec::new();
+    for entry in allowlist {
+        if entry.starts_with("api-ms-") || entry.starts_with("ext-ms-") {
+            continue;
+        }
+        for (arch, names) in lists {
+            if !names
+                .iter()
+                .any(|n| is_allowed(n, std::slice::from_ref(entry)))
+            {
+                missing.push(format!("{entry} ({arch})"));
+            }
+        }
+    }
+    missing
+}
+
 fn is_allowed(dll: &str, allowlist: &[String]) -> bool {
     let dll = dll.to_ascii_lowercase();
     allowlist.iter().any(|entry| match entry.strip_suffix('*') {
@@ -105,6 +174,29 @@ mod tests {
         assert!(is_allowed("KERNEL32.dll", &list));
         assert!(is_allowed("api-ms-win-core-synch-l1-2-0.dll", &list));
         assert!(!is_allowed("vcruntime140.dll", &list));
+    }
+
+    #[test]
+    fn allowlist_entries_must_ship_in_every_winpe_architecture() {
+        let allowlist = parse_allowlist("kernel32.dll\ndismapi.dll\nbcrypt*\napi-ms-win-core-*\n");
+        let lists = [
+            (
+                "amd64".to_owned(),
+                vec![
+                    "kernel32.dll".to_owned(),
+                    "dismapi.dll".to_owned(),
+                    "bcryptprimitives.dll".to_owned(),
+                ],
+            ),
+            (
+                "arm64".to_owned(),
+                vec!["kernel32.dll".to_owned(), "bcrypt.dll".to_owned()],
+            ),
+        ];
+        assert_eq!(
+            missing_from_winpe(&allowlist, &lists),
+            ["dismapi.dll (arm64)"]
+        );
     }
 
     #[test]

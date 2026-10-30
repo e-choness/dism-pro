@@ -27,6 +27,7 @@ const USAGE: &str = "usage: cargo xtask <task>
   i18n-check [--release]       Fluent catalog consistency (ADR-0005)
   size --target <triple>...    exact binary-size budgets (doc 04 §2)
   pe-compat --target <triple>...  WinPE DLL import allowlist (doc 04 §4)
+  pe-compat --winpe-files <dir>   allowlist vs DLLs in base WinPE (CI evidence)
   ffi-check                    dpro-sys layouts/prototypes vs SDK/ADK headers (S-03)";
 
 fn main() -> ExitCode {
