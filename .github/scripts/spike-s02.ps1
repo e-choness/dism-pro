@@ -35,6 +35,16 @@ function Invoke-Timed([string] $Exe, [string[]] $Arguments) {
     [pscustomobject]@{ Code = $code; Ms = $sw.ElapsedMilliseconds; Out = $out }
 }
 
+# DISM.exe in a process-isolated servercore container, with the work folder at C:\w and the offline
+# image at C:\img. Round 1: DISM couldn't create its default log there (error 5), so the log goes
+# to the work folder.
+function Invoke-ContainerDism([string] $Log, [string[]] $Arguments) {
+    $null = New-Item -ItemType Directory -Force (Join-Path $work 'logs')
+    $mounts = @('-v', "${work}:C:\w")
+    if (Test-Path $img) { $mounts += '-v', "${img}:C:\img" }
+    Invoke-Timed docker (@('run', '--rm') + $mounts + @($base, 'dism', '/English') + $Arguments + "/LogPath:C:\w\logs\$Log.log")
+}
+
 function Get-Tail([string] $Text, [int] $Lines = 4) {
     ($Text -split "`r?`n" | Where-Object { $_.Trim() } | Select-Object -Last $Lines) -join ' / '
 }
@@ -75,22 +85,34 @@ try {
         'E2' {
             $pull = Invoke-Timed docker 'pull', $base
             Note "pull ${base}: $(Get-Verdict $pull)"
+            # Round 1: `docker export` left no file. Record why, then use the image layers instead.
             $null = Invoke-Timed docker 'rm', '-f', 's02'
             $create = Invoke-Timed docker 'create', '--name', 's02', $base, 'cmd'
-            if ($create.Code) { throw "docker create: $(Get-Tail $create.Out)" }
-            $tar = Join-Path $work 's02.tar'
-            $export = Invoke-Timed docker 'export', 's02', '-o', $tar
-            Note "export: $(Get-Verdict $export), $([math]::Round((Get-Item $tar).Length / 1GB, 2)) GiB"
-            $list = Invoke-Timed $tarExe '-tf', $tar
+            $exportTar = Join-Path $work 'export.tar'
+            $export = Invoke-Timed docker 'export', 's02', '-o', $exportTar
+            Note "create: $(Get-Verdict $create); export: $(Get-Verdict $export), file=$(Test-Path $exportTar) $(Get-Tail $export.Out 2)"
+            Remove-Item $exportTar -ErrorAction SilentlyContinue
+            $saveTar = Join-Path $work 'save.tar'
+            $save = Invoke-Timed docker 'save', $base, '-o', $saveTar
+            if ($save.Code -or -not (Test-Path $saveTar)) { throw "docker save: $(Get-Tail $save.Out 3)" }
+            Note "save: $(Get-Verdict $save), $([math]::Round((Get-Item $saveTar).Length / 1GB, 2)) GiB"
+            $saved = Join-Path $work 'saved'
+            $null = New-Item -ItemType Directory -Force $saved
+            $null = Invoke-Timed $tarExe '-xf', $saveTar, '-C', $saved
+            Remove-Item $saveTar -Force
+            $layers = @((Get-Content (Join-Path $saved 'manifest.json') -Raw | ConvertFrom-Json)[0].Layers)
+            Note "layers (bottom first): $(($layers | ForEach-Object { "$_ $([math]::Round((Get-Item (Join-Path $saved $_)).Length / 1GB, 2)) GiB" }) -join '; ')"
+            $layer = Join-Path $saved $layers[0]
+            $list = Invoke-Timed $tarExe '-tf', $layer
             $entries = $list.Out -split "`r?`n" | Where-Object { $_ }
             $tops = $entries | ForEach-Object { ($_ -split '/')[0] } | Group-Object | ForEach-Object { "$($_.Name)($($_.Count))" }
-            Note "tar: $($entries.Count) entries; top level: $($tops -join ', ')"
+            Note "base layer: $($entries.Count) entries; top level: $($tops -join ', ')"
             Note "hive-like entries: $(($entries | Where-Object { $_ -match '(?i)(^Hives/|System32/config/(SYSTEM|SOFTWARE|COMPONENTS|DRIVERS)$)' } | Select-Object -First 12) -join ', ')"
             $x = Join-Path $work 'x'
             $null = New-Item -ItemType Directory -Force $x
-            $extract = Invoke-Timed $tarExe '-xf', $tar, '-C', $x
+            $extract = Invoke-Timed $tarExe '-xf', $layer, '-C', $x
             Note "extract: $(Get-Verdict $extract) $(Get-Tail $extract.Out 3)"
-            Remove-Item $tar -Force
+            Remove-Item $saved -Recurse -Force
             $root = if (Test-Path (Join-Path $x 'Files\Windows')) { Join-Path $x 'Files' } else { $x }
             $config = Join-Path $root 'Windows\System32\config'
             $sizes = Get-ChildItem $config -File -ErrorAction SilentlyContinue |
@@ -138,16 +160,15 @@ try {
         }
         'E4' {
             if (-not (Test-Path $img)) { throw 'no offline image (E2 failed)' }
-            $vol = "${img}:C:\img"
-            $ft = Invoke-Timed docker 'run', '--rm', '-v', $vol, $base, 'dism', '/English', '/Image:C:\img', '/Get-Features', '/Format:Table'
+            $ft = Invoke-ContainerDism 'e4-features' '/Image:C:\img', '/Get-Features', '/Format:Table'
             Note "container /Image Get-Features: $(Get-Verdict $ft), TelnetClient=$(Get-FeatureState $ft.Out 'TelnetClient') $(if ($ft.Code) { Get-Tail $ft.Out })"
-            $en = Invoke-Timed docker 'run', '--rm', '-v', $vol, $base, 'dism', '/English', '/Image:C:\img', '/Enable-Feature', '/FeatureName:TelnetClient'
+            $en = Invoke-ContainerDism 'e4-enable' '/Image:C:\img', '/Enable-Feature', '/FeatureName:TelnetClient'
             Note "container /Image Enable TelnetClient: $(Get-Verdict $en) $(if ($en.Code -notin 0, 3010) { Get-Tail $en.Out })"
-            $dis = Invoke-Timed docker 'run', '--rm', '-v', $vol, $base, 'dism', '/English', '/Image:C:\img', '/Disable-Feature', '/FeatureName:TelnetClient'
+            $dis = Invoke-ContainerDism 'e4-disable' '/Image:C:\img', '/Disable-Feature', '/FeatureName:TelnetClient'
             Note "container /Image Disable TelnetClient: $(Get-Verdict $dis) $(if ($dis.Code -notin 0, 3010) { Get-Tail $dis.Out })"
-            $on = Invoke-Timed docker 'run', '--rm', $base, 'dism', '/English', '/Online', '/Get-Features', '/Format:Table'
+            $on = Invoke-ContainerDism 'e4-online' '/Online', '/Get-Features', '/Format:Table'
             Note "container /Online Get-Features: $(Get-Verdict $on) $(if ($on.Code) { Get-Tail $on.Out })"
-            $onEn = Invoke-Timed docker 'run', '--rm', $base, 'dism', '/English', '/Online', '/Enable-Feature', '/FeatureName:TelnetClient'
+            $onEn = Invoke-ContainerDism 'e4-online-enable' '/Online', '/Enable-Feature', '/FeatureName:TelnetClient'
             Note "container /Online Enable TelnetClient: $(Get-Verdict $onEn) $(if ($onEn.Code -notin 0, 3010) { Get-Tail $onEn.Out })"
         }
         'E5' {
@@ -169,7 +190,7 @@ try {
             Note "container mount: $(Get-Verdict $c) $(Get-Tail $c.Out 3)"
             $ap = Join-Path $work 'apply'
             $null = New-Item -ItemType Directory -Force $ap
-            $apply = Invoke-Timed docker 'run', '--rm', '-v', "${work}:C:\w", $base, 'dism', '/English', '/Apply-Image', '/ImageFile:C:\w\t.wim', '/Index:1', '/ApplyDir:C:\w\apply'
+            $apply = Invoke-ContainerDism 'e5-apply' '/Apply-Image', '/ImageFile:C:\w\t.wim', '/Index:1', '/ApplyDir:C:\w\apply'
             Note "container apply: $(Get-Verdict $apply), $(@(Get-ChildItem $ap).Count) files $(if ($apply.Code) { Get-Tail $apply.Out })"
         }
     }
