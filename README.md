@@ -12,8 +12,7 @@ and an MCP server so AI agents can plan changes that a human approves.
 
 Licensed under [Apache-2.0](LICENSE). Not affiliated with Microsoft or Chuyu Team.
 
-> Status: **early development.** The engine (plan model, write-ahead journal, undo), the Windows layer and a first CLI (`dismpro-cli`: targets, packages, features, health, reboot reasons, journal list/show/undo, purge) build and pass their tests, but haven't yet serviced a real Windows image; see [CAVEATS.md](CAVEATS.md). Not ready for use.
+> Status: **early development.** The engine (plan model, write-ahead journal, undo), the Windows layer and a first CLI (`dismpro-cli`: targets, packages, features, health, reboot reasons, journal list/show/undo, purge) build and pass their tests, but haven't yet serviced a real Windows image. Not ready for use.
 
-- Written in Rust ([ADR-0001](docs/adr/0001-language-rust.md))
-- Built, tested and benchmarked **only in Docker** ([ADR-0003](docs/adr/0003-docker-only-toolchain.md))
-- Start with [docs/README.md](docs/README.md)
+- Written in Rust
+- Built, tested and benchmarked **only in Docker**: `docker compose run --rm <fmt|lint|test|test-win|bench|deny|build>`
