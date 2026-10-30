@@ -192,38 +192,63 @@ switch ($Experiment) {
         }
         $live['NTUSER.DAT (runner user)'] = Join-Path $env:USERPROFILE 'NTUSER.DAT'
         $live['UsrClass.dat (runner user)'] = Join-Path $env:LOCALAPPDATA 'Microsoft\Windows\UsrClass.dat'
-        $n = 0
-        foreach ($k in $live.Keys) {
-            $dst = Join-Path $copies "hive$((++$n))"
-            # esentutl /vss copies a file the kernel holds open, through a shadow copy.
-            $out = esentutl.exe /y $live[$k] /vss /d $dst 2>&1 | Out-String
-            if ($LASTEXITCODE -or -not (Test-Path $dst)) {
-                $lines += "| live $k | copy FAILED: $(($out -split "`r?`n" | Where-Object { $_.Trim() } | Select-Object -Last 2) -join ' / ') | | | | |"
-                continue
+        $notes = @()
+        # Each part reports its own failure, so one broken part doesn't hide the others' data.
+        function Get-Failure([string] $Part, $Err) {
+            "$Part FAILED (script line $($Err.InvocationInfo.ScriptLineNumber)): $($Err.Exception.Message)"
+        }
+        try {
+            $n = 0
+            foreach ($k in $live.Keys) {
+                $dst = Join-Path $copies "hive$((++$n))"
+                # esentutl /vss copies a file the kernel holds open, through a shadow copy.
+                $out = esentutl.exe /y $live[$k] /vss /d $dst 2>&1 | Out-String
+                if ($LASTEXITCODE -or -not (Test-Path $dst)) {
+                    $lines += "| live $k | copy FAILED: $(($out -split "`r?`n" | Where-Object { $_.Trim() } | Select-Object -Last 2) -join ' / ') | | | | |"
+                    continue
+                }
+                $lines += Format-Hive "live $k" $dst $boot
             }
-            $lines += Format-Hive "live $k" $dst $boot
-        }
+        } catch { $notes += Get-Failure 'live hives' $_ }
+
         # The servercore image's hives: one more data point, from an image built by Microsoft.
-        $image = 'mcr.microsoft.com/windows/servercore:ltsc2025'
-        $tar = Join-Path $env:SystemRoot 'System32\tar.exe'
-        docker pull -q $image | Out-Null
-        $saveTar = Join-Path $work 'save.tar'
-        docker save $image -o $saveTar
-        $saved = Join-Path $work 'saved'
-        $null = New-Item -ItemType Directory -Force $saved
-        & $tar -xf $saveTar -C $saved
-        $base = (Get-Content (Join-Path $saved 'manifest.json') -Raw | ConvertFrom-Json)[0].Layers[0]
-        $layer = Join-Path $work 'layer'
-        $null = New-Item -ItemType Directory -Force $layer
-        & $tar -xf (Join-Path $saved $base) -C $layer 'Files/Windows/System32/config/SYSTEM' 'Files/Windows/System32/config/SOFTWARE' 'Files/Windows/System32/config/COMPONENTS'
-        foreach ($h in 'SYSTEM', 'SOFTWARE', 'COMPONENTS') {
-            $lines += Format-Hive "servercore image config\$h" (Join-Path $layer "Files\Windows\System32\config\$h") $boot
-        }
-        $cm = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Configuration Manager'
-        $values = (Get-ItemProperty $cm -ErrorAction SilentlyContinue).PSObject.Properties |
-            Where-Object Name -NotLike 'PS*' | ForEach-Object { "$($_.Name)=$($_.Value)" }
-        $lines += '', "Configuration Manager values: $(if ($values) { $values -join ', ' } else { 'none' })"
-        Publish 'hives' ($lines -join "`n")
+        try {
+            $image = 'mcr.microsoft.com/windows/servercore:ltsc2025'
+            $tar = Join-Path $env:SystemRoot 'System32\tar.exe'
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            $out = docker pull -q $image 2>&1 | Out-String
+            if ($LASTEXITCODE) { throw "docker pull: exit $LASTEXITCODE, $($out.Trim())" }
+            $saveTar = Join-Path $work 'save.tar'
+            $out = docker save $image -o $saveTar 2>&1 | Out-String
+            if ($LASTEXITCODE -or -not (Test-Path $saveTar)) { throw "docker save: exit $LASTEXITCODE, $($out.Trim())" }
+            $saved = Join-Path $work 'saved'
+            $null = New-Item -ItemType Directory -Force $saved
+            $out = & $tar -xf $saveTar -C $saved 2>&1 | Out-String
+            if ($LASTEXITCODE) { throw "tar (save): exit $LASTEXITCODE, $($out.Trim())" }
+            $manifest = Join-Path $saved 'manifest.json'
+            if (-not (Test-Path $manifest)) {
+                $top = (Get-ChildItem $saved | Select-Object -First 10 -ExpandProperty Name) -join ', '
+                throw "no manifest.json in the saved image (top level: $top)"
+            }
+            $base = (Get-Content $manifest -Raw | ConvertFrom-Json)[0].Layers[0]
+            $layer = Join-Path $work 'layer'
+            $null = New-Item -ItemType Directory -Force $layer
+            $members = 'SYSTEM', 'SOFTWARE', 'COMPONENTS' | ForEach-Object { "Files/Windows/System32/config/$_" }
+            $out = & $tar -xf (Join-Path $saved $base) -C $layer @members 2>&1 | Out-String
+            if ($LASTEXITCODE) { throw "tar (base layer $base): exit $LASTEXITCODE, $($out.Trim())" }
+            foreach ($h in 'SYSTEM', 'SOFTWARE', 'COMPONENTS') {
+                $lines += Format-Hive "servercore image config\$h" (Join-Path $layer "Files\Windows\System32\config\$h") $boot
+            }
+            $notes += "servercore image: pull + save + extract in $([math]::Round($sw.Elapsed.TotalSeconds)) s"
+        } catch { $notes += Get-Failure 'servercore image hives' $_ }
+
+        try {
+            $cm = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Configuration Manager'
+            $props = if (Test-Path $cm) { (Get-ItemProperty $cm).PSObject.Properties } else { @() }
+            $values = $props | Where-Object Name -NotLike 'PS*' | ForEach-Object { "$($_.Name)=$($_.Value)" }
+            $notes += "Configuration Manager values: $(if ($values) { $values -join ', ' } else { 'none' })"
+        } catch { $notes += Get-Failure 'Configuration Manager values' $_ }
+        Publish 'hives' (($lines + '' + $notes) -join "`n")
     }
     'Shell' {
         $ext = '.s06test'
