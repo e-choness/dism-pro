@@ -1,0 +1,3 @@
+# Stable rustfmt only (decision #21): the nightly-only `imports_granularity` and
+# `group_imports` options are not used, so one pinned toolchain does everything.
+edition = "2024"

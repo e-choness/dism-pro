@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/e-choness/dism-pro/schemas/reboot-reasons.v1.json",
+  "title": "dismpro-cli reboot-reasons --json",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": "reboot-reasons.v1"
+    },
+    "pending": {
+      "type": "boolean"
+    },
+    "reasons": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "reason": {
+            "enum": [
+              "cbs",
+              "cbs-packages-pending",
+              "pending-xml",
+              "windows-update",
+              "file-rename",
+              "computer-rename",
+              "update-exe-volatile"
+            ]
+          },
+          "count": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "reason"
+        ]
+      }
+    },
+    "messages": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "schema",
+    "pending",
+    "reasons",
+    "messages"
+  ]
+}

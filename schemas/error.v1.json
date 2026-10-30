@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/e-choness/dism-pro/schemas/error.v1.json",
+  "title": "Error printed with --json",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": "error.v1"
+    },
+    "exit_code": {
+      "type": "integer"
+    },
+    "diagnosis": {
+      "type": "string"
+    },
+    "message": {
+      "type": "string"
+    },
+    "os": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "pattern": "^0x[0-9a-f]{8}$"
+        },
+        "api": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "api"
+      ]
+    }
+  },
+  "required": [
+    "schema",
+    "exit_code",
+    "diagnosis",
+    "message"
+  ],
+  "additionalProperties": true
+}

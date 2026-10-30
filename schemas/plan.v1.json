@@ -1,0 +1,135 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/e-choness/dism-pro/schemas/plan.v1.json",
+  "title": "A plan (TD-0001 \u00a75.1). Changes use serde's external tagging: {\"<kind>\": {fields}}",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": "plan.v1"
+    },
+    "target": {
+      "type": "string"
+    },
+    "os_build": {
+      "type": "object",
+      "properties": {
+        "major": {
+          "type": "integer"
+        },
+        "minor": {
+          "type": "integer"
+        },
+        "build": {
+          "type": "integer"
+        },
+        "revision": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "major",
+        "minor",
+        "build",
+        "revision"
+      ]
+    },
+    "op": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "title_key": {
+          "type": "string"
+        },
+        "category": {
+          "type": "string"
+        },
+        "cancellable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "title_key",
+        "category",
+        "cancellable"
+      ]
+    },
+    "changes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "object",
+            "minProperties": 1,
+            "maxProperties": 1
+          },
+          "reversibility": {
+            "oneOf": [
+              {
+                "const": "reversible"
+              },
+              {
+                "type": "object",
+                "minProperties": 1,
+                "maxProperties": 1
+              }
+            ]
+          },
+          "reboot_required": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "kind",
+          "reversibility",
+          "reboot_required"
+        ]
+      }
+    },
+    "summary": {
+      "type": "object",
+      "properties": {
+        "changes": {
+          "type": "integer"
+        },
+        "bytes": {
+          "type": "integer"
+        },
+        "unique_bytes": {
+          "type": "integer"
+        },
+        "irreversible": {
+          "type": "integer"
+        },
+        "reboot_required": {
+          "type": "boolean"
+        },
+        "earliest_deadline": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "changes",
+        "bytes",
+        "unique_bytes",
+        "irreversible",
+        "reboot_required"
+      ]
+    }
+  },
+  "required": [
+    "schema",
+    "target",
+    "os_build",
+    "op",
+    "changes",
+    "summary"
+  ],
+  "additionalProperties": true
+}

@@ -1,0 +1,28 @@
+[package]
+name = "dpro-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+proptest.workspace = true
+serde_json.workspace = true
+
+[[bench]]
+name = "plan_build"
+harness = false
+
+[[bench]]
+name = "plan_serde"
+harness = false
+
+[lints]
+workspace = true

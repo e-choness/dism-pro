@@ -1,0 +1,15 @@
+# DLLs that DISM Pro executables may import and still start in WinPE (doc 04 §4, `xtask pe-compat`).
+# One lower-case name per line; a trailing `*` matches a prefix. `#` starts a comment.
+#
+# Policy: this list only grows with evidence. Each addition cites its source (Microsoft's
+# "WinPE: Add packages (Optional Components Reference)" or an ADK file listing) in the PR
+# that adds it. Entries marked "verify" are expected but not yet checked against an ADK.
+#
+# Seed: what an empty Rust std binary with the static CRT (.cargo/config.toml) imports.
+kernel32.dll                        # core Win32; present in every Windows image incl. WinPE (verify)
+ntdll.dll                           # NT native API used by std; present in every image (verify)
+bcryptprimitives.dll                # std random numbers (ProcessPrng) (verify)
+api-ms-win-core-synch-l1-2-0.dll    # std locks (WaitOnAddress); API set resolved by the loader (verify)
+# Added with the CLI (roadmap 2.5): registry/token APIs and the DISM API.
+advapi32.dll                        # registry + token APIs (windows-sys); core DLL in WinPE (verify)
+dismapi.dll                         # DISM API; WinPE ships DISM (verify the DLL name/location in the ADK WinPE file list)

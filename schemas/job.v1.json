@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/e-choness/dism-pro/schemas/job.v1.json",
+  "title": "Outcome of an apply / content of a journal",
+  "type": "object",
+  "$defs": {
+    "job_id": {
+      "type": "string",
+      "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "index_list": {
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "minimum": 0
+      }
+    }
+  },
+  "properties": {
+    "schema": {
+      "const": "job.v1"
+    },
+    "job": {
+      "$ref": "#/$defs/job_id"
+    },
+    "target": {
+      "type": "string"
+    },
+    "op": {
+      "description": "Operation id of the plan, e.g. features.enable, journal.undo",
+      "type": "string"
+    },
+    "created": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "undoes": {
+      "description": "For an undo job: the job it undoes",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/job_id"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "status": {
+      "enum": [
+        "completed",
+        "cancelled",
+        "aborted",
+        "interrupted"
+      ]
+    },
+    "applied": {
+      "$ref": "#/$defs/index_list"
+    },
+    "failed": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "index": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "code": {
+            "type": "string",
+            "pattern": "^0x[0-9a-f]{8}$"
+          }
+        },
+        "required": [
+          "index",
+          "code"
+        ]
+      }
+    },
+    "without_outcome": {
+      "$ref": "#/$defs/index_list"
+    },
+    "reboot_required": {
+      "description": "Windows reported that an applied change finishes at the next restart",
+      "type": "boolean"
+    },
+    "journal": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema",
+    "job",
+    "target",
+    "op",
+    "created",
+    "undoes",
+    "status",
+    "applied",
+    "failed",
+    "without_outcome",
+    "reboot_required",
+    "journal"
+  ],
+  "additionalProperties": true
+}

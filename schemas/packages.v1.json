@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/e-choness/dism-pro/schemas/packages.v1.json",
+  "title": "dismpro-cli packages list --json",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": "packages.v1"
+    },
+    "packages": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "identity": {
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "not-present",
+              "uninstall-pending",
+              "staged",
+              "removed",
+              "installed",
+              "install-pending",
+              "superseded",
+              "partially-installed",
+              "unknown"
+            ]
+          },
+          "release_type": {
+            "type": "integer"
+          },
+          "installed": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "identity",
+          "state",
+          "release_type",
+          "installed"
+        ]
+      }
+    }
+  },
+  "required": [
+    "schema",
+    "packages"
+  ],
+  "additionalProperties": true
+}

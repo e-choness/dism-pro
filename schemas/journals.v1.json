@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/e-choness/dism-pro/schemas/journals.v1.json",
+  "title": "dismpro-cli journal list --json",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": "journals.v1"
+    },
+    "jobs": {
+      "description": "Oldest job first",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "job": {
+            "$ref": "job.v1.json#/$defs/job_id"
+          },
+          "op": {
+            "type": "string"
+          },
+          "created": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "status": {
+            "enum": [
+              "completed",
+              "cancelled",
+              "aborted",
+              "interrupted"
+            ]
+          },
+          "applied": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "failed": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "reboot_required": {
+            "type": "boolean"
+          },
+          "undoes": {
+            "anyOf": [
+              {
+                "$ref": "job.v1.json#/$defs/job_id"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "undone_by": {
+            "anyOf": [
+              {
+                "$ref": "job.v1.json#/$defs/job_id"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "journal": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "job",
+          "op",
+          "created",
+          "status",
+          "applied",
+          "failed",
+          "reboot_required",
+          "undoes",
+          "undone_by",
+          "journal"
+        ]
+      }
+    }
+  },
+  "required": [
+    "schema",
+    "jobs"
+  ],
+  "additionalProperties": true
+}
