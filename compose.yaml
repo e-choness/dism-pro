@@ -14,6 +14,9 @@ x-toolchain: &toolchain
     - cargo-registry:/usr/local/cargo/registry
     - cargo-git:/usr/local/cargo/git
     - sccache:/sccache
+  environment: &env
+    # Lets xtask turn failures into GitHub annotations (empty outside Actions).
+    GITHUB_ACTIONS: ${GITHUB_ACTIONS:-}
 
 x-t1: &t1
   <<: *toolchain
@@ -64,6 +67,7 @@ services:
     <<: *t1
     entrypoint: ["bash", "/src/docker/task.sh", "ffi-check"]
     environment:
+      <<: *env
       # Extra header dirs inside the container, e.g. a bind-mounted ADK DismApi include dir.
       DPRO_FFI_INCLUDE: ${DPRO_FFI_INCLUDE:-}
 

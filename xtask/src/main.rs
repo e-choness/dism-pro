@@ -35,9 +35,30 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("xtask: {e}");
+            let task = args.first().map_or("", String::as_str);
+            annotate(&format!("xtask {task}"), &e.to_string());
             ExitCode::FAILURE
         }
     }
+}
+
+/// Under GitHub Actions, prints an error annotation: shown on the PR, and readable through the
+/// checks API without the job log. Does nothing elsewhere. Compose passes `GITHUB_ACTIONS` in.
+pub(crate) fn annotate(title: &str, message: &str) {
+    if env::var_os("GITHUB_ACTIONS").is_some_and(|v| v == "true") {
+        println!("{}", annotation(title, message));
+    }
+}
+
+/// `::error title=…::…` with the workflow-command escaping.
+fn annotation(title: &str, message: &str) -> String {
+    let data = |s: &str| {
+        s.replace('%', "%25")
+            .replace('\r', "%0D")
+            .replace('\n', "%0A")
+    };
+    let title = data(title).replace(':', "%3A").replace(',', "%2C");
+    format!("::error title={title}::{}", data(message))
 }
 
 fn run(args: &[String]) -> Result<()> {
@@ -59,4 +80,21 @@ fn workspace_root() -> PathBuf {
     // CARGO_MANIFEST_DIR is `<root>/xtask`.
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     dir.parent().unwrap_or(dir).to_path_buf()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn annotations_escape_workflow_command_syntax() {
+        assert_eq!(
+            annotation("S-03 a.h (x86_64), arm", "50% off\r\nline 2"),
+            "::error title=S-03 a.h (x86_64)%2C arm::50%25 off%0D%0Aline 2"
+        );
+        assert_eq!(
+            annotation("xtask: size", "ok"),
+            "::error title=xtask%3A size::ok"
+        );
+    }
 }

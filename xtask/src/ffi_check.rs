@@ -9,7 +9,9 @@
 //! A header that can't be found is an error, never a skip.
 
 use std::{
-    env, fs,
+    env,
+    fmt::Write as _,
+    fs,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -40,7 +42,7 @@ pub(crate) fn run(root: &Path, args: &[String]) -> Result<()> {
         let file = out_dir.join(format!("{header}.c"));
         fs::write(&file, source)?;
         for target in TARGETS {
-            let status = Command::new("clang-cl")
+            let out = Command::new("clang-cl")
                 .args(["/nologo", "/Zs", "/TC", "-Wno-unused-command-line-argument"])
                 .arg(format!("--target={target}"))
                 .args(
@@ -49,10 +51,20 @@ pub(crate) fn run(root: &Path, args: &[String]) -> Result<()> {
                         .flat_map(|d| [PathBuf::from("/imsvc"), d.clone()]),
                 )
                 .arg(&file)
-                .status()?;
-            if status.success() {
+                .output()?;
+            let diagnostics = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            print!("{diagnostics}");
+            if out.status.success() {
                 println!("ffi-check: ok   {header} ({target})");
             } else {
+                crate::annotate(
+                    &format!("S-03 {header} ({target})"),
+                    &error_lines(&diagnostics),
+                );
                 failures.push(format!(
                     "{header} ({target}): mismatch, see clang-cl output"
                 ));
@@ -66,6 +78,29 @@ pub(crate) fn run(root: &Path, args: &[String]) -> Result<()> {
         println!("ffi-check: FAIL {f}");
     }
     Err(format!("{} ffi-check failure(s) (S-03)", failures.len()).into())
+}
+
+/// The compiler's `error:` lines (paths trimmed to the file name), capped so one annotation stays
+/// readable; the full output is in the log.
+fn error_lines(diagnostics: &str) -> String {
+    const MAX: usize = 40;
+    let errors: Vec<String> = diagnostics
+        .lines()
+        .filter_map(|l| {
+            let (location, message) = l.split_at(l.find("error:")?);
+            let file = location.rsplit_once('/').map_or(location, |(_, f)| f);
+            Some(format!("{file}{message}"))
+        })
+        .collect();
+    if errors.is_empty() {
+        let lines: Vec<&str> = diagnostics.lines().collect();
+        return lines[lines.len().saturating_sub(10)..].join("\n");
+    }
+    let mut text = errors[..errors.len().min(MAX)].join("\n");
+    if errors.len() > MAX {
+        let _ = write!(text, "\n… {} more", errors.len() - MAX); // ignore: String writes can't fail
+    }
+    text
 }
 
 fn generate(header: &str) -> Result<String> {
@@ -156,6 +191,19 @@ mod tests {
         fs::create_dir_all(root.join("sdk/include/um")).unwrap();
         assert_eq!(find_splat_root(&base, 3), Some(root));
         fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn error_lines_keep_messages_and_drop_directories() {
+        let out = "/src/target/ffi-check/dismapi.h.c(7,1): error: static assertion failed: a/b\n\
+                   note: expanded from here\n\
+                   /x/um/dismapi.h(3,9): error: unknown type name 'DISM'\n";
+        assert_eq!(
+            error_lines(out),
+            "dismapi.h.c(7,1): error: static assertion failed: a/b\n\
+             dismapi.h(3,9): error: unknown type name 'DISM'"
+        );
+        assert_eq!(error_lines("one\ntwo"), "one\ntwo");
     }
 
     #[test]
