@@ -1,0 +1,28 @@
+# Spike S-06 (roadmap 1.9, TD-0014 §7.3/§12): registry hive reorganization and the cost of broken
+# context-menu handlers, on the windows-2025 runner VM. Throwaway: lives on spike/s06* branches only.
+name: spike-s06
+
+on:
+  push:
+    branches: ["spike/s06*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  s06:
+    runs-on: windows-2025
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: shell extensions
+        run: ./.github/scripts/spike-s06.ps1 -Experiment Shell
+      - name: hives
+        if: always()
+        run: ./.github/scripts/spike-s06.ps1 -Experiment Hives
