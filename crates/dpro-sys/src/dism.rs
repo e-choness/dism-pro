@@ -9,9 +9,9 @@
 
 #![allow(non_snake_case, non_camel_case_types, non_upper_case_globals)]
 
-use crate::types::{PCWSTR, PVOID, SYSTEMTIME, UINT};
 #[cfg(windows)]
-use crate::types::{BOOL, DWORD, HANDLE, HRESULT};
+use crate::types::{BOOL, DWORD, HANDLE};
+use crate::types::{HRESULT, PCWSTR, PVOID, SYSTEMTIME, UINT};
 
 /// Opaque session handle (`typedef UINT DismSession`).
 pub type DismSession = UINT;
@@ -57,6 +57,15 @@ pub const DISM_MOUNT_OPTIMIZE: u32 = 0x0000_0002;
 pub const DISM_MOUNT_CHECK_INTEGRITY: u32 = 0x0000_0004;
 pub const DISM_COMMIT_IMAGE: u32 = 0x0000_0000;
 pub const DISM_DISCARD_IMAGE: u32 = 0x0000_0001;
+
+/// Success code: the session must be closed and reopened before it is used again
+/// (`DismEnableFeature` and other servicing calls, per their "Return value" docs).
+pub const DISMAPI_S_RELOAD_IMAGE_SESSION_REQUIRED: HRESULT = 0x0000_0001;
+/// Success code `(HRESULT)ERROR_SUCCESS_REBOOT_REQUIRED` (`winerror.h`): an online change
+/// finishes at the next restart. Not `HRESULT_FROM_WIN32`: the value stays positive.
+pub const ERROR_SUCCESS_REBOOT_REQUIRED: HRESULT = 3010;
+/// `HRESULT_FROM_WIN32(ERROR_CANCELLED)`: a call stopped because its `CancelEvent` was set.
+pub const HRESULT_ERROR_CANCELLED: HRESULT = i32::from_ne_bytes(0x8007_04C7_u32.to_ne_bytes());
 
 /// `DISM_PROGRESS_CALLBACK`.
 pub type DISM_PROGRESS_CALLBACK =
@@ -184,13 +193,25 @@ unsafe extern "system" {
 /// C prototypes of the functions above, for the ffi-check signature test. Keep in the same
 /// order and in sync with the `extern` block.
 pub const C_PROTOTYPES: &[(&str, &str)] = &[
-    ("DismInitialize", "HRESULT (WINAPI *)(DismLogLevel, PCWSTR, PCWSTR)"),
+    (
+        "DismInitialize",
+        "HRESULT (WINAPI *)(DismLogLevel, PCWSTR, PCWSTR)",
+    ),
     ("DismShutdown", "HRESULT (WINAPI *)(void)"),
-    ("DismOpenSession", "HRESULT (WINAPI *)(PCWSTR, PCWSTR, PCWSTR, DismSession *)"),
+    (
+        "DismOpenSession",
+        "HRESULT (WINAPI *)(PCWSTR, PCWSTR, PCWSTR, DismSession *)",
+    ),
     ("DismCloseSession", "HRESULT (WINAPI *)(DismSession)"),
-    ("DismGetLastErrorMessage", "HRESULT (WINAPI *)(DismString **)"),
+    (
+        "DismGetLastErrorMessage",
+        "HRESULT (WINAPI *)(DismString **)",
+    ),
     ("DismDelete", "HRESULT (WINAPI *)(VOID *)"),
-    ("DismGetPackages", "HRESULT (WINAPI *)(DismSession, DismPackage **, UINT *)"),
+    (
+        "DismGetPackages",
+        "HRESULT (WINAPI *)(DismSession, DismPackage **, UINT *)",
+    ),
     (
         "DismGetFeatures",
         "HRESULT (WINAPI *)(DismSession, PCWSTR, DismPackageIdentifier, DismFeature **, UINT *)",

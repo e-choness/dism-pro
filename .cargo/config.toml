@@ -3,8 +3,10 @@ xtask = "run --quiet --package xtask --"
 
 # Static CRT: WinPE ships no VC++ runtime, so the exes must not import vcruntime/ucrt DLLs
 # (checked by `xtask pe-compat`, roadmap 1.3a). cargo-xwin reads these flags and links libucrt.
+# /IGNORE:4099: the xwin CRT has no PDBs; without this every test link prints ~100 LNK4099
+# warnings that bury real ones.
 [target.x86_64-pc-windows-msvc]
-rustflags = ["-C", "target-feature=+crt-static"]
+rustflags = ["-C", "target-feature=+crt-static", "-C", "link-arg=/IGNORE:4099"]
 
 [target.aarch64-pc-windows-msvc]
-rustflags = ["-C", "target-feature=+crt-static"]
+rustflags = ["-C", "target-feature=+crt-static", "-C", "link-arg=/IGNORE:4099"]

@@ -18,15 +18,20 @@ mod run;
 
 use std::path::Path;
 
-use args::{Cli, Command};
+use args::{Cli, Command, JournalRef};
 use dpro_cli_fmt::{exit::ExitCode, messages::Messages};
 use error::CliError;
 
 fn main() -> std::process::ExitCode {
     let m = Messages::en_us();
-    let cli = match args::parse(std::env::args_os().skip(1)) {
+    let argv: Vec<_> = std::env::args_os().skip(1).collect();
+    let cli = match args::parse(argv.clone()) {
         Ok(cli) => cli,
-        Err(e) => return out::report_error(&CliError::Usage(e.0), false, &m),
+        Err(e) => {
+            // Honour --json even when the rest of the command line is wrong.
+            let json = argv.iter().any(|a| a == "--json");
+            return out::report_error(&CliError::Usage(e.0), json, &m);
+        }
     };
     match dispatch(&cli, &m) {
         Ok(code) => std::process::ExitCode::from(code.code()),
@@ -41,10 +46,13 @@ fn dispatch(cli: &Cli, m: &Messages) -> Result<ExitCode, CliError> {
             Ok(ExitCode::Ok)
         }
         Command::Version => {
-            println!("{}", m.get("cli-version", &[("version", &env!("CARGO_PKG_VERSION"))]));
+            println!(
+                "{}",
+                m.get("cli-version", &[("version", &env!("CARGO_PKG_VERSION"))])
+            );
             Ok(ExitCode::Ok)
         }
-        Command::JournalShow(path) => journal_show(cli, m, path),
+        Command::JournalShow(JournalRef::File(path)) => journal_show(cli, m, path),
         _ => platform(cli, m),
     }
 }
@@ -59,15 +67,14 @@ fn platform(_cli: &Cli, _m: &Messages) -> Result<ExitCode, CliError> {
     Err(CliError::Unsupported)
 }
 
-/// Portable: reading a journal needs no OS access.
-fn journal_show(cli: &Cli, m: &Messages, path: &Path) -> Result<ExitCode, CliError> {
-    let bytes = std::fs::read(path)?;
+/// `journal show <file>`: reading a journal file needs no OS access, so it works anywhere.
+pub(crate) fn journal_show(cli: &Cli, m: &Messages, path: &Path) -> Result<ExitCode, CliError> {
+    let bytes = std::fs::read(path).map_err(|e| CliError::io_at(path, &e))?;
     let rec = dpro_engine::journal::read(&bytes)?;
-    let doc = out::job_doc(&rec, path);
     if cli.global.json {
-        out::print_json(&doc)?;
+        out::print_json(&out::job_doc(&rec, path))?;
     } else {
-        out::print_job(&doc, m);
+        out::print_job(&rec, path, m);
     }
     Ok(ExitCode::Ok)
 }

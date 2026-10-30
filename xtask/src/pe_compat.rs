@@ -1,29 +1,35 @@
 //! `cargo xtask pe-compat --target <triple>…`: fails when a release exe imports (or
-//! delay-loads) a DLL outside the WinPE allowlist in `xtask/data/winpe-dlls.txt`.
-//! The substitute for a WinPE VM (doc 04 §4).
+//! delay-loads) a DLL outside the `WinPE` allowlist in `xtask/data/winpe-dlls.txt`.
+//! The substitute for a `WinPE` VM (doc 04 §4).
 
 use std::{
     env, fs,
     path::{Path, PathBuf},
 };
 
-use crate::{Result, pe, size::parse_targets};
+use crate::{
+    Result, pe,
+    size::{parse_targets, shipped},
+};
 
 const ALLOWLIST: &str = include_str!("../data/winpe-dlls.txt");
 
 pub(crate) fn run(root: &Path, args: &[String]) -> Result<()> {
     let targets = parse_targets(args)?;
-    let target_dir = env::var_os("CARGO_TARGET_DIR")
-        .map_or_else(|| root.join("target"), PathBuf::from);
+    let target_dir =
+        env::var_os("CARGO_TARGET_DIR").map_or_else(|| root.join("target"), PathBuf::from);
     let allowlist = parse_allowlist(ALLOWLIST);
 
     let mut checked = 0_usize;
     let mut failures = 0_usize;
     for target in &targets {
         let release = target_dir.join(target).join("release");
-        for exe in executables(&release)? {
-            let label = format!("{target}/{}", exe.file_name().unwrap_or_default().display());
-            let imports = pe::imports(&fs::read(&exe)?).map_err(|e| format!("{label}: {e}"))?;
+        for name in shipped() {
+            let label = format!("{target}/{name}");
+            let Ok(bytes) = fs::read(release.join(name)) else {
+                return Err(format!("pe-compat: {label} not found (build first)").into());
+            };
+            let imports = pe::imports(&bytes).map_err(|e| format!("{label}: {e}"))?;
             let outside = rejected(&imports, &allowlist);
             checked += 1;
             if outside.is_empty() {
@@ -49,25 +55,15 @@ pub(crate) fn run(root: &Path, args: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn executables(dir: &Path) -> Result<Vec<PathBuf>> {
-    let mut out = Vec::new();
-    if !dir.is_dir() {
-        return Ok(out);
-    }
-    for entry in fs::read_dir(dir)? {
-        let path = entry?.path();
-        let is_exe = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("exe"));
-        if is_exe && path.is_file() {
-            out.push(path);
-        }
-    }
-    out.sort();
-    Ok(out)
-}
-
 fn parse_allowlist(text: &str) -> Vec<String> {
     text.lines()
-        .map(|l| l.split('#').next().unwrap_or_default().trim().to_ascii_lowercase())
+        .map(|l| {
+            l.split('#')
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .to_ascii_lowercase()
+        })
         .filter(|l| !l.is_empty())
         .collect()
 }

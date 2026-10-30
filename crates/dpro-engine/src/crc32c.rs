@@ -12,7 +12,11 @@ const TABLE: [u32; 256] = {
         let mut crc = i as u32;
         let mut bit = 0;
         while bit < 8 {
-            crc = if crc & 1 == 1 { (crc >> 1) ^ POLY } else { crc >> 1 };
+            crc = if crc & 1 == 1 {
+                (crc >> 1) ^ POLY
+            } else {
+                crc >> 1
+            };
             bit += 1;
         }
         table[i] = crc;

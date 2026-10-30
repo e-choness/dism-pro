@@ -86,9 +86,15 @@ pub fn long_path(path: &Path) -> PathBuf {
         && units[1] == u16::from(b':')
         && (units[2] == u16::from(b'\\') || units[2] == u16::from(b'/'));
     let mut out: Vec<u16> = if is_drive {
-        r"\\?\".encode_utf16().chain(units.iter().copied()).collect()
+        r"\\?\"
+            .encode_utf16()
+            .chain(units.iter().copied())
+            .collect()
     } else if starts(r"\\") {
-        r"\\?\UNC\".encode_utf16().chain(units[2..].iter().copied()).collect()
+        r"\\?\UNC\"
+            .encode_utf16()
+            .chain(units[2..].iter().copied())
+            .collect()
     } else {
         return path.to_path_buf();
     };
@@ -116,7 +122,10 @@ mod tests {
     fn unpaired_surrogates_survive() {
         let units = [0xD800_u16, u16::from(b'x'), 0];
         let s = from_wide_buf(&units);
-        assert_eq!(s.encode_wide().collect::<Vec<_>>(), [0xD800, u16::from(b'x')]);
+        assert_eq!(
+            s.encode_wide().collect::<Vec<_>>(),
+            [0xD800, u16::from(b'x')]
+        );
         // SAFETY: `units` is NUL-terminated.
         let p = unsafe { from_wide_ptr(units.as_ptr()) }.unwrap();
         assert_eq!(p, s);
@@ -124,9 +133,15 @@ mod tests {
 
     #[test]
     fn long_paths_get_the_right_prefix() {
-        assert_eq!(long_path(Path::new(r"C:\Windows")), Path::new(r"\\?\C:\Windows"));
+        assert_eq!(
+            long_path(Path::new(r"C:\Windows")),
+            Path::new(r"\\?\C:\Windows")
+        );
         assert_eq!(long_path(Path::new("c:/a/b")), Path::new(r"\\?\c:\a\b"));
-        assert_eq!(long_path(Path::new(r"\\srv\share\x")), Path::new(r"\\?\UNC\srv\share\x"));
+        assert_eq!(
+            long_path(Path::new(r"\\srv\share\x")),
+            Path::new(r"\\?\UNC\srv\share\x")
+        );
         assert_eq!(long_path(Path::new(r"\\?\D:\x")), Path::new(r"\\?\D:\x"));
         assert_eq!(long_path(Path::new(r"rel\x")), Path::new(r"rel\x"));
     }

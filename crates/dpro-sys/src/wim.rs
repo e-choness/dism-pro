@@ -5,9 +5,9 @@
 
 #![allow(non_snake_case, non_camel_case_types)]
 
-use crate::types::{DWORD, LPARAM, PVOID, WPARAM};
 #[cfg(windows)]
 use crate::types::{BOOL, HANDLE, PCWSTR};
+use crate::types::{DWORD, LPARAM, PVOID, WPARAM};
 
 pub const WIM_GENERIC_READ: DWORD = 0x8000_0000;
 pub const WIM_GENERIC_WRITE: DWORD = 0x4000_0000;
@@ -25,9 +25,14 @@ pub const WIM_COMPRESS_LZMS: DWORD = 3;
 
 /// `WIM_MSG` (`WM_APP + 0x1476`); the `WIM_MSG_*` ids are offsets from it.
 pub const WIM_MSG: DWORD = 0x8000 + 0x1476;
-pub const WIM_MSG_PROGRESS: DWORD = WIM_MSG + 1;
+pub const WIM_MSG_TEXT: DWORD = WIM_MSG + 1;
+/// `wParam` = percent done, `lParam` = estimated milliseconds left.
+pub const WIM_MSG_PROGRESS: DWORD = WIM_MSG + 2;
+pub const WIM_MSG_PROCESS: DWORD = WIM_MSG + 3;
 /// Callback return values.
 pub const WIM_MSG_SUCCESS: DWORD = 0;
+pub const WIM_MSG_DONE: DWORD = 0xFFFF_FFF0;
+pub const WIM_MSG_SKIP_ERROR: DWORD = 0xFFFF_FFFE;
 pub const WIM_MSG_ABORT_IMAGE: DWORD = 0xFFFF_FFFF;
 
 /// Message callback registered with `WIMRegisterMessageCallback`.
@@ -83,8 +88,20 @@ pub const C_PROTOTYPES: &[(&str, &str)] = &[
     ("WIMGetImageCount", "DWORD (WINAPI *)(HANDLE)"),
     ("WIMLoadImage", "HANDLE (WINAPI *)(HANDLE, DWORD)"),
     ("WIMApplyImage", "BOOL (WINAPI *)(HANDLE, PCWSTR, DWORD)"),
-    ("WIMCaptureImage", "HANDLE (WINAPI *)(HANDLE, PCWSTR, DWORD)"),
-    ("WIMGetImageInformation", "BOOL (WINAPI *)(HANDLE, PVOID *, PDWORD)"),
-    ("WIMRegisterMessageCallback", "DWORD (WINAPI *)(HANDLE, FARPROC, PVOID)"),
-    ("WIMUnregisterMessageCallback", "BOOL (WINAPI *)(HANDLE, FARPROC)"),
+    (
+        "WIMCaptureImage",
+        "HANDLE (WINAPI *)(HANDLE, PCWSTR, DWORD)",
+    ),
+    (
+        "WIMGetImageInformation",
+        "BOOL (WINAPI *)(HANDLE, PVOID *, PDWORD)",
+    ),
+    (
+        "WIMRegisterMessageCallback",
+        "DWORD (WINAPI *)(HANDLE, FARPROC, PVOID)",
+    ),
+    (
+        "WIMUnregisterMessageCallback",
+        "BOOL (WINAPI *)(HANDLE, FARPROC)",
+    ),
 ];

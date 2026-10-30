@@ -43,13 +43,19 @@ pub(crate) fn run(root: &Path, args: &[String]) -> Result<()> {
             let status = Command::new("clang-cl")
                 .args(["/nologo", "/Zs", "/TC", "-Wno-unused-command-line-argument"])
                 .arg(format!("--target={target}"))
-                .args(includes.iter().flat_map(|d| [PathBuf::from("/imsvc"), d.clone()]))
+                .args(
+                    includes
+                        .iter()
+                        .flat_map(|d| [PathBuf::from("/imsvc"), d.clone()]),
+                )
                 .arg(&file)
                 .status()?;
             if status.success() {
                 println!("ffi-check: ok   {header} ({target})");
             } else {
-                failures.push(format!("{header} ({target}): mismatch, see clang-cl output"));
+                failures.push(format!(
+                    "{header} ({target}): mismatch, see clang-cl output"
+                ));
             }
         }
     }
@@ -64,7 +70,15 @@ pub(crate) fn run(root: &Path, args: &[String]) -> Result<()> {
 
 fn generate(header: &str) -> Result<String> {
     let out = Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
-        .args(["run", "--quiet", "--locked", "-p", "dpro-sys", "--example", "ffi-check-source"])
+        .args([
+            "run",
+            "--quiet",
+            "--locked",
+            "-p",
+            "dpro-sys",
+            "--example",
+            "ffi-check-source",
+        ])
         .arg("--")
         .arg(header)
         .output()?;
@@ -78,7 +92,8 @@ fn generate(header: &str) -> Result<String> {
 /// `crt/include` and `sdk/include/{ucrt,um,shared}` of the xwin splat, wherever
 /// cargo-xwin put it under `$XWIN_CACHE_DIR`.
 fn sdk_include_dirs() -> Result<Vec<PathBuf>> {
-    let base = env::var_os("XWIN_CACHE_DIR").map_or_else(|| PathBuf::from("/opt/xwin"), PathBuf::from);
+    let base =
+        env::var_os("XWIN_CACHE_DIR").map_or_else(|| PathBuf::from("/opt/xwin"), PathBuf::from);
     let root = find_splat_root(&base, 3)
         .ok_or_else(|| format!("no xwin SDK splat under {}", base.display()))?;
     let sdk = root.join("sdk").join("include");
@@ -91,23 +106,35 @@ fn sdk_include_dirs() -> Result<Vec<PathBuf>> {
 }
 
 fn find_splat_root(dir: &Path, depth: u32) -> Option<PathBuf> {
-    if dir.join("crt").join("include").is_dir() && dir.join("sdk").join("include").join("um").is_dir() {
+    if dir.join("crt").join("include").is_dir()
+        && dir.join("sdk").join("include").join("um").is_dir()
+    {
         return Some(dir.to_path_buf());
     }
     if depth == 0 {
         return None;
     }
-    let mut children: Vec<PathBuf> = fs::read_dir(dir).ok()?.filter_map(|e| Some(e.ok()?.path())).collect();
+    let mut children: Vec<PathBuf> = fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| Some(e.ok()?.path()))
+        .collect();
     children.sort();
-    children.into_iter().filter(|p| p.is_dir()).find_map(|p| find_splat_root(&p, depth - 1))
+    children
+        .into_iter()
+        .filter(|p| p.is_dir())
+        .find_map(|p| find_splat_root(&p, depth - 1))
 }
 
 /// Case-insensitive lookup: SDK header names vary in case (`DismApi.h`).
 fn find_header(dirs: &[PathBuf], name: &str) -> Option<PathBuf> {
     dirs.iter().find_map(|dir| {
-        fs::read_dir(dir).ok()?.filter_map(|e| e.ok().map(|e| e.path())).find(|p| {
-            p.file_name().is_some_and(|f| f.to_string_lossy().eq_ignore_ascii_case(name))
-        })
+        fs::read_dir(dir)
+            .ok()?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .find(|p| {
+                p.file_name()
+                    .is_some_and(|f| f.to_string_lossy().eq_ignore_ascii_case(name))
+            })
     })
 }
 

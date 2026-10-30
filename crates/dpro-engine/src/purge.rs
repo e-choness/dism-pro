@@ -16,7 +16,10 @@ use dpro_core::{
     units::Bytes,
 };
 
-use crate::{job::Backend, paths};
+use crate::{
+    job::{Applied, Backend},
+    paths,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum PurgeError {
@@ -29,7 +32,10 @@ pub enum PurgeError {
 /// Folders DISM Pro owns on a volume.
 #[must_use]
 pub fn owned_dirs(volume_root: &Path) -> [PathBuf; 2] {
-    [paths::state_dir(volume_root), volume_root.join("$DismProQuarantine")]
+    [
+        paths::state_dir(volume_root),
+        volume_root.join("$DismProQuarantine"),
+    ]
 }
 
 /// One irreversible `FileDelete` per file under [`owned_dirs`]. Links are listed as files
@@ -37,8 +43,17 @@ pub fn owned_dirs(volume_root: &Path) -> [PathBuf; 2] {
 ///
 /// # Errors
 /// A folder can't be read.
-pub fn plan_purge(target: TargetId, os_build: OsBuild, volume_root: &Path) -> Result<Plan, PurgeError> {
-    let op = OpDescriptor { id: "purge".into(), title_key: "op-purge".into(), category: "app".into(), cancellable: true };
+pub fn plan_purge(
+    target: TargetId,
+    os_build: OsBuild,
+    volume_root: &Path,
+) -> Result<Plan, PurgeError> {
+    let op = OpDescriptor {
+        id: "purge".into(),
+        title_key: "op-purge".into(),
+        category: "app".into(),
+        cancellable: true,
+    };
     let mut b = PlanBuilder::new(target, os_build, op);
     let reason = b.atom("rev-purge")?;
     let mut files = Vec::new();
@@ -49,7 +64,11 @@ pub fn plan_purge(target: TargetId, os_build: OsBuild, volume_root: &Path) -> Re
     for (path, size) in files {
         let atom = b.atom(&path.to_string_lossy())?;
         b.push(Change {
-            kind: ChangeKind::FileDelete { path: atom, bytes: Bytes(size), unique_bytes: Bytes(size) },
+            kind: ChangeKind::FileDelete {
+                path: atom,
+                bytes: Bytes(size),
+                unique_bytes: Bytes(size),
+            },
             reversibility: Reversibility::Irreversible { reason },
             reboot_required: false,
         })?;
@@ -58,7 +77,10 @@ pub fn plan_purge(target: TargetId, os_build: OsBuild, volume_root: &Path) -> Re
 }
 
 fn walk(dir: &Path, out: &mut Vec<(PathBuf, u64)>) -> Result<(), PurgeError> {
-    let io_err = |source| PurgeError::Io { path: dir.to_path_buf(), source };
+    let io_err = |source| PurgeError::Io {
+        path: dir.to_path_buf(),
+        source,
+    };
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -67,7 +89,7 @@ fn walk(dir: &Path, out: &mut Vec<(PathBuf, u64)>) -> Result<(), PurgeError> {
     for entry in entries {
         let entry = entry.map_err(io_err)?;
         let meta = fs::symlink_metadata(entry.path()).map_err(io_err)?;
-        if meta.is_dir() {
+        if is_plain_dir(&meta) {
             walk(&entry.path(), out)?;
         } else {
             out.push((entry.path(), meta.len()));
@@ -76,12 +98,28 @@ fn walk(dir: &Path, out: &mut Vec<(PathBuf, u64)>) -> Result<(), PurgeError> {
     Ok(())
 }
 
+/// A folder to descend into: not a symlink, junction or any other reparse point, so a link
+/// planted in DISM Pro's folders can never lead the walk or the deletes outside them.
+fn is_plain_dir(meta: &fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return false;
+        }
+    }
+    meta.is_dir() && !meta.is_symlink()
+}
+
 /// Removes now-empty folders under `root` (deepest first), then `root` itself if empty.
 /// Best effort: a folder that still has content is left alone.
 pub fn remove_empty_dirs(root: &Path) {
-    let Ok(entries) = fs::read_dir(root) else { return };
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
     for entry in entries.flatten() {
-        let is_real_dir = fs::symlink_metadata(entry.path()).is_ok_and(|m| m.is_dir());
+        let is_real_dir = fs::symlink_metadata(entry.path()).is_ok_and(|m| is_plain_dir(&m));
         if is_real_dir {
             remove_empty_dirs(&entry.path());
         }
@@ -94,18 +132,39 @@ pub fn remove_empty_dirs(root: &Path) {
 pub struct FsBackend;
 
 impl Backend for FsBackend {
-    fn capture_inverse(&mut self, _change: &Change<String>) -> Result<Option<ChangeKind<String>>, OsError> {
+    fn capture_inverse(
+        &mut self,
+        _change: &Change<String>,
+    ) -> Result<Option<ChangeKind<String>>, OsError> {
         Ok(None) // FileDelete is irreversible by definition
     }
 
-    fn apply(&mut self, change: &Change<String>) -> Result<(), OsError> {
+    fn apply(&mut self, change: &Change<String>) -> Result<Applied, OsError> {
         let ChangeKind::FileDelete { path, .. } = &change.kind else {
-            return Err(OsError { code: i32::from_ne_bytes(0x8000_4001_u32.to_ne_bytes()), api: "FsBackend::apply" });
+            return Err(OsError {
+                code: i32::from_ne_bytes(0x8000_4001_u32.to_ne_bytes()),
+                api: "FsBackend::apply",
+            });
         };
-        fs::remove_file(path).map_err(|e| {
-            let code = e.raw_os_error().map_or(1, |c| u32::try_from(c).unwrap_or(1));
-            OsError::from_win32(code, "DeleteFileW")
-        })
+        let os_error = |e: &io::Error, api| {
+            let code = e
+                .raw_os_error()
+                .map_or(1, |c| u32::try_from(c).unwrap_or(1));
+            OsError::from_win32(code, api)
+        };
+        match fs::remove_file(path) {
+            Ok(()) => Ok(Applied::Done),
+            // Windows deletes a directory symlink or junction with RemoveDirectoryW, which
+            // removes the link only, never its target.
+            Err(e)
+                if fs::symlink_metadata(path).is_ok_and(|m| !is_plain_dir(&m) && !m.is_file()) =>
+            {
+                fs::remove_dir(path)
+                    .map(|()| Applied::Done)
+                    .map_err(|_| os_error(&e, "DeleteFileW"))
+            }
+            Err(e) => Err(os_error(&e, "DeleteFileW")),
+        }
     }
 }
 
@@ -129,7 +188,11 @@ mod tests {
     }
 
     fn scratch() -> PathBuf {
-        let d = std::env::temp_dir().join(format!("dpro-purge-{}-{}", std::process::id(), paths::now().0));
+        let d = std::env::temp_dir().join(format!(
+            "dpro-purge-{}-{}",
+            std::process::id(),
+            paths::now().0
+        ));
         let _ = fs::remove_dir_all(&d); // ignore: may not exist
         d
     }
@@ -144,16 +207,36 @@ mod tests {
         fs::write(root.join("$DismProQuarantine").join("job").join("f"), b"x").unwrap();
         fs::write(root.join("keep.txt"), b"not ours").unwrap();
 
-        let build = OsBuild { major: 10, minor: 0, build: 1, revision: 0 };
+        let build = OsBuild {
+            major: 10,
+            minor: 0,
+            build: 1,
+            revision: 0,
+        };
         let plan = plan_purge(TargetId([0; 16]), build, &root).unwrap();
         assert_eq!(plan.summary().changes, 2);
         assert_eq!(plan.summary().bytes, Bytes(6));
         assert_eq!(plan.summary().irreversible, 2);
 
         let doc = plan.to_doc().unwrap();
-        let begin = Begin { job: paths::new_job_id(), target: TargetId([0; 16]), os_build: build, created: UnixMillis(0) };
+        let begin = Begin {
+            job: paths::new_job_id(),
+            target: TargetId([0; 16]),
+            os_build: build,
+            created: UnixMillis(0),
+            op: "purge".into(),
+            undoes: None,
+        };
         let writer = JournalWriter::create(Vec::new(), &begin).unwrap();
-        let (summary, _) = job::run(&doc.changes, &mut FsBackend, writer, &CancelToken::new(), &Zero, RunConfig::default()).unwrap();
+        let (summary, _) = job::run(
+            &doc.changes,
+            &mut FsBackend,
+            writer,
+            &CancelToken::new(),
+            &Zero,
+            RunConfig::default(),
+        )
+        .unwrap();
         assert_eq!(summary.applied, 2);
         for dir in owned_dirs(&root) {
             remove_empty_dirs(&dir);
@@ -164,9 +247,71 @@ mod tests {
     }
 
     #[test]
+    fn links_are_deleted_not_followed() {
+        let root = scratch();
+        let outside = root.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("precious"), b"keep").unwrap();
+        let journal = paths::journal_dir(&root);
+        fs::create_dir_all(&journal).unwrap();
+        let link = journal.join("link");
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(&outside, &link).is_ok();
+        // Directory symlinks need a privilege or developer mode on Windows.
+        #[cfg(windows)]
+        let made = std::os::windows::fs::symlink_dir(&outside, &link).is_ok();
+        // Wine reports success but doesn't list the link; only real links are tested.
+        let listed = fs::read_dir(&journal).unwrap().count() == 1;
+        if made && listed {
+            let build = OsBuild {
+                major: 10,
+                minor: 0,
+                build: 1,
+                revision: 0,
+            };
+            let doc = plan_purge(TargetId([0; 16]), build, &root)
+                .unwrap()
+                .to_doc()
+                .unwrap();
+            assert_eq!(doc.changes.len(), 1, "the link is one change");
+            let begin = Begin {
+                job: paths::new_job_id(),
+                target: TargetId([0; 16]),
+                os_build: build,
+                created: UnixMillis(0),
+                op: "purge".into(),
+                undoes: None,
+            };
+            let (summary, _) = job::run(
+                &doc.changes,
+                &mut FsBackend,
+                JournalWriter::create(Vec::new(), &begin).unwrap(),
+                &CancelToken::new(),
+                &Zero,
+                RunConfig::default(),
+            )
+            .unwrap();
+            assert_eq!((summary.applied, summary.failed), (1, 0));
+            assert!(fs::symlink_metadata(&link).is_err());
+            assert!(outside.join("precious").exists());
+        }
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
     fn nothing_to_purge_is_an_empty_plan() {
         let root = scratch();
-        let plan = plan_purge(TargetId([0; 16]), OsBuild { major: 10, minor: 0, build: 1, revision: 0 }, &root).unwrap();
+        let plan = plan_purge(
+            TargetId([0; 16]),
+            OsBuild {
+                major: 10,
+                minor: 0,
+                build: 1,
+                revision: 0,
+            },
+            &root,
+        )
+        .unwrap();
         assert_eq!(plan.summary().changes, 0);
     }
 }

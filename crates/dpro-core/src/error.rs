@@ -14,8 +14,15 @@ impl OsError {
     /// `HRESULT_FROM_WIN32` so every OS error is reported as an `HRESULT`.
     #[must_use]
     pub fn from_win32(code: u32, api: &'static str) -> Self {
-        let hresult = if code == 0 { 0 } else { (code & 0xFFFF) | (7 << 16) | 0x8000_0000 };
-        Self { code: i32::from_ne_bytes(hresult.to_ne_bytes()), api }
+        let hresult = if code == 0 {
+            0
+        } else {
+            (code & 0xFFFF) | (7 << 16) | 0x8000_0000
+        };
+        Self {
+            code: i32::from_ne_bytes(hresult.to_ne_bytes()),
+            api,
+        }
     }
 
     /// The code as an unsigned `HRESULT` bit pattern.
@@ -48,14 +55,20 @@ mod tests {
 
     #[test]
     fn win32_codes_become_hresults() {
-        assert_eq!(OsError::from_win32(5, "RegOpenKeyExW").hresult_bits(), 0x8007_0005);
+        assert_eq!(
+            OsError::from_win32(5, "RegOpenKeyExW").hresult_bits(),
+            0x8007_0005
+        );
         assert_eq!(OsError::from_win32(0, "x").code, 0);
     }
 
     #[test]
     fn os_error_shows_hresult_as_hex() {
         // E_ACCESSDENIED
-        let e = OsError { code: i32::from_ne_bytes(0x8007_0005_u32.to_ne_bytes()), api: "DismOpenSession" };
+        let e = OsError {
+            code: i32::from_ne_bytes(0x8007_0005_u32.to_ne_bytes()),
+            api: "DismOpenSession",
+        };
         assert_eq!(e.to_string(), "DismOpenSession failed with 0x80070005");
     }
 }

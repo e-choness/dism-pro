@@ -8,8 +8,18 @@ use dpro_core::{
 use crate::{
     messages::Messages,
     table::{Table, render},
-    units::format_bytes,
+    units::{format_bytes, format_utc},
 };
+
+/// Fluent id of what a change does, for the "Action" column.
+#[must_use]
+pub fn action_id(kind: &ChangeKind<String>) -> String {
+    match kind {
+        ChangeKind::FeatureState { enable: true, .. } => "change-feature_enable".to_owned(),
+        ChangeKind::FeatureState { enable: false, .. } => "change-feature_disable".to_owned(),
+        other => format!("change-{}", other.name()),
+    }
+}
 
 /// The main object a change acts on, for the "Object" column.
 #[must_use]
@@ -24,8 +34,12 @@ pub fn subject(kind: &ChangeKind<String>) -> String {
         | K::PackageAdd { path }
         | K::FileRestore { path, .. } => path.clone(),
         K::RegSet { key, value, .. } => format!(r"{key}\{value}"),
-        K::RegDelete { key, value } => value.as_ref().map_or_else(|| key.clone(), |v| format!(r"{key}\{v}")),
-        K::ServiceStart { name, .. } | K::ServiceDelete { name, .. } | K::FeatureState { name, .. } => name.clone(),
+        K::RegDelete { key, value } => value
+            .as_ref()
+            .map_or_else(|| key.clone(), |v| format!(r"{key}\{v}")),
+        K::ServiceStart { name, .. }
+        | K::ServiceDelete { name, .. }
+        | K::FeatureState { name, .. } => name.clone(),
         K::StartupEntry { id, .. } => id.clone(),
         K::FirewallRuleDelete { rule } => rule.clone(),
         K::AppxRemove { full_name, .. } => full_name.clone(),
@@ -45,14 +59,16 @@ pub fn render_plan(plan: &PlanDoc, m: &Messages, width: usize) -> String {
         return format!("{}\n", m.text("cli-nothing-to-do"));
     }
     let s = &plan.summary;
-    let mut out = m.get(
+    let mut out = m.text(&plan.op.title_key);
+    out.push('\n');
+    out.push_str(&m.get(
         "cli-plan-summary",
         &[
             ("count", &s.changes),
             ("bytes", &format_bytes(s.unique_bytes, m)),
             ("irreversible", &s.irreversible),
         ],
-    );
+    ));
     out.push_str("\n\n");
 
     let mut table = Table::new(&[
@@ -63,17 +79,30 @@ pub fn render_plan(plan: &PlanDoc, m: &Messages, width: usize) -> String {
     ]);
     for c in &plan.changes {
         let (bytes, _) = c.kind.freed();
-        let size = if bytes == Bytes::ZERO { String::new() } else { format_bytes(bytes, m) };
+        let size = if bytes == Bytes::ZERO {
+            String::new()
+        } else {
+            format_bytes(bytes, m)
+        };
         let mut badge = match &c.reversibility {
             Reversibility::Irreversible { .. } => m.text("badge-permanent"),
-            Reversibility::ReversibleUntil { until } => m.get("badge-undoable-until", &[("until", &until.0)]),
-            Reversibility::Reversible | Reversibility::ReversibleVia { .. } => m.text("badge-undoable"),
+            Reversibility::ReversibleUntil { until } => {
+                m.get("badge-undoable-until", &[("until", &format_utc(*until, m))])
+            }
+            Reversibility::Reversible | Reversibility::ReversibleVia { .. } => {
+                m.text("badge-undoable")
+            }
         };
         if c.reboot_required {
             badge.push_str(" · ");
             badge.push_str(&m.text("badge-reboot"));
         }
-        table.push(vec![m.text(&format!("change-{}", c.kind.name())), subject(&c.kind), size, badge]);
+        table.push(vec![
+            m.text(&action_id(&c.kind)),
+            subject(&c.kind),
+            size,
+            badge,
+        ]);
     }
     out.push_str(&render(&table, width));
     out
@@ -92,8 +121,18 @@ mod tests {
         PlanDoc {
             schema: PLAN_SCHEMA.into(),
             target: TargetId([0; 16]),
-            os_build: OsBuild { major: 10, minor: 0, build: 26100, revision: 0 },
-            op: OpDescriptor { id: "x".into(), title_key: "x".into(), category: "x".into(), cancellable: true },
+            os_build: OsBuild {
+                major: 10,
+                minor: 0,
+                build: 26100,
+                revision: 0,
+            },
+            op: OpDescriptor {
+                id: "x".into(),
+                title_key: "op-features-disable".into(),
+                category: "x".into(),
+                cancellable: true,
+            },
             changes,
             summary,
         }
@@ -101,21 +140,59 @@ mod tests {
 
     #[test]
     fn empty_plan_says_nothing_to_do() {
-        assert_eq!(render_plan(&doc(vec![], PlanSummary::default()), &Messages::en_us(), 80), "Nothing to do.\n");
+        assert_eq!(
+            render_plan(&doc(vec![], PlanSummary::default()), &Messages::en_us(), 80),
+            "Nothing to do.\n"
+        );
     }
 
     #[test]
     fn renders_summary_and_rows() {
         let change = Change {
-            kind: ChangeKind::FeatureState { name: "SMB1Protocol".into(), enable: false, source: None },
-            reversibility: Reversibility::Irreversible { reason: "rev-x".into() },
+            kind: ChangeKind::FeatureState {
+                name: "SMB1Protocol".into(),
+                enable: false,
+                source: None,
+            },
+            reversibility: Reversibility::Irreversible {
+                reason: "rev-x".into(),
+            },
             reboot_required: true,
         };
-        let summary = PlanSummary { changes: 1, irreversible: 1, reboot_required: true, ..PlanSummary::default() };
+        let summary = PlanSummary {
+            changes: 1,
+            irreversible: 1,
+            reboot_required: true,
+            ..PlanSummary::default()
+        };
         let out = render_plan(&doc(vec![change], summary), &Messages::en_us(), 100);
-        assert!(out.starts_with("1 changes · 0 B · 1 permanent\n"), "{out}");
-        assert!(out.contains("Change feature"));
+        assert!(
+            out.starts_with("Disable Windows features\nChanges: 1 · Size: 0 B · Permanent: 1\n"),
+            "{out}"
+        );
+        assert!(out.contains("Disable feature"));
         assert!(out.contains("SMB1Protocol"));
         assert!(out.contains("Permanent · Reboot"));
+    }
+
+    #[test]
+    fn undo_deadlines_are_dates() {
+        let change = Change {
+            kind: ChangeKind::FileQuarantine {
+                path: r"C:\x".into(),
+                bytes: Bytes(1),
+                unique_bytes: Bytes(1),
+            },
+            reversibility: Reversibility::ReversibleUntil {
+                until: dpro_core::units::UnixMillis(951_868_800_000),
+            },
+            reboot_required: false,
+        };
+        let summary = PlanSummary {
+            changes: 1,
+            ..PlanSummary::default()
+        };
+        let out = render_plan(&doc(vec![change], summary), &Messages::en_us(), 120);
+        assert!(out.contains("Undoable until 2000-03-01 00:00 UTC"), "{out}");
     }
 }

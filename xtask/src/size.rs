@@ -27,8 +27,8 @@ impl fmt::Display for Bytes {
 
 pub(crate) fn run(root: &Path, args: &[String]) -> Result<()> {
     let targets = parse_targets(args)?;
-    let target_dir = env::var_os("CARGO_TARGET_DIR")
-        .map_or_else(|| root.join("target"), PathBuf::from);
+    let target_dir =
+        env::var_os("CARGO_TARGET_DIR").map_or_else(|| root.join("target"), PathBuf::from);
 
     let mut failures = 0_usize;
     for target in &targets {
@@ -52,6 +52,11 @@ pub(crate) fn run(root: &Path, args: &[String]) -> Result<()> {
         return Err(format!("{failures} executable(s) over budget or missing").into());
     }
     Ok(())
+}
+
+/// The executables a release ships (what `pe-compat` checks too).
+pub(crate) fn shipped() -> impl Iterator<Item = &'static str> {
+    BUDGETS.iter().map(|(exe, _)| *exe)
 }
 
 fn within(size: Bytes, budget: Bytes) -> bool {

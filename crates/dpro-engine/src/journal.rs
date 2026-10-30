@@ -12,6 +12,7 @@
 use std::{
     collections::{HashMap, HashSet},
     io,
+    path::{Path, PathBuf},
 };
 
 use dpro_core::{
@@ -90,6 +91,10 @@ pub struct Begin {
     pub target: TargetId,
     pub os_build: OsBuild,
     pub created: UnixMillis,
+    /// The plan's `OpDescriptor::id` (e.g. `features.enable`), for listings.
+    pub op: String,
+    /// For an undo job: the job it undoes. A job can be undone once; undo the undo to redo.
+    pub undoes: Option<JobId>,
 }
 
 /// Change `index` of the plan is about to be applied; `inverse` undoes it (if any).
@@ -100,11 +105,16 @@ pub struct Intent {
     pub inverse: Option<ChangeKind<String>>,
 }
 
+/// Append new variants at the end: postcard encodes the variant index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Outcome {
     Applied,
     /// Not applied; `code` is the OS error (`HRESULT`/Win32), 0 if none.
-    Failed { code: i32 },
+    Failed {
+        code: i32,
+    },
+    /// Applied; finishes at the next restart (`ERROR_SUCCESS_REBOOT_REQUIRED`).
+    AppliedRebootRequired,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -155,7 +165,12 @@ impl<W: JournalSink> JournalWriter<W> {
     /// # Errors
     /// I/O or encoding errors.
     pub fn create(sink: W, begin: &Begin) -> Result<Self, JournalError> {
-        let mut w = Self { sink, buf: Vec::with_capacity(64 * 1024), buffered_intents: 0, syncs: 0 };
+        let mut w = Self {
+            sink,
+            buf: Vec::with_capacity(64 * 1024),
+            buffered_intents: 0,
+            syncs: 0,
+        };
         w.buf.extend_from_slice(&MAGIC);
         w.buf.extend_from_slice(&JOURNAL_SCHEMA.to_le_bytes());
         w.push(KIND_BEGIN, begin)?;
@@ -232,7 +247,8 @@ impl<W: JournalSink> JournalWriter<W> {
             self.buf.truncate(frame_start);
             return Err(JournalError::RecordTooLarge(len));
         }
-        let len = u32::try_from(body.len()).map_err(|_| JournalError::RecordTooLarge(body.len()))?;
+        let len =
+            u32::try_from(body.len()).map_err(|_| JournalError::RecordTooLarge(body.len()))?;
         let crc = crc32c(body);
         self.buf[frame_start..frame_start + 4].copy_from_slice(&len.to_le_bytes());
         self.buf[frame_start + 4..frame_start + 8].copy_from_slice(&crc.to_le_bytes());
@@ -288,12 +304,20 @@ pub fn read(bytes: &[u8]) -> Result<Recovered, JournalError> {
         offset = next;
     }
     let begin = begin.ok_or(JournalError::NoBegin)?;
-    Ok(Recovered { begin, records, valid_len: offset, torn })
+    Ok(Recovered {
+        begin,
+        records,
+        valid_len: offset,
+        torn,
+    })
 }
 
 fn read_frame(bytes: &[u8], offset: usize) -> Option<(Record, usize)> {
     let header = bytes.get(offset..offset.checked_add(FRAME_HEADER_LEN)?)?;
-    let len = usize::try_from(u32::from_le_bytes([header[0], header[1], header[2], header[3]])).ok()?;
+    let len = usize::try_from(u32::from_le_bytes([
+        header[0], header[1], header[2], header[3],
+    ]))
+    .ok()?;
     let crc = u32::from_le_bytes([header[4], header[5], header[6], header[7]]);
     if len == 0 || len > MAX_RECORD_LEN {
         return None;
@@ -328,17 +352,38 @@ pub struct JobReport {
     /// Intents without a done record. After a commit these were never applied; for an
     /// interrupted job they must be probed against the target.
     pub without_outcome: Vec<u32>,
+    /// An applied change finishes at the next restart.
+    pub reboot_required: bool,
 }
 
 #[must_use]
 pub fn analyze(rec: &Recovered) -> JobReport {
-    let mut report = JobReport { status: None, applied: Vec::new(), failed: Vec::new(), without_outcome: Vec::new() };
+    let mut report = JobReport {
+        status: None,
+        applied: Vec::new(),
+        failed: Vec::new(),
+        without_outcome: Vec::new(),
+        reboot_required: false,
+    };
     let mut intents = Vec::new();
     for r in &rec.records {
         match r {
             Record::Intent(i) => intents.push(i.index),
-            Record::Done(Done { index, outcome: Outcome::Applied }) => report.applied.push(*index),
-            Record::Done(Done { index, outcome: Outcome::Failed { code } }) => {
+            Record::Done(Done {
+                index,
+                outcome: Outcome::Applied,
+            }) => report.applied.push(*index),
+            Record::Done(Done {
+                index,
+                outcome: Outcome::AppliedRebootRequired,
+            }) => {
+                report.applied.push(*index);
+                report.reboot_required = true;
+            }
+            Record::Done(Done {
+                index,
+                outcome: Outcome::Failed { code },
+            }) => {
                 report.failed.push((*index, *code));
             }
             Record::Commit(c) => report.status = Some(c.status),
@@ -346,22 +391,36 @@ pub fn analyze(rec: &Recovered) -> JobReport {
         }
     }
     // Sets, not Vec::contains: recovery of 100k records has a 300 ms budget (§7.2).
-    let decided: HashSet<u32> =
-        report.applied.iter().copied().chain(report.failed.iter().map(|(i, _)| *i)).collect();
-    report.without_outcome = intents.into_iter().filter(|i| !decided.contains(i)).collect();
+    let decided: HashSet<u32> = report
+        .applied
+        .iter()
+        .copied()
+        .chain(report.failed.iter().map(|(i, _)| *i))
+        .collect();
+    report.without_outcome = intents
+        .into_iter()
+        .filter(|i| !decided.contains(i))
+        .collect();
     report
 }
 
 /// The changes that undo a job: the inverses of applied changes, newest first.
 /// `also_applied` lists interrupted intents that probing found applied. Expired
 /// (`ReversibleUntil` before `now`) and irreversible changes are skipped. Each undo
-/// change is itself `Reversible`, so an undo can be undone.
+/// change is itself undoable, so an undo can be undone: a captured inverse becomes
+/// `Reversible` (its own inverse is captured when it runs), a `ReversibleVia` change
+/// becomes `ReversibleVia` the original change.
 #[must_use]
 pub fn undo_changes(rec: &Recovered, also_applied: &[u32], now: UnixMillis) -> Vec<Change<String>> {
     let report = analyze(rec);
     let in_doubt: HashSet<u32> = report.without_outcome.iter().copied().collect();
     let mut order: Vec<u32> = report.applied;
-    order.extend(also_applied.iter().copied().filter(|i| in_doubt.contains(i)));
+    order.extend(
+        also_applied
+            .iter()
+            .copied()
+            .filter(|i| in_doubt.contains(i)),
+    );
     let intents: HashMap<u32, &Intent> = rec
         .records
         .iter()
@@ -375,23 +434,85 @@ pub fn undo_changes(rec: &Recovered, also_applied: &[u32], now: UnixMillis) -> V
         let Some(intent) = intents.get(&index) else {
             continue;
         };
-        let inverse = match &intent.change.reversibility {
+        let undo = match &intent.change.reversibility {
             Reversibility::Irreversible { .. } => None,
-            Reversibility::ReversibleVia { inverse } => Some((**inverse).clone()),
-            Reversibility::ReversibleUntil { until } => {
-                if *until < now { None } else { intent.inverse.clone() }
-            }
-            Reversibility::Reversible => intent.inverse.clone(),
+            Reversibility::ReversibleVia { inverse } => Some((
+                (**inverse).clone(),
+                Reversibility::ReversibleVia {
+                    inverse: Box::new(intent.change.kind.clone()),
+                },
+            )),
+            Reversibility::ReversibleUntil { until } if *until < now => None,
+            Reversibility::ReversibleUntil { .. } | Reversibility::Reversible => intent
+                .inverse
+                .clone()
+                .map(|kind| (kind, Reversibility::Reversible)),
         };
-        if let Some(kind) = inverse {
+        if let Some((kind, reversibility)) = undo {
             out.push(Change {
                 kind,
-                reversibility: Reversibility::Reversible,
+                reversibility,
                 reboot_required: intent.change.reboot_required,
             });
         }
     }
     out
+}
+
+/// A journal file and what it says (`journal list`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JournalEntry {
+    pub path: PathBuf,
+    pub begin: Begin,
+    pub report: JobReport,
+    /// Bytes after the last valid record were discarded (crash mid-write).
+    pub torn: bool,
+}
+
+/// Every readable journal (`*.dpj`) in `dir`, oldest first. Files that aren't DISM Pro
+/// journals are skipped; a missing folder is an empty list.
+///
+/// # Errors
+/// The folder exists but can't be read.
+pub fn list(dir: &Path) -> io::Result<Vec<JournalEntry>> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let mut out = Vec::new();
+    for entry in entries {
+        let path = entry?.path();
+        if path
+            .extension()
+            .is_none_or(|e| !e.eq_ignore_ascii_case("dpj"))
+        {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        if let Ok(rec) = read(&bytes) {
+            out.push(JournalEntry {
+                report: analyze(&rec),
+                torn: rec.torn,
+                begin: rec.begin,
+                path,
+            });
+        }
+    }
+    out.sort_by_key(|e| e.begin.job);
+    Ok(out)
+}
+
+/// The job that undid `job`, if any: an undo job naming it that applied at least one change.
+#[must_use]
+pub fn undone_by(entries: &[JournalEntry], job: JobId) -> Option<JobId> {
+    entries
+        .iter()
+        .rev()
+        .find(|e| e.begin.undoes == Some(job) && !e.report.applied.is_empty())
+        .map(|e| e.begin.job)
 }
 
 #[cfg(test)]
@@ -404,8 +525,15 @@ mod tests {
         Begin {
             job: JobId::from_parts(UnixMillis(1_700_000_000_000), 42),
             target: TargetId([3; 16]),
-            os_build: OsBuild { major: 10, minor: 0, build: 26100, revision: 2 },
+            os_build: OsBuild {
+                major: 10,
+                minor: 0,
+                build: 26100,
+                revision: 2,
+            },
             created: UnixMillis(1_700_000_000_000),
+            op: "test".into(),
+            undoes: None,
         }
     }
 
@@ -421,7 +549,10 @@ mod tests {
                 reversibility: Reversibility::Reversible,
                 reboot_required: false,
             },
-            inverse: Some(ChangeKind::RegDelete { key: r"HKLM\SOFTWARE\X".into(), value: Some(format!("v{index}")) }),
+            inverse: Some(ChangeKind::RegDelete {
+                key: r"HKLM\SOFTWARE\X".into(),
+                value: Some(format!("v{index}")),
+            }),
         }
     }
 
@@ -434,12 +565,11 @@ mod tests {
         for d in done {
             w.done(*d).unwrap();
         }
-        match status {
-            Some(s) => w.commit(s).unwrap(),
-            None => {
-                w.flush().unwrap();
-                w.sink
-            }
+        if let Some(s) = status {
+            w.commit(s).unwrap()
+        } else {
+            w.flush().unwrap();
+            w.sink
         }
     }
 
@@ -447,8 +577,14 @@ mod tests {
     fn round_trip_and_report() {
         let intents = [reg_set(0), reg_set(1), reg_set(2)];
         let done = [
-            Done { index: 0, outcome: Outcome::Applied },
-            Done { index: 1, outcome: Outcome::Failed { code: 5 } },
+            Done {
+                index: 0,
+                outcome: Outcome::Applied,
+            },
+            Done {
+                index: 1,
+                outcome: Outcome::Failed { code: 5 },
+            },
         ];
         let bytes = write_job(&intents, &done, Some(JobStatus::Cancelled));
         let rec = read(&bytes).unwrap();
@@ -465,7 +601,16 @@ mod tests {
     #[test]
     fn every_truncation_point_is_recoverable() {
         let intents = [reg_set(0), reg_set(1)];
-        let done = [Done { index: 0, outcome: Outcome::Applied }, Done { index: 1, outcome: Outcome::Applied }];
+        let done = [
+            Done {
+                index: 0,
+                outcome: Outcome::Applied,
+            },
+            Done {
+                index: 1,
+                outcome: Outcome::Applied,
+            },
+        ];
         let bytes = write_job(&intents, &done, Some(JobStatus::Completed));
         let full = read(&bytes).unwrap();
         let begin_end = {
@@ -488,7 +633,14 @@ mod tests {
 
     #[test]
     fn flipped_bytes_end_the_journal_without_panicking() {
-        let bytes = write_job(&[reg_set(0)], &[Done { index: 0, outcome: Outcome::Applied }], Some(JobStatus::Completed));
+        let bytes = write_job(
+            &[reg_set(0)],
+            &[Done {
+                index: 0,
+                outcome: Outcome::Applied,
+            }],
+            Some(JobStatus::Completed),
+        );
         for i in FILE_HEADER_LEN..bytes.len() {
             let mut b = bytes.clone();
             b[i] ^= 0x40;
@@ -502,10 +654,16 @@ mod tests {
 
     #[test]
     fn rejects_foreign_files() {
-        assert!(matches!(read(b"PK\x03\x04...."), Err(JournalError::BadMagic)));
+        assert!(matches!(
+            read(b"PK\x03\x04...."),
+            Err(JournalError::BadMagic)
+        ));
         let mut bytes = write_job(&[], &[], Some(JobStatus::Completed));
         bytes[4] = 9;
-        assert!(matches!(read(&bytes), Err(JournalError::UnsupportedSchema(9))));
+        assert!(matches!(
+            read(&bytes),
+            Err(JournalError::UnsupportedSchema(9))
+        ));
     }
 
     #[test]
@@ -513,17 +671,35 @@ mod tests {
         let quarantine = Intent {
             index: 2,
             change: Change {
-                kind: ChangeKind::FileQuarantine { path: "a".into(), bytes: Bytes(1), unique_bytes: Bytes(1) },
-                reversibility: Reversibility::ReversibleUntil { until: UnixMillis(100) },
+                kind: ChangeKind::FileQuarantine {
+                    path: "a".into(),
+                    bytes: Bytes(1),
+                    unique_bytes: Bytes(1),
+                },
+                reversibility: Reversibility::ReversibleUntil {
+                    until: UnixMillis(100),
+                },
                 reboot_required: false,
             },
-            inverse: Some(ChangeKind::FileRestore { quarantined: "q/a".into(), path: "a".into() }),
+            inverse: Some(ChangeKind::FileRestore {
+                quarantined: "q/a".into(),
+                path: "a".into(),
+            }),
         };
         let intents = [reg_set(0), reg_set(1), quarantine];
         let done = [
-            Done { index: 0, outcome: Outcome::Applied },
-            Done { index: 1, outcome: Outcome::Failed { code: 5 } },
-            Done { index: 2, outcome: Outcome::Applied },
+            Done {
+                index: 0,
+                outcome: Outcome::Applied,
+            },
+            Done {
+                index: 1,
+                outcome: Outcome::Failed { code: 5 },
+            },
+            Done {
+                index: 2,
+                outcome: Outcome::Applied,
+            },
         ];
         let rec = read(&write_job(&intents, &done, Some(JobStatus::Completed))).unwrap();
 
@@ -534,5 +710,102 @@ mod tests {
         // After the quarantine TTL only the registry change can be undone.
         let late = undo_changes(&rec, &[], UnixMillis(101));
         assert_eq!(late.len(), 1);
+    }
+
+    fn feature(enable: bool) -> ChangeKind<String> {
+        ChangeKind::FeatureState {
+            name: "TelnetClient".into(),
+            enable,
+            source: None,
+        }
+    }
+
+    /// Records one applied change and returns the journal of the job.
+    fn applied_job(change: Change<String>, outcome: Outcome) -> Recovered {
+        let intent = Intent {
+            index: 0,
+            change,
+            inverse: None,
+        };
+        let done = Done { index: 0, outcome };
+        read(&write_job(&[intent], &[done], Some(JobStatus::Completed))).unwrap()
+    }
+
+    #[test]
+    fn undo_of_an_undo_restores_the_original_change() {
+        let original = Change {
+            kind: feature(true),
+            reversibility: Reversibility::ReversibleVia {
+                inverse: Box::new(feature(false)),
+            },
+            reboot_required: false,
+        };
+        let undo = undo_changes(
+            &applied_job(original.clone(), Outcome::Applied),
+            &[],
+            UnixMillis(0),
+        );
+        assert_eq!(undo.len(), 1);
+        assert_eq!(undo[0].kind, feature(false));
+        let redo = undo_changes(
+            &applied_job(undo[0].clone(), Outcome::Applied),
+            &[],
+            UnixMillis(0),
+        );
+        assert_eq!(redo, [original]);
+    }
+
+    #[test]
+    fn reboot_required_counts_as_applied() {
+        let change = Change {
+            kind: feature(true),
+            reversibility: Reversibility::ReversibleVia {
+                inverse: Box::new(feature(false)),
+            },
+            reboot_required: false,
+        };
+        let rec = applied_job(change, Outcome::AppliedRebootRequired);
+        let report = analyze(&rec);
+        assert_eq!(report.applied, [0]);
+        assert!(report.reboot_required);
+        assert_eq!(undo_changes(&rec, &[], UnixMillis(0)).len(), 1);
+    }
+
+    #[test]
+    fn list_reads_journals_and_finds_undos() {
+        let dir = std::env::temp_dir().join(format!("dpro-journals-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir); // ignore: may not exist
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(list(&dir.join("missing")).unwrap(), []);
+
+        let first = begin();
+        let mut undo = begin();
+        undo.job = JobId::from_parts(UnixMillis(1_700_000_000_001), 1);
+        undo.undoes = Some(first.job);
+        for b in [&undo, &first] {
+            let mut w = JournalWriter::create(Vec::new(), b).unwrap();
+            w.intent(&reg_set(0)).unwrap();
+            w.flush().unwrap();
+            w.done(Done {
+                index: 0,
+                outcome: Outcome::Applied,
+            })
+            .unwrap();
+            let bytes = w.commit(JobStatus::Completed).unwrap();
+            std::fs::write(dir.join(format!("{}.dpj", b.job)), bytes).unwrap();
+        }
+        std::fs::write(dir.join("notes.txt"), b"x").unwrap();
+        std::fs::write(dir.join("broken.dpj"), b"DPJ1").unwrap();
+
+        let entries = list(&dir).unwrap();
+        let jobs: Vec<JobId> = entries.iter().map(|e| e.begin.job).collect();
+        assert_eq!(
+            jobs,
+            [first.job, undo.job],
+            "oldest first, foreign files skipped"
+        );
+        assert_eq!(undone_by(&entries, first.job), Some(undo.job));
+        assert_eq!(undone_by(&entries, undo.job), None);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

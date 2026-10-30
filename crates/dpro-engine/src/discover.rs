@@ -33,7 +33,10 @@ pub fn discover(probe: &impl SystemProbe) -> Vec<Target> {
         }
         let hive = SYSTEM_HIVE.iter().fold(root.clone(), |p, c| p.join(c));
         if probe.is_file(&hive) {
-            out.push(Target::OfflineInstall { root, windows_dir: PathBuf::from(SYSTEM_HIVE[0]) });
+            out.push(Target::OfflineInstall {
+                root,
+                windows_dir: PathBuf::from(SYSTEM_HIVE[0]),
+            });
         }
     }
     out
@@ -41,7 +44,9 @@ pub fn discover(probe: &impl SystemProbe) -> Vec<Target> {
 
 /// Case-insensitive comparison key for a volume root (`c:\`, `C:` → `c:`).
 fn normalize(p: &Path) -> String {
-    p.to_string_lossy().trim_end_matches(['\\', '/']).to_ascii_lowercase()
+    p.to_string_lossy()
+        .trim_end_matches(['\\', '/'])
+        .to_ascii_lowercase()
 }
 
 /// The real system, through `dpro-win`.
@@ -89,7 +94,9 @@ mod tests {
     }
 
     fn hive(root: &str) -> PathBuf {
-        SYSTEM_HIVE.iter().fold(PathBuf::from(root), |p, c| p.join(c))
+        SYSTEM_HIVE
+            .iter()
+            .fold(PathBuf::from(root), |p, c| p.join(c))
     }
 
     #[test]
@@ -105,14 +112,21 @@ mod tests {
         assert_eq!(targets[0].kind(), "online");
         assert_eq!(
             targets[1],
-            Target::OfflineInstall { root: PathBuf::from(r"D:\"), windows_dir: PathBuf::from("Windows") }
+            Target::OfflineInstall {
+                root: PathBuf::from(r"D:\"),
+                windows_dir: PathBuf::from("Windows")
+            }
         );
     }
 
     #[test]
     fn works_without_an_online_os() {
         // e.g. WinPE where the Windows directory couldn't be read.
-        let fake = Fake { windows: None, roots: vec![PathBuf::from(r"D:\")], files: [hive(r"D:\")].into_iter().collect() };
+        let fake = Fake {
+            windows: None,
+            roots: vec![PathBuf::from(r"D:\")],
+            files: [hive(r"D:\")].into_iter().collect(),
+        };
         let targets = discover(&fake);
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].kind(), "offline");

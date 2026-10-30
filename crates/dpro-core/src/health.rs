@@ -71,7 +71,9 @@ impl RebootReason {
     #[must_use]
     pub fn message_id(self) -> &'static str {
         match self {
-            Self::Cbs | Self::CbsPackagesPending | Self::PendingXml => "reboot-reason-cbs",
+            Self::Cbs => "reboot-reason-cbs",
+            Self::CbsPackagesPending => "reboot-reason-cbs-packages",
+            Self::PendingXml => "reboot-reason-pending-xml",
             Self::WindowsUpdate => "reboot-reason-wu",
             Self::FileRename { .. } => "reboot-reason-file-rename",
             Self::ComputerRename => "reboot-reason-computer-rename",

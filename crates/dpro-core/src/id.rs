@@ -30,7 +30,10 @@ impl FromStr for TargetId {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self, Error> {
-        let invalid = || Error::Parse { what: "target id", value: s.to_owned() };
+        let invalid = || Error::Parse {
+            what: "target id",
+            value: s.to_owned(),
+        };
         let groups: Vec<&str> = s.split('-').collect();
         let lens: Vec<usize> = groups.iter().map(|g| g.len()).collect();
         if lens != [8, 4, 4, 4, 12] {
@@ -91,7 +94,10 @@ impl FromStr for JobId {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self, Error> {
-        let invalid = || Error::Parse { what: "job id", value: s.to_owned() };
+        let invalid = || Error::Parse {
+            what: "job id",
+            value: s.to_owned(),
+        };
         if s.len() != 26 {
             return Err(invalid());
         }
@@ -116,7 +122,10 @@ fn crockford_digit(c: u8) -> Option<u8> {
         b'O' => b'0',
         _ => c,
     };
-    CROCKFORD.iter().position(|&d| d == c).and_then(|p| u8::try_from(p).ok())
+    CROCKFORD
+        .iter()
+        .position(|&d| d == c)
+        .and_then(|p| u8::try_from(p).ok())
 }
 
 macro_rules! string_serde {
@@ -154,14 +163,29 @@ mod tests {
         let text = id.to_string();
         assert_eq!(text, "53bfae52-b167-4e2f-a258-0a37b57ff845");
         assert_eq!(text.to_uppercase().parse::<TargetId>().unwrap(), id);
-        assert!("53bfae52b1674e2fa2580a37b57ff845".parse::<TargetId>().is_err());
-        assert!("zzbfae52-b167-4e2f-a258-0a37b57ff845".parse::<TargetId>().is_err());
-        assert!("+3bfae52-b167-4e2f-a258-0a37b57ff845".parse::<TargetId>().is_err());
+        assert!(
+            "53bfae52b1674e2fa2580a37b57ff845"
+                .parse::<TargetId>()
+                .is_err()
+        );
+        assert!(
+            "zzbfae52-b167-4e2f-a258-0a37b57ff845"
+                .parse::<TargetId>()
+                .is_err()
+        );
+        assert!(
+            "+3bfae52-b167-4e2f-a258-0a37b57ff845"
+                .parse::<TargetId>()
+                .is_err()
+        );
     }
 
     #[test]
     fn job_id_known_vector() {
-        assert_eq!(JobId::from_parts(UnixMillis(0), 0).to_string(), "00000000000000000000000000");
+        assert_eq!(
+            JobId::from_parts(UnixMillis(0), 0).to_string(),
+            "00000000000000000000000000"
+        );
         let max = JobId::from_parts(UnixMillis(u64::MAX), u128::MAX);
         assert_eq!(max.to_string(), "7ZZZZZZZZZZZZZZZZZZZZZZZZZ");
         assert!("8ZZZZZZZZZZZZZZZZZZZZZZZZZ".parse::<JobId>().is_err());

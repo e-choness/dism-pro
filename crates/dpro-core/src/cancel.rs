@@ -33,7 +33,11 @@ impl CancelToken {
     /// # Errors
     /// [`Error::Cancelled`] if [`CancelToken::cancel`] was called on any clone.
     pub fn check(&self) -> Result<(), Error> {
-        if self.is_cancelled() { Err(Error::Cancelled) } else { Ok(()) }
+        if self.is_cancelled() {
+            Err(Error::Cancelled)
+        } else {
+            Ok(())
+        }
     }
 }
 

@@ -50,7 +50,11 @@ fn rules() -> Vec<Rule<'static>> {
                 "-" => Some(Vec::new()),
                 list => Some(list.split(',').collect()),
             };
-            Some(Rule { krate, kind, allowed })
+            Some(Rule {
+                krate,
+                kind,
+                allowed,
+            })
         })
         .collect()
 }
@@ -175,7 +179,7 @@ mod tests {
             member("dpro-engine", &["dpro-core", "dpro-win"], SAFE),
             member("dismpro-cli", &["dpro-engine", "dpro-win"], SAFE),
         ];
-        assert!(check(&ms).is_empty());
+        assert_eq!(check(&ms), Vec::<String>::new());
     }
 
     #[test]
@@ -204,7 +208,10 @@ mod tests {
 
     #[test]
     fn unsafe_must_be_forbidden_outside_ffi_crates() {
-        let ms = [member("dpro-app", &[], "//! x\n"), member("dpro-win", &[], "")];
+        let ms = [
+            member("dpro-app", &[], "//! x\n"),
+            member("dpro-win", &[], ""),
+        ];
         let expected = ["dpro-app: crate root needs #![forbid(unsafe_code)]"];
         assert_eq!(check(&ms), expected);
     }

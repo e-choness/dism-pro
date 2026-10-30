@@ -48,13 +48,18 @@ pub struct FakeRegistry {
 impl FakeRegistry {
     #[must_use]
     pub fn with_key(mut self, hive: Hive, key: &str) -> Self {
-        self.values.entry((hive, key.to_ascii_lowercase())).or_default();
+        self.values
+            .entry((hive, key.to_ascii_lowercase()))
+            .or_default();
         self
     }
 
     #[must_use]
     pub fn with_value(mut self, hive: Hive, key: &str, name: &str, value: Value) -> Self {
-        self.values.entry((hive, key.to_ascii_lowercase())).or_default().insert(name.to_ascii_lowercase(), value);
+        self.values
+            .entry((hive, key.to_ascii_lowercase()))
+            .or_default()
+            .insert(name.to_ascii_lowercase(), value);
         self
     }
 }
@@ -65,7 +70,10 @@ impl RegistryView for FakeRegistry {
     }
 
     fn value(&self, hive: Hive, key: &str, name: &str) -> Option<Value> {
-        self.values.get(&(hive, key.to_ascii_lowercase()))?.get(&name.to_ascii_lowercase()).cloned()
+        self.values
+            .get(&(hive, key.to_ascii_lowercase()))?
+            .get(&name.to_ascii_lowercase())
+            .cloned()
     }
 }
 
@@ -83,7 +91,9 @@ mod win {
     fn convert(v: RegValue) -> Value {
         match v {
             RegValue::Sz(s) | RegValue::ExpandSz(s) => Value::Str(s.to_string_lossy().into_owned()),
-            RegValue::MultiSz(v) => Value::MultiStr(v.iter().map(|s| s.to_string_lossy().into_owned()).collect()),
+            RegValue::MultiSz(v) => {
+                Value::MultiStr(v.iter().map(|s| s.to_string_lossy().into_owned()).collect())
+            }
             RegValue::Dword(d) => Value::Dword(d),
             RegValue::Qword(q) => Value::Qword(q),
             RegValue::Binary(_) | RegValue::Other { .. } => Value::Other,
@@ -91,8 +101,17 @@ mod win {
     }
 
     fn read(root: &RegKey, key: &str, name: &str) -> Option<Value> {
-        let k = if key.is_empty() { None } else { Some(root.open(key, Access::Read).ok()?) };
-        k.as_ref().unwrap_or(root).get(name).ok().flatten().map(convert)
+        let k = if key.is_empty() {
+            None
+        } else {
+            Some(root.open(key, Access::Read).ok()?)
+        };
+        k.as_ref()
+            .unwrap_or(root)
+            .get(name)
+            .ok()
+            .flatten()
+            .map(convert)
     }
 
     /// The running OS's `HKLM\SOFTWARE` and `HKLM\SYSTEM`.
@@ -107,7 +126,10 @@ mod win {
         /// The hive roots can't be opened.
         pub fn open() -> dpro_win::error::Result<Self> {
             let hklm = RegKey::local_machine();
-            Ok(Self { software: hklm.open("SOFTWARE", Access::Read)?, system: hklm.open("SYSTEM", Access::Read)? })
+            Ok(Self {
+                software: hklm.open("SOFTWARE", Access::Read)?,
+                system: hklm.open("SYSTEM", Access::Read)?,
+            })
         }
     }
 
@@ -166,7 +188,8 @@ mod tests {
     fn control_set_online_and_offline() {
         let online = FakeRegistry::default().with_key(Hive::System, "CurrentControlSet");
         assert_eq!(online.control_set(), "CurrentControlSet");
-        let offline = FakeRegistry::default().with_value(Hive::System, "Select", "Current", Value::Dword(2));
+        let offline =
+            FakeRegistry::default().with_value(Hive::System, "Select", "Current", Value::Dword(2));
         assert_eq!(offline.control_set(), "ControlSet002");
     }
 }

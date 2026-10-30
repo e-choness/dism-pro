@@ -26,13 +26,24 @@ pub trait Backend {
     ///
     /// # Errors
     /// The state can't be read; the change is then not applied.
-    fn capture_inverse(&mut self, change: &Change<String>) -> Result<Option<ChangeKind<String>>, OsError>;
+    fn capture_inverse(
+        &mut self,
+        change: &Change<String>,
+    ) -> Result<Option<ChangeKind<String>>, OsError>;
 
     /// Applies one change. Called only after its intent is durable.
     ///
     /// # Errors
     /// The change failed; it is recorded and the job continues with the next one.
-    fn apply(&mut self, change: &Change<String>) -> Result<(), OsError>;
+    fn apply(&mut self, change: &Change<String>) -> Result<Applied, OsError>;
+}
+
+/// How a successfully applied change finished.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Applied {
+    Done,
+    /// The OS reported that the change completes at the next restart.
+    RebootRequired,
 }
 
 /// Monotonic clock, injectable for tests.
@@ -72,7 +83,10 @@ pub struct RunConfig {
 
 impl Default for RunConfig {
     fn default() -> Self {
-        Self { batch: 256, max_batch_age: Duration::from_millis(50) }
+        Self {
+            batch: 256,
+            max_batch_age: Duration::from_millis(50),
+        }
     }
 }
 
@@ -81,6 +95,8 @@ pub struct JobSummary {
     pub status: JobStatus,
     pub applied: u32,
     pub failed: u32,
+    /// Some applied change reported that it finishes at the next restart.
+    pub reboot_required: bool,
     pub syncs: u64,
 }
 
@@ -99,7 +115,13 @@ pub fn run<B: Backend, W: JournalSink>(
     config: RunConfig,
 ) -> Result<(JobSummary, W), JournalError> {
     let batch = config.batch.max(1);
-    let mut summary = JobSummary { status: JobStatus::Completed, applied: 0, failed: 0, syncs: 0 };
+    let mut summary = JobSummary {
+        status: JobStatus::Completed,
+        applied: 0,
+        failed: 0,
+        reboot_required: false,
+        syncs: 0,
+    };
     let mut next = 0;
     // Per batch: whether inverse capture failed (then the change is not applied).
     let mut capture_failed: Vec<Option<i32>> = Vec::with_capacity(batch);
@@ -121,7 +143,11 @@ pub fn run<B: Backend, W: JournalSink>(
                 Ok(inverse) => (inverse, None),
                 Err(e) => (None, Some(e.code)),
             };
-            journal.intent(&Intent { index: index(next), change: change.clone(), inverse })?;
+            journal.intent(&Intent {
+                index: index(next),
+                change: change.clone(),
+                inverse,
+            })?;
             capture_failed.push(failure);
             next += 1;
         }
@@ -134,15 +160,23 @@ pub fn run<B: Backend, W: JournalSink>(
             let outcome = match failure {
                 Some(code) => Outcome::Failed { code: *code },
                 None => match backend.apply(&changes[i]) {
-                    Ok(()) => Outcome::Applied,
+                    Ok(Applied::Done) => Outcome::Applied,
+                    Ok(Applied::RebootRequired) => Outcome::AppliedRebootRequired,
                     Err(e) => Outcome::Failed { code: e.code },
                 },
             };
             match outcome {
                 Outcome::Applied => summary.applied += 1,
+                Outcome::AppliedRebootRequired => {
+                    summary.applied += 1;
+                    summary.reboot_required = true;
+                }
                 Outcome::Failed { .. } => summary.failed += 1,
             }
-            journal.done(Done { index: index(i), outcome })?;
+            journal.done(Done {
+                index: index(i),
+                outcome,
+            })?;
             if cancel.is_cancelled() {
                 summary.status = JobStatus::Cancelled;
                 break 'job;
@@ -155,11 +189,16 @@ pub fn run<B: Backend, W: JournalSink>(
     Ok((summary, sink))
 }
 
-fn capture<B: Backend>(backend: &mut B, change: &Change<String>) -> Result<Option<ChangeKind<String>>, OsError> {
+fn capture<B: Backend>(
+    backend: &mut B,
+    change: &Change<String>,
+) -> Result<Option<ChangeKind<String>>, OsError> {
     match &change.reversibility {
         // Nothing to capture: irreversible, or the plan already carries the inverse.
         Reversibility::Irreversible { .. } | Reversibility::ReversibleVia { .. } => Ok(None),
-        Reversibility::Reversible | Reversibility::ReversibleUntil { .. } => backend.capture_inverse(change),
+        Reversibility::Reversible | Reversibility::ReversibleUntil { .. } => {
+            backend.capture_inverse(change)
+        }
     }
 }
 
@@ -190,33 +229,56 @@ mod tests {
     }
 
     impl Backend for FakeRegistry {
-        fn capture_inverse(&mut self, change: &Change<String>) -> Result<Option<ChangeKind<String>>, OsError> {
+        fn capture_inverse(
+            &mut self,
+            change: &Change<String>,
+        ) -> Result<Option<ChangeKind<String>>, OsError> {
             let (key, value) = match &change.kind {
-                ChangeKind::RegSet { key, value, .. } => (key, value),
-                ChangeKind::RegDelete { key, value: Some(value) } => (key, value),
+                ChangeKind::RegSet { key, value, .. }
+                | ChangeKind::RegDelete {
+                    key,
+                    value: Some(value),
+                } => (key, value),
                 other => panic!("fake registry can't capture {}", other.name()),
             };
             let old = self.values.get(&(key.clone(), value.clone()));
             Ok(Some(match old {
-                Some(data) => ChangeKind::RegSet { key: key.clone(), value: value.clone(), new: RegData::Dword(*data) },
-                None => ChangeKind::RegDelete { key: key.clone(), value: Some(value.clone()) },
+                Some(data) => ChangeKind::RegSet {
+                    key: key.clone(),
+                    value: value.clone(),
+                    new: RegData::Dword(*data),
+                },
+                None => ChangeKind::RegDelete {
+                    key: key.clone(),
+                    value: Some(value.clone()),
+                },
             }))
         }
 
-        fn apply(&mut self, change: &Change<String>) -> Result<(), OsError> {
+        fn apply(&mut self, change: &Change<String>) -> Result<Applied, OsError> {
             match &change.kind {
-                ChangeKind::RegSet { key, value, new: RegData::Dword(data) } => {
+                ChangeKind::RegSet {
+                    key,
+                    value,
+                    new: RegData::Dword(data),
+                } => {
                     if self.fail_on.as_ref() == Some(value) {
-                        return Err(OsError { code: 5, api: "RegSetValueExW" });
+                        return Err(OsError {
+                            code: 5,
+                            api: "RegSetValueExW",
+                        });
                     }
                     self.values.insert((key.clone(), value.clone()), *data);
                 }
-                ChangeKind::RegDelete { key, value: Some(value) } => {
+                ChangeKind::RegDelete {
+                    key,
+                    value: Some(value),
+                } => {
                     self.values.remove(&(key.clone(), value.clone()));
                 }
                 other => panic!("fake registry can't apply {}", other.name()),
             }
-            Ok(())
+            Ok(Applied::Done)
         }
     }
 
@@ -238,22 +300,40 @@ mod tests {
         Begin {
             job: JobId::from_parts(UnixMillis(1), 1),
             target: TargetId([9; 16]),
-            os_build: OsBuild { major: 10, minor: 0, build: 26100, revision: 0 },
+            os_build: OsBuild {
+                major: 10,
+                minor: 0,
+                build: 26100,
+                revision: 0,
+            },
             created: UnixMillis(1),
+            op: "test".into(),
+            undoes: None,
         }
     }
 
     fn set(value: &str, data: u32) -> Change<String> {
         Change {
-            kind: ChangeKind::RegSet { key: "K".into(), value: value.into(), new: RegData::Dword(data) },
+            kind: ChangeKind::RegSet {
+                key: "K".into(),
+                value: value.into(),
+                new: RegData::Dword(data),
+            },
             reversibility: Reversibility::Reversible,
             reboot_required: false,
         }
     }
 
-    fn run_all(changes: &[Change<String>], reg: &mut FakeRegistry, config: RunConfig) -> (JobSummary, Vec<u8>) {
+    fn run_all(
+        changes: &[Change<String>],
+        reg: &mut FakeRegistry,
+        config: RunConfig,
+    ) -> (JobSummary, Vec<u8>) {
         let journal = JournalWriter::create(Vec::new(), &begin()).unwrap();
-        let clock = StepClock { t: Cell::new(Duration::ZERO), step: Duration::ZERO };
+        let clock = StepClock {
+            t: Cell::new(Duration::ZERO),
+            step: Duration::ZERO,
+        };
         run(changes, reg, journal, &CancelToken::new(), &clock, config).unwrap()
     }
 
@@ -272,9 +352,20 @@ mod tests {
         let changes: Vec<_> = (0..10).map(|i| set(&format!("v{i}"), i)).collect();
         let journal = JournalWriter::create(Vec::new(), &begin()).unwrap();
         // Each clock read advances 30 ms: a batch holds at most 2 captures under 50 ms.
-        let clock = StepClock { t: Cell::new(Duration::ZERO), step: Duration::from_millis(30) };
+        let clock = StepClock {
+            t: Cell::new(Duration::ZERO),
+            step: Duration::from_millis(30),
+        };
         let mut reg = FakeRegistry::default();
-        let (summary, _) = run(&changes, &mut reg, journal, &CancelToken::new(), &clock, RunConfig::default()).unwrap();
+        let (summary, _) = run(
+            &changes,
+            &mut reg,
+            journal,
+            &CancelToken::new(),
+            &clock,
+            RunConfig::default(),
+        )
+        .unwrap();
         assert!(summary.syncs > 3, "{summary:?}");
         assert_eq!(summary.applied, 10);
     }
@@ -282,7 +373,10 @@ mod tests {
     #[test]
     fn failures_are_recorded_and_the_job_continues() {
         let changes = [set("a", 1), set("bad", 2), set("c", 3)];
-        let mut reg = FakeRegistry { fail_on: Some("bad".into()), ..FakeRegistry::default() };
+        let mut reg = FakeRegistry {
+            fail_on: Some("bad".into()),
+            ..FakeRegistry::default()
+        };
         let (summary, bytes) = run_all(&changes, &mut reg, RunConfig::default());
         assert_eq!((summary.applied, summary.failed), (2, 1));
         let report = journal::analyze(&journal::read(&bytes).unwrap());
@@ -294,10 +388,13 @@ mod tests {
     fn cancel_stops_after_the_current_change() {
         struct CancelAfterFirst<'a>(FakeRegistry, &'a CancelToken);
         impl Backend for CancelAfterFirst<'_> {
-            fn capture_inverse(&mut self, c: &Change<String>) -> Result<Option<ChangeKind<String>>, OsError> {
+            fn capture_inverse(
+                &mut self,
+                c: &Change<String>,
+            ) -> Result<Option<ChangeKind<String>>, OsError> {
                 self.0.capture_inverse(c)
             }
-            fn apply(&mut self, c: &Change<String>) -> Result<(), OsError> {
+            fn apply(&mut self, c: &Change<String>) -> Result<Applied, OsError> {
                 self.1.cancel();
                 self.0.apply(c)
             }
@@ -306,8 +403,19 @@ mod tests {
         let mut backend = CancelAfterFirst(FakeRegistry::default(), &cancel);
         let changes = [set("a", 1), set("b", 2)];
         let journal = JournalWriter::create(Vec::new(), &begin()).unwrap();
-        let clock = StepClock { t: Cell::new(Duration::ZERO), step: Duration::ZERO };
-        let (summary, bytes) = run(&changes, &mut backend, journal, &cancel, &clock, RunConfig::default()).unwrap();
+        let clock = StepClock {
+            t: Cell::new(Duration::ZERO),
+            step: Duration::ZERO,
+        };
+        let (summary, bytes) = run(
+            &changes,
+            &mut backend,
+            journal,
+            &cancel,
+            &clock,
+            RunConfig::default(),
+        )
+        .unwrap();
         assert_eq!(summary.status, JobStatus::Cancelled);
         assert_eq!(summary.applied, 1);
         let report = journal::analyze(&journal::read(&bytes).unwrap());
@@ -319,9 +427,16 @@ mod tests {
             let value = format!("v{v}");
             Change {
                 kind: if delete {
-                    ChangeKind::RegDelete { key: "K".into(), value: Some(value) }
+                    ChangeKind::RegDelete {
+                        key: "K".into(),
+                        value: Some(value),
+                    }
                 } else {
-                    ChangeKind::RegSet { key: "K".into(), value, new: RegData::Dword(data) }
+                    ChangeKind::RegSet {
+                        key: "K".into(),
+                        value,
+                        new: RegData::Dword(data),
+                    }
                 },
                 reversibility: Reversibility::Reversible,
                 reboot_required: false,
@@ -331,8 +446,15 @@ mod tests {
     }
 
     fn arb_registry() -> impl Strategy<Value = FakeRegistry> {
-        proptest::collection::btree_map((0_u8..6).prop_map(|v| ("K".to_owned(), format!("v{v}"))), any::<u32>(), 0..6)
-            .prop_map(|values| FakeRegistry { values, fail_on: None })
+        proptest::collection::btree_map(
+            (0_u8..6).prop_map(|v| ("K".to_owned(), format!("v{v}"))),
+            any::<u32>(),
+            0..6,
+        )
+        .prop_map(|values| FakeRegistry {
+            values,
+            fail_on: None,
+        })
     }
 
     proptest! {
@@ -372,7 +494,7 @@ mod tests {
                 fn capture_inverse(&mut self, c: &Change<String>) -> Result<Option<ChangeKind<String>>, OsError> {
                     self.reg.capture_inverse(c)
                 }
-                fn apply(&mut self, c: &Change<String>) -> Result<(), OsError> {
+                fn apply(&mut self, c: &Change<String>) -> Result<Applied, OsError> {
                     self.applied_at.push((self.applied_at.len(), (self.sink_len)()));
                     self.reg.apply(c)
                 }

@@ -3,14 +3,13 @@
 
 use std::path::Path;
 
-use dpro_core::OsError;
 use dpro_sys::{
     types::HANDLE,
     wim::{self, WIM_GENERIC_READ, WIM_OPEN_EXISTING},
 };
 
 use crate::{
-    error::Result,
+    error::{Result, last_os_error},
     wide::{WideCString, long_path},
 };
 
@@ -30,7 +29,14 @@ impl WimFile {
         let mut creation_result = 0_u32;
         // SAFETY: `path` is NUL-terminated; `creation_result` is a valid out pointer.
         let handle = unsafe {
-            wim::WIMCreateFile(path.as_ptr(), WIM_GENERIC_READ, WIM_OPEN_EXISTING, 0, 0, &mut creation_result)
+            wim::WIMCreateFile(
+                path.as_ptr(),
+                WIM_GENERIC_READ,
+                WIM_OPEN_EXISTING,
+                0,
+                0,
+                &raw mut creation_result,
+            )
         };
         if handle.is_null() {
             return Err(last_os_error("WIMCreateFile").into());
@@ -52,10 +58,4 @@ impl Drop for WimFile {
         // ignore: nothing useful to do if closing fails during drop.
         let _ = unsafe { wim::WIMCloseHandle(self.handle) };
     }
-}
-
-fn last_os_error(api: &'static str) -> OsError {
-    // SAFETY: no preconditions; read right after the failing call.
-    let code = unsafe { windows_sys::Win32::Foundation::GetLastError() };
-    OsError::from_win32(code, api)
 }

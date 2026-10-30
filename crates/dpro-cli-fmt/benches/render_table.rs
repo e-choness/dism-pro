@@ -9,7 +9,11 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use dpro_cli_fmt::table::{Table, render};
 
 fn render_table(c: &mut Criterion) {
-    let mut t = Table::new(&[("Package".into(), false), ("State".into(), false), ("Size".into(), true)]);
+    let mut t = Table::new(&[
+        ("Package".into(), false),
+        ("State".into(), false),
+        ("Size".into(), true),
+    ]);
     for i in 0..100_000 {
         t.push(vec![
             format!("Package_for_RollupFix~31bf3856ad364e35~amd64~~26100.{i}.1.10"),
@@ -17,7 +21,9 @@ fn render_table(c: &mut Criterion) {
             format!("{}.{} MB", i % 900, i % 10),
         ]);
     }
-    c.bench_function("render_table_100k", |b| b.iter(|| black_box(render(black_box(&t), 160))));
+    c.bench_function("render_table_100k", |b| {
+        b.iter(|| black_box(render(black_box(&t), 160)));
+    });
 }
 
 criterion_group!(benches, render_table);

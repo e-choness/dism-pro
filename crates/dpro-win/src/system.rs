@@ -7,7 +7,9 @@ use std::{
 };
 
 use windows_sys::Win32::{
-    Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, GetFileAttributesW, GetLogicalDrives, INVALID_FILE_ATTRIBUTES},
+    Storage::FileSystem::{
+        FILE_ATTRIBUTE_DIRECTORY, GetFileAttributesW, GetLogicalDrives, INVALID_FILE_ATTRIBUTES,
+    },
     System::SystemInformation::GetSystemWindowsDirectoryW,
 };
 

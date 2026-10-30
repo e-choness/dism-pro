@@ -44,12 +44,12 @@ case "${task}" in
     exec cargo deny --workspace --locked check "$@"
     ;;
   build)
-    shopt -s nullglob
+    # Ship binaries only: xtask is a host tool, and dist/ starts empty so no stale exe lingers.
     for t in "${win_targets[@]}"; do
-      cargo xwin build --workspace --locked --release --target "${t}" "$@"
+      cargo xwin build --workspace --exclude xtask --locked --release --target "${t}" "$@"
+      rm -rf "dist/${t}"
       mkdir -p "dist/${t}"
-      exes=(target/"${t}"/release/*.exe)
-      if (( ${#exes[@]} )); then cp "${exes[@]}" "dist/${t}/"; fi
+      cp target/"${t}"/release/{dismpro,dismpro-cli}.exe "dist/${t}/"
     done
     size_args=()
     for t in "${win_targets[@]}"; do size_args+=(--target "${t}"); done

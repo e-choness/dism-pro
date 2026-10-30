@@ -36,22 +36,30 @@ impl<C: 'static> TargetActor<C> {
     ) -> io::Result<(Self, Receiver<Result<(), E>>)> {
         let (tx, rx) = mpsc::channel::<Request<C>>();
         let (ready_tx, ready_rx) = mpsc::channel();
-        let thread = thread::Builder::new().name(name.to_owned()).spawn(move || {
-            let mut context = match init() {
-                Ok(c) => {
-                    let _ = ready_tx.send(Ok(())); // ignore: the caller may not wait for readiness
-                    c
+        let thread = thread::Builder::new()
+            .name(name.to_owned())
+            .spawn(move || {
+                let mut context = match init() {
+                    Ok(c) => {
+                        let _ = ready_tx.send(Ok(())); // ignore: the caller may not wait for readiness
+                        c
+                    }
+                    Err(e) => {
+                        let _ = ready_tx.send(Err(e)); // ignore: as above
+                        return;
+                    }
+                };
+                for request in rx {
+                    request(&mut context);
                 }
-                Err(e) => {
-                    let _ = ready_tx.send(Err(e)); // ignore: as above
-                    return;
-                }
-            };
-            for request in rx {
-                request(&mut context);
-            }
-        })?;
-        Ok((Self { tx: Some(tx), thread: Some(thread) }, ready_rx))
+            })?;
+        Ok((
+            Self {
+                tx: Some(tx),
+                thread: Some(thread),
+            },
+            ready_rx,
+        ))
     }
 
     /// Queues `f` and returns a receiver for its result.
@@ -66,7 +74,11 @@ impl<C: 'static> TargetActor<C> {
         let request: Request<C> = Box::new(move |c| {
             let _ = reply_tx.send(f(c)); // ignore: the caller may have stopped waiting
         });
-        self.tx.as_ref().ok_or(ActorGone)?.send(request).map_err(|_| ActorGone)?;
+        self.tx
+            .as_ref()
+            .ok_or(ActorGone)?
+            .send(request)
+            .map_err(|_| ActorGone)?;
         Ok(reply_rx)
     }
 
@@ -74,7 +86,10 @@ impl<C: 'static> TargetActor<C> {
     ///
     /// # Errors
     /// [`ActorGone`] if the actor stopped before answering.
-    pub fn call<R: Send + 'static>(&self, f: impl FnOnce(&mut C) -> R + Send + 'static) -> Result<R, ActorGone> {
+    pub fn call<R: Send + 'static>(
+        &self,
+        f: impl FnOnce(&mut C) -> R + Send + 'static,
+    ) -> Result<R, ActorGone> {
         self.submit(f)?.recv().map_err(|_| ActorGone)
     }
 }
@@ -98,20 +113,25 @@ mod tests {
     fn runs_requests_in_order_on_one_thread() {
         let (actor, ready) = TargetActor::spawn("t", || Ok::<_, ()>(Vec::<u32>::new())).unwrap();
         assert_eq!(ready.recv().unwrap(), Ok(()));
-        let pending: Vec<_> = (0..100).map(|i| actor.submit(move |v: &mut Vec<u32>| v.push(i)).unwrap()).collect();
+        let pending: Vec<_> = (0..100)
+            .map(|i| actor.submit(move |v: &mut Vec<u32>| v.push(i)).unwrap())
+            .collect();
         for p in pending {
             p.recv().unwrap();
         }
         let seen = actor.call(|v| v.clone()).unwrap();
         assert_eq!(seen, (0..100).collect::<Vec<_>>());
-        let name = actor.call(|_| thread::current().name().map(str::to_owned)).unwrap();
+        let name = actor
+            .call(|_| thread::current().name().map(str::to_owned))
+            .unwrap();
         assert_eq!(name.as_deref(), Some("t"));
     }
 
     #[test]
     fn context_may_be_not_send() {
         // Rc is !Send: it can only exist because it's created on the actor thread.
-        let (actor, _) = TargetActor::spawn("rc", || Ok::<_, ()>(Rc::new(RefCell::new(0)))).unwrap();
+        let (actor, _) =
+            TargetActor::spawn("rc", || Ok::<_, ()>(Rc::new(RefCell::new(0)))).unwrap();
         actor.call(|c| *c.borrow_mut() += 1).unwrap();
         assert_eq!(actor.call(|c| *c.borrow()).unwrap(), 1);
     }

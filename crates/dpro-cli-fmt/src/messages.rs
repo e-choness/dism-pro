@@ -73,7 +73,9 @@ impl Messages {
 
 /// First line + continuation lines with their common indentation removed (Fluent rule).
 fn join(lines: &[String]) -> String {
-    let (first, rest) = lines.split_first().map_or(("", &[][..]), |(f, r)| (f.as_str(), r));
+    let (first, rest) = lines
+        .split_first()
+        .map_or(("", &[][..]), |(f, r)| (f.as_str(), r));
     let indent = rest
         .iter()
         .filter(|l| !l.trim().is_empty())
@@ -97,7 +99,9 @@ mod tests {
 
     #[test]
     fn simple_multiline_and_placeables() {
-        let m = Messages::parse("# c\na = Hello { $who }!\nb =\n    line one\n      indented\n\nc = x\n");
+        let m = Messages::parse(
+            "# c\na = Hello { $who }!\nb =\n    line one\n      indented\n\nc = x\n",
+        );
         assert_eq!(m.get("a", &[("who", &"you")]), "Hello you!");
         assert_eq!(m.text("b"), "line one\n  indented");
         assert_eq!(m.text("c"), "x");
@@ -107,7 +111,14 @@ mod tests {
     #[test]
     fn built_in_catalog_has_every_change_kind() {
         let m = Messages::en_us();
-        for kind in ["file_quarantine", "reg_set", "feature_state", "package_remove", "file_restore"] {
+        for kind in [
+            "file_quarantine",
+            "reg_set",
+            "feature_enable",
+            "feature_disable",
+            "package_remove",
+            "file_restore",
+        ] {
             let id = format!("change-{kind}");
             assert_ne!(m.text(&id), id, "{id} missing from cli.ftl");
         }

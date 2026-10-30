@@ -82,7 +82,11 @@ impl Interner {
         if id == NO_NEXT {
             return Err(Error::ArenaFull);
         }
-        let end = self.bytes.len().checked_add(s.len()).ok_or(Error::ArenaFull)?;
+        let end = self
+            .bytes
+            .len()
+            .checked_add(s.len())
+            .ok_or(Error::ArenaFull)?;
         let end = u32::try_from(end).map_err(|_| Error::ArenaFull)?;
         self.bytes.extend_from_slice(s);
         self.ends.push(end);
@@ -149,7 +153,10 @@ mod tests {
         assert_eq!(i.intern_str(r"C:\Windows\Temp\a.log").unwrap(), a);
         assert_eq!(i.len(), 2);
         assert_eq!(i.resolve_lossy(b).unwrap(), r"C:\Windows\Temp\b.log");
-        assert!(matches!(i.resolve_lossy(Atom(7)), Err(Error::UnknownAtom(7))));
+        assert!(matches!(
+            i.resolve_lossy(Atom(7)),
+            Err(Error::UnknownAtom(7))
+        ));
     }
 
     #[test]

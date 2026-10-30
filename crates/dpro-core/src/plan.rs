@@ -89,37 +89,99 @@ pub enum ExternalKind {
 #[serde(rename_all = "snake_case")]
 pub enum ChangeKind<S> {
     /// Same-volume rename into the job's quarantine folder.
-    FileQuarantine { path: S, bytes: Bytes, unique_bytes: Bytes },
+    FileQuarantine {
+        path: S,
+        bytes: Bytes,
+        unique_bytes: Bytes,
+    },
     /// Always irreversible.
-    FileDelete { path: S, bytes: Bytes, unique_bytes: Bytes },
+    FileDelete {
+        path: S,
+        bytes: Bytes,
+        unique_bytes: Bytes,
+    },
     /// Reboot-time move into quarantine for files in use (TD-0014/0015 addendum).
-    PendingQuarantine { path: S, dest: S },
-    RegSet { key: S, value: S, new: RegData<S> },
+    PendingQuarantine {
+        path: S,
+        dest: S,
+    },
+    RegSet {
+        key: S,
+        value: S,
+        new: RegData<S>,
+    },
     /// `value: None` deletes the whole key.
-    RegDelete { key: S, value: Option<S> },
-    ServiceStart { name: S, new: StartType },
+    RegDelete {
+        key: S,
+        value: Option<S>,
+    },
+    ServiceStart {
+        name: S,
+        new: StartType,
+    },
     /// `captured_config` is the serialized config used to recreate the service on undo.
-    ServiceDelete { name: S, captured_config: S },
-    TaskState { path: S, enabled: bool },
+    ServiceDelete {
+        name: S,
+        captured_config: S,
+    },
+    TaskState {
+        path: S,
+        enabled: bool,
+    },
     /// `xml` is the task definition, re-registered on undo.
-    TaskDelete { path: S, xml: S },
-    StartupEntry { id: S, enabled: bool },
-    FirewallRuleDelete { rule: S },
-    FeatureState { name: S, enable: bool, source: Option<S> },
-    AppxRemove { full_name: S, scope: AppxScope },
-    PackageAdd { path: S },
-    PackageRemove { identity: S },
-    DriverAdd { inf: S },
-    DriverRemove { published: S },
+    TaskDelete {
+        path: S,
+        xml: S,
+    },
+    StartupEntry {
+        id: S,
+        enabled: bool,
+    },
+    FirewallRuleDelete {
+        rule: S,
+    },
+    FeatureState {
+        name: S,
+        enable: bool,
+        source: Option<S>,
+    },
+    AppxRemove {
+        full_name: S,
+        scope: AppxScope,
+    },
+    PackageAdd {
+        path: S,
+    },
+    PackageRemove {
+        identity: S,
+    },
+    DriverAdd {
+        inf: S,
+    },
+    DriverRemove {
+        published: S,
+    },
     /// Expert-only; undo restores the full registry subtree in `keys`.
-    MsiRegistrationDelete { product_code: S, keys: S },
+    MsiRegistrationDelete {
+        product_code: S,
+        keys: S,
+    },
     /// Coarse DISM/WIMGAPI call; `api` names it and `args` is its serialized arguments.
-    Native { api: S, args: S },
+    Native {
+        api: S,
+        args: S,
+    },
     /// Third-party code. Always irreversible; journaled for audit only.
-    ExternalProgram { command: S, kind: ExternalKind },
+    ExternalProgram {
+        command: S,
+        kind: ExternalKind,
+    },
     /// Moves a quarantined file back: the inverse of `FileQuarantine`, produced by undo.
     /// Not in TD-0001 §5.1's list (needs an addendum).
-    FileRestore { quarantined: S, path: S },
+    FileRestore {
+        quarantined: S,
+        path: S,
+    },
 }
 
 /// Whether and how a change can be undone. Variant order is part of the journal format.
@@ -182,8 +244,16 @@ impl<S> ChangeKind<S> {
     #[must_use]
     pub fn freed(&self) -> (Bytes, Bytes) {
         match self {
-            Self::FileQuarantine { bytes, unique_bytes, .. }
-            | Self::FileDelete { bytes, unique_bytes, .. } => (*bytes, *unique_bytes),
+            Self::FileQuarantine {
+                bytes,
+                unique_bytes,
+                ..
+            }
+            | Self::FileDelete {
+                bytes,
+                unique_bytes,
+                ..
+            } => (*bytes, *unique_bytes),
             _ => (Bytes::ZERO, Bytes::ZERO),
         }
     }
@@ -195,49 +265,98 @@ impl<S> ChangeKind<S> {
     pub fn try_map<T, E>(self, f: &mut impl FnMut(S) -> Result<T, E>) -> Result<ChangeKind<T>, E> {
         use ChangeKind as K;
         Ok(match self {
-            K::FileQuarantine { path, bytes, unique_bytes } => {
-                K::FileQuarantine { path: f(path)?, bytes, unique_bytes }
-            }
-            K::FileDelete { path, bytes, unique_bytes } => {
-                K::FileDelete { path: f(path)?, bytes, unique_bytes }
-            }
-            K::PendingQuarantine { path, dest } => {
-                K::PendingQuarantine { path: f(path)?, dest: f(dest)? }
-            }
-            K::RegSet { key, value, new } => {
-                K::RegSet { key: f(key)?, value: f(value)?, new: new.try_map(f)? }
-            }
-            K::RegDelete { key, value } => {
-                K::RegDelete { key: f(key)?, value: value.map(&mut *f).transpose()? }
-            }
-            K::ServiceStart { name, new } => K::ServiceStart { name: f(name)?, new },
-            K::ServiceDelete { name, captured_config } => {
-                K::ServiceDelete { name: f(name)?, captured_config: f(captured_config)? }
-            }
-            K::TaskState { path, enabled } => K::TaskState { path: f(path)?, enabled },
-            K::TaskDelete { path, xml } => K::TaskDelete { path: f(path)?, xml: f(xml)? },
-            K::StartupEntry { id, enabled } => K::StartupEntry { id: f(id)?, enabled },
+            K::FileQuarantine {
+                path,
+                bytes,
+                unique_bytes,
+            } => K::FileQuarantine {
+                path: f(path)?,
+                bytes,
+                unique_bytes,
+            },
+            K::FileDelete {
+                path,
+                bytes,
+                unique_bytes,
+            } => K::FileDelete {
+                path: f(path)?,
+                bytes,
+                unique_bytes,
+            },
+            K::PendingQuarantine { path, dest } => K::PendingQuarantine {
+                path: f(path)?,
+                dest: f(dest)?,
+            },
+            K::RegSet { key, value, new } => K::RegSet {
+                key: f(key)?,
+                value: f(value)?,
+                new: new.try_map(f)?,
+            },
+            K::RegDelete { key, value } => K::RegDelete {
+                key: f(key)?,
+                value: value.map(&mut *f).transpose()?,
+            },
+            K::ServiceStart { name, new } => K::ServiceStart {
+                name: f(name)?,
+                new,
+            },
+            K::ServiceDelete {
+                name,
+                captured_config,
+            } => K::ServiceDelete {
+                name: f(name)?,
+                captured_config: f(captured_config)?,
+            },
+            K::TaskState { path, enabled } => K::TaskState {
+                path: f(path)?,
+                enabled,
+            },
+            K::TaskDelete { path, xml } => K::TaskDelete {
+                path: f(path)?,
+                xml: f(xml)?,
+            },
+            K::StartupEntry { id, enabled } => K::StartupEntry {
+                id: f(id)?,
+                enabled,
+            },
             K::FirewallRuleDelete { rule } => K::FirewallRuleDelete { rule: f(rule)? },
-            K::FeatureState { name, enable, source } => K::FeatureState {
+            K::FeatureState {
+                name,
+                enable,
+                source,
+            } => K::FeatureState {
                 name: f(name)?,
                 enable,
                 source: source.map(&mut *f).transpose()?,
             },
-            K::AppxRemove { full_name, scope } => K::AppxRemove { full_name: f(full_name)?, scope },
+            K::AppxRemove { full_name, scope } => K::AppxRemove {
+                full_name: f(full_name)?,
+                scope,
+            },
             K::PackageAdd { path } => K::PackageAdd { path: f(path)? },
-            K::PackageRemove { identity } => K::PackageRemove { identity: f(identity)? },
+            K::PackageRemove { identity } => K::PackageRemove {
+                identity: f(identity)?,
+            },
             K::DriverAdd { inf } => K::DriverAdd { inf: f(inf)? },
-            K::DriverRemove { published } => K::DriverRemove { published: f(published)? },
-            K::MsiRegistrationDelete { product_code, keys } => {
-                K::MsiRegistrationDelete { product_code: f(product_code)?, keys: f(keys)? }
-            }
-            K::Native { api, args } => K::Native { api: f(api)?, args: f(args)? },
-            K::ExternalProgram { command, kind } => {
-                K::ExternalProgram { command: f(command)?, kind }
-            }
-            K::FileRestore { quarantined, path } => {
-                K::FileRestore { quarantined: f(quarantined)?, path: f(path)? }
-            }
+            K::DriverRemove { published } => K::DriverRemove {
+                published: f(published)?,
+            },
+            K::MsiRegistrationDelete { product_code, keys } => K::MsiRegistrationDelete {
+                product_code: f(product_code)?,
+                keys: f(keys)?,
+            },
+            K::Native { api, args } => K::Native {
+                api: f(api)?,
+                args: f(args)?,
+            },
+            K::ExternalProgram { command, kind } => K::ExternalProgram {
+                command: f(command)?,
+                kind,
+            },
+            K::FileRestore { quarantined, path } => K::FileRestore {
+                quarantined: f(quarantined)?,
+                path: f(path)?,
+            },
         })
     }
 }
@@ -260,9 +379,9 @@ impl<S> Reversibility<S> {
         Ok(match self {
             Self::Reversible => Reversibility::Reversible,
             Self::ReversibleUntil { until } => Reversibility::ReversibleUntil { until },
-            Self::ReversibleVia { inverse } => {
-                Reversibility::ReversibleVia { inverse: Box::new((*inverse).try_map(f)?) }
-            }
+            Self::ReversibleVia { inverse } => Reversibility::ReversibleVia {
+                inverse: Box::new((*inverse).try_map(f)?),
+            },
             Self::Irreversible { reason } => Reversibility::Irreversible { reason: f(reason)? },
         })
     }
@@ -305,7 +424,8 @@ impl PlanSummary {
         match &c.reversibility {
             Reversibility::Irreversible { .. } => self.irreversible += 1,
             Reversibility::ReversibleUntil { until } => {
-                self.earliest_deadline = Some(self.earliest_deadline.map_or(*until, |d| d.min(*until)));
+                self.earliest_deadline =
+                    Some(self.earliest_deadline.map_or(*until, |d| d.min(*until)));
             }
             Reversibility::Reversible | Reversibility::ReversibleVia { .. } => {}
         }
@@ -344,7 +464,11 @@ impl Plan {
     /// # Errors
     /// [`Error::UnknownAtom`] only if the plan is internally inconsistent.
     pub fn to_doc(&self) -> Result<PlanDoc, Error> {
-        let mut resolve = |a: Atom| self.strings.resolve_lossy(a).map(std::borrow::Cow::into_owned);
+        let mut resolve = |a: Atom| {
+            self.strings
+                .resolve_lossy(a)
+                .map(std::borrow::Cow::into_owned)
+        };
         let changes = self
             .changes
             .iter()
@@ -366,7 +490,10 @@ impl Plan {
     /// [`Error::Parse`] for an unknown schema; otherwise as [`PlanBuilder::push`].
     pub fn from_doc(doc: PlanDoc) -> Result<Self, Error> {
         if doc.schema != PLAN_SCHEMA {
-            return Err(Error::Parse { what: "plan schema", value: doc.schema });
+            return Err(Error::Parse {
+                what: "plan schema",
+                value: doc.schema,
+            });
         }
         let mut b = PlanBuilder::new(doc.target, doc.os_build, doc.op);
         for c in doc.changes {
@@ -443,11 +570,17 @@ impl PlanBuilder {
         if change.kind.is_always_irreversible()
             && !matches!(change.reversibility, Reversibility::Irreversible { .. })
         {
-            return Err(Error::MustBeIrreversible { index, kind: change.kind.name() });
+            return Err(Error::MustBeIrreversible {
+                index,
+                kind: change.kind.name(),
+            });
         }
         // Validate atoms now so `to_doc` can't fail on a built plan.
         change.clone().try_map(&mut |a: Atom| {
-            self.strings.get(a).map(|_| ()).ok_or(Error::UnknownAtom(a.raw()))
+            self.strings
+                .get(a)
+                .map(|_| ())
+                .ok_or(Error::UnknownAtom(a.raw()))
         })?;
         self.summary.add(&change);
         self.changes.push(change);
@@ -481,14 +614,23 @@ mod tests {
     }
 
     fn builder() -> PlanBuilder {
-        let build = OsBuild { major: 10, minor: 0, build: 26100, revision: 1 };
+        let build = OsBuild {
+            major: 10,
+            minor: 0,
+            build: 26100,
+            revision: 1,
+        };
         PlanBuilder::new(TargetId([7; 16]), build, op())
     }
 
     #[test]
     fn change_kind_stays_small() {
         // Row storage instead of TD-0001's columnar layout relies on this (§7.3 budget).
-        assert!(size_of::<ChangeKind<Atom>>() <= 32, "{}", size_of::<ChangeKind<Atom>>());
+        assert!(
+            size_of::<ChangeKind<Atom>>() <= 32,
+            "{}",
+            size_of::<ChangeKind<Atom>>()
+        );
     }
 
     #[test]
@@ -497,13 +639,23 @@ mod tests {
         let a = b.atom(r"C:\Windows\Temp\a.tmp").unwrap();
         let reason = b.atom("rev-file-delete").unwrap();
         b.push(Change {
-            kind: ChangeKind::FileQuarantine { path: a, bytes: Bytes(100), unique_bytes: Bytes(60) },
-            reversibility: Reversibility::ReversibleUntil { until: UnixMillis(50) },
+            kind: ChangeKind::FileQuarantine {
+                path: a,
+                bytes: Bytes(100),
+                unique_bytes: Bytes(60),
+            },
+            reversibility: Reversibility::ReversibleUntil {
+                until: UnixMillis(50),
+            },
             reboot_required: false,
         })
         .unwrap();
         b.push(Change {
-            kind: ChangeKind::FileDelete { path: a, bytes: Bytes(10), unique_bytes: Bytes(10) },
+            kind: ChangeKind::FileDelete {
+                path: a,
+                bytes: Bytes(10),
+                unique_bytes: Bytes(10),
+            },
             reversibility: Reversibility::Irreversible { reason },
             reboot_required: true,
         })
@@ -523,12 +675,21 @@ mod tests {
         let cmd = b.atom("unins000.exe /SILENT").unwrap();
         let err = b
             .push(Change {
-                kind: ChangeKind::ExternalProgram { command: cmd, kind: ExternalKind::Uninstaller },
+                kind: ChangeKind::ExternalProgram {
+                    command: cmd,
+                    kind: ExternalKind::Uninstaller,
+                },
                 reversibility: Reversibility::Reversible,
                 reboot_required: false,
             })
             .unwrap_err();
-        assert!(matches!(err, Error::MustBeIrreversible { index: 0, kind: "external_program" }));
+        assert!(matches!(
+            err,
+            Error::MustBeIrreversible {
+                index: 0,
+                kind: "external_program"
+            }
+        ));
     }
 
     #[test]
@@ -556,15 +717,27 @@ mod tests {
         let value = b.atom("Enabled").unwrap();
         let feature = b.atom("SMB1Protocol").unwrap();
         b.push(Change {
-            kind: ChangeKind::RegSet { key, value, new: RegData::Dword(0) },
+            kind: ChangeKind::RegSet {
+                key,
+                value,
+                new: RegData::Dword(0),
+            },
             reversibility: Reversibility::Reversible,
             reboot_required: false,
         })
         .unwrap();
         b.push(Change {
-            kind: ChangeKind::FeatureState { name: feature, enable: false, source: None },
+            kind: ChangeKind::FeatureState {
+                name: feature,
+                enable: false,
+                source: None,
+            },
             reversibility: Reversibility::ReversibleVia {
-                inverse: Box::new(ChangeKind::FeatureState { name: feature, enable: true, source: None }),
+                inverse: Box::new(ChangeKind::FeatureState {
+                    name: feature,
+                    enable: true,
+                    source: None,
+                }),
             },
             reboot_required: true,
         })

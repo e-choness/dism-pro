@@ -26,18 +26,35 @@ pub struct LogLine<'a> {
 /// a line with only `text`.
 #[must_use]
 pub fn parse_line(line: &str) -> LogLine<'_> {
-    let unparsed = LogLine { timestamp: None, level: None, component: None, text: line };
-    let Some((ts, rest)) = line.split_once(", ") else { return unparsed };
+    let unparsed = LogLine {
+        timestamp: None,
+        level: None,
+        component: None,
+        text: line,
+    };
+    let Some((ts, rest)) = line.split_once(", ") else {
+        return unparsed;
+    };
     if !looks_like_timestamp(ts) {
         return unparsed;
     }
     let rest = rest.trim_start();
     let Some((level, rest)) = rest.split_once(char::is_whitespace) else {
-        return LogLine { timestamp: Some(ts), level: Some(rest), component: None, text: "" };
+        return LogLine {
+            timestamp: Some(ts),
+            level: Some(rest),
+            component: None,
+            text: "",
+        };
     };
     let rest = rest.trim_start();
     let (component, text) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
-    LogLine { timestamp: Some(ts), level: Some(level), component: Some(component), text: text.trim_start() }
+    LogLine {
+        timestamp: Some(ts),
+        level: Some(level),
+        component: Some(component),
+        text: text.trim_start(),
+    }
 }
 
 fn looks_like_timestamp(s: &str) -> bool {
@@ -73,16 +90,32 @@ fn find_ignore_case(haystack: &str, needle: &str) -> Option<usize> {
 /// Known codes → diagnosis (TD-0006 §12: hand-curated; every entry needs verification
 /// against Microsoft Learn and is listed in CAVEATS.md).
 const DECODE: &[(u32, &str, Severity)] = &[
-    (0x800F_081F, "health-finding-source-missing", Severity::Error),
-    (0x800F_0906, "health-finding-download-failed", Severity::Error),
-    (0x800F_0907, "health-finding-policy-blocks-wu", Severity::Error),
+    (
+        0x800F_081F,
+        "health-finding-source-missing",
+        Severity::Error,
+    ),
+    (
+        0x800F_0906,
+        "health-finding-download-failed",
+        Severity::Error,
+    ),
+    (
+        0x800F_0907,
+        "health-finding-policy-blocks-wu",
+        Severity::Error,
+    ),
     (0x800F_0831, "health-finding-store-corrupt", Severity::Error),
     (0x8007_3712, "health-finding-store-corrupt", Severity::Error),
     (0x8007_0005, "health-finding-access-denied", Severity::Error),
 ];
 
 /// Text patterns without an HRESULT (verify on real logs).
-const PATTERNS: &[(&str, &str, Severity)] = &[("Payload Corrupt", "health-finding-payload-corrupt", Severity::Warning)];
+const PATTERNS: &[(&str, &str, Severity)] = &[(
+    "Payload Corrupt",
+    "health-finding-payload-corrupt",
+    Severity::Warning,
+)];
 
 fn classify(line: &LogLine<'_>) -> Option<(&'static str, Severity, Option<i32>)> {
     let code = hresult_in(line.text);
@@ -97,7 +130,10 @@ fn classify(line: &LogLine<'_>) -> Option<(&'static str, Severity, Option<i32>)>
             return Some(("health-finding-unknown-error", Severity::Error, code));
         }
     }
-    PATTERNS.iter().find(|(p, ..)| find_ignore_case(line.text, p).is_some()).map(|(_, id, sev)| (*id, *sev, code))
+    PATTERNS
+        .iter()
+        .find(|(p, ..)| find_ignore_case(line.text, p).is_some())
+        .map(|(_, id, sev)| (*id, *sev, code))
 }
 
 /// Scans a whole log. Consecutive lines with the same diagnosis and code collapse into one
@@ -117,8 +153,13 @@ pub fn scan<R: BufRead>(mut reader: R, file: LogFile) -> std::io::Result<Vec<Fin
         line_no += 1;
         let text = String::from_utf8_lossy(&buf);
         let line = parse_line(text.trim_end_matches(['\r', '\n']));
-        let Some((diagnosis, severity, code)) = classify(&line) else { continue };
-        let code = code.map(|c| OsError { code: c, api: "CBS" });
+        let Some((diagnosis, severity, code)) = classify(&line) else {
+            continue;
+        };
+        let code = code.map(|c| OsError {
+            code: c,
+            api: "CBS",
+        });
         if let Some(last) = findings.last_mut()
             && last.diagnosis == diagnosis
             && last.code == code
@@ -127,7 +168,16 @@ pub fn scan<R: BufRead>(mut reader: R, file: LogFile) -> std::io::Result<Vec<Fin
             last.source.last_line = line_no;
             continue;
         }
-        findings.push(Finding { severity, diagnosis, code, source: LogRef { file, first_line: line_no, last_line: line_no } });
+        findings.push(Finding {
+            severity,
+            diagnosis,
+            code,
+            source: LogRef {
+                file,
+                first_line: line_no,
+                last_line: line_no,
+            },
+        });
     }
     Ok(findings)
 }
@@ -163,7 +213,9 @@ mod tests {
 
     #[test]
     fn parses_the_usual_shape() {
-        let l = parse_line("2026-10-01 12:00:00, Info                  CBS    Loaded Servicing Stack v10.0");
+        let l = parse_line(
+            "2026-10-01 12:00:00, Info                  CBS    Loaded Servicing Stack v10.0",
+        );
         assert_eq!(l.timestamp, Some("2026-10-01 12:00:00"));
         assert_eq!(l.level, Some("Info"));
         assert_eq!(l.component, Some("CBS"));
@@ -195,7 +247,10 @@ mod tests {
         log.extend_from_slice(b"\nnext [HRESULT = 0x80070005]\n");
         let mut r = std::io::BufReader::with_capacity(1024, log.as_slice());
         let mut buf = Vec::new();
-        assert_eq!(read_bounded_line(&mut r, &mut buf).unwrap(), MAX_LINE * 3 + 1);
+        assert_eq!(
+            read_bounded_line(&mut r, &mut buf).unwrap(),
+            MAX_LINE * 3 + 1
+        );
         assert_eq!(buf.len(), MAX_LINE);
         let f = scan(log.as_slice(), LogFile::Cbs).unwrap();
         assert_eq!(f.len(), 1);

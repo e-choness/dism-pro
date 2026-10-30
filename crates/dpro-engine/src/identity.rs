@@ -45,12 +45,38 @@ mod tests {
     #[test]
     fn reads_identity() {
         let reg = FakeRegistry::default()
-            .with_value(Hive::Software, r"Microsoft\Cryptography", "MachineGuid", Value::Str("53bfae52-b167-4e2f-a258-0a37b57ff845".into()))
-            .with_value(Hive::Software, CURRENT_VERSION, "CurrentMajorVersionNumber", Value::Dword(10))
-            .with_value(Hive::Software, CURRENT_VERSION, "CurrentBuildNumber", Value::Str("26100".into()))
+            .with_value(
+                Hive::Software,
+                r"Microsoft\Cryptography",
+                "MachineGuid",
+                Value::Str("53bfae52-b167-4e2f-a258-0a37b57ff845".into()),
+            )
+            .with_value(
+                Hive::Software,
+                CURRENT_VERSION,
+                "CurrentMajorVersionNumber",
+                Value::Dword(10),
+            )
+            .with_value(
+                Hive::Software,
+                CURRENT_VERSION,
+                "CurrentBuildNumber",
+                Value::Str("26100".into()),
+            )
             .with_value(Hive::Software, CURRENT_VERSION, "UBR", Value::Dword(2033));
-        assert_eq!(target_id(&reg).unwrap().to_string(), "53bfae52-b167-4e2f-a258-0a37b57ff845");
-        assert_eq!(os_build(&reg), Some(OsBuild { major: 10, minor: 0, build: 26100, revision: 2033 }));
+        assert_eq!(
+            target_id(&reg).unwrap().to_string(),
+            "53bfae52-b167-4e2f-a258-0a37b57ff845"
+        );
+        assert_eq!(
+            os_build(&reg),
+            Some(OsBuild {
+                major: 10,
+                minor: 0,
+                build: 26100,
+                revision: 2033
+            })
+        );
     }
 
     #[test]

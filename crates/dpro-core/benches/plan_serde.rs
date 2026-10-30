@@ -16,7 +16,9 @@ fn plan_serde(c: &mut Criterion) {
     let paths: Vec<String> = (0..n).map(common::path).collect();
     let plan = common::file_plan(&paths);
     let Ok(doc) = plan.to_doc() else { return };
-    let Ok(json) = serde_json::to_vec(&doc) else { return };
+    let Ok(json) = serde_json::to_vec(&doc) else {
+        return;
+    };
 
     let mut group = c.benchmark_group("plan_serde");
     group.throughput(Throughput::Elements(n as u64));

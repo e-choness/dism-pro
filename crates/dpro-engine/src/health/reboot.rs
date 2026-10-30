@@ -26,7 +26,11 @@ const WU: &str = r"Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\Re
 
 /// Every pending-reboot signal found, in a stable order.
 #[must_use]
-pub fn reboot_reasons(reg: &impl RegistryView, files: &impl FileView, windows_dir: &Path) -> Vec<RebootReason> {
+pub fn reboot_reasons(
+    reg: &impl RegistryView,
+    files: &impl FileView,
+    windows_dir: &Path,
+) -> Vec<RebootReason> {
     let mut out = Vec::new();
     if reg.key_exists(Hive::Software, &format!(r"{CBS}\RebootPending")) {
         out.push(RebootReason::Cbs);
@@ -42,25 +46,40 @@ pub fn reboot_reasons(reg: &impl RegistryView, files: &impl FileView, windows_di
     }
     let cs = reg.control_set();
     let session_manager = format!(r"{cs}\Control\Session Manager");
-    let renames: usize = ["PendingFileRenameOperations", "PendingFileRenameOperations2"]
-        .iter()
-        .map(|name| match reg.value(Hive::System, &session_manager, name) {
+    let renames: usize = [
+        "PendingFileRenameOperations",
+        "PendingFileRenameOperations2",
+    ]
+    .iter()
+    .map(
+        |name| match reg.value(Hive::System, &session_manager, name) {
             // Pairs of (source, destination); an empty destination means delete.
             Some(Value::MultiStr(entries)) => entries.len().div_ceil(2),
             _ => 0,
-        })
-        .sum();
+        },
+    )
+    .sum();
     if renames > 0 {
-        out.push(RebootReason::FileRename { count: u32::try_from(renames).unwrap_or(u32::MAX) });
+        out.push(RebootReason::FileRename {
+            count: u32::try_from(renames).unwrap_or(u32::MAX),
+        });
     }
-    let name_key = |sub: &str| reg.value(Hive::System, &format!(r"{cs}\Control\ComputerName\{sub}"), "ComputerName");
+    let name_key = |sub: &str| {
+        reg.value(
+            Hive::System,
+            &format!(r"{cs}\Control\ComputerName\{sub}"),
+            "ComputerName",
+        )
+    };
     // The active name is volatile: absent offline, so no comparison there.
-    if let (Some(Value::Str(active)), Some(Value::Str(pending))) = (name_key("ActiveComputerName"), name_key("ComputerName"))
+    if let (Some(Value::Str(active)), Some(Value::Str(pending))) =
+        (name_key("ActiveComputerName"), name_key("ComputerName"))
         && !active.eq_ignore_ascii_case(&pending)
     {
         out.push(RebootReason::ComputerRename);
     }
-    if matches!(reg.value(Hive::Software, r"Microsoft\Updates", "UpdateExeVolatile"), Some(Value::Dword(v)) if v != 0) {
+    if matches!(reg.value(Hive::Software, r"Microsoft\Updates", "UpdateExeVolatile"), Some(Value::Dword(v)) if v != 0)
+    {
         out.push(RebootReason::UpdateExeVolatile);
     }
     out
@@ -84,7 +103,8 @@ mod tests {
     #[test]
     fn clean_system_has_no_reasons() {
         let reg = FakeRegistry::default().with_key(Hive::System, "CurrentControlSet");
-        assert!(reboot_reasons(&reg, &Files(HashSet::new()), Path::new(r"C:\Windows")).is_empty());
+        let reasons = reboot_reasons(&reg, &Files(HashSet::new()), Path::new(r"C:\Windows"));
+        assert_eq!(reasons, []);
     }
 
     #[test]
@@ -99,10 +119,24 @@ mod tests {
                 Hive::System,
                 &format!(r"{cs}\Control\Session Manager"),
                 "PendingFileRenameOperations",
-                Value::MultiStr(vec![r"\??\C:\a".into(), String::new(), r"\??\C:\b".into(), r"\??\C:\c".into()]),
+                Value::MultiStr(vec![
+                    r"\??\C:\a".into(),
+                    String::new(),
+                    r"\??\C:\b".into(),
+                    r"\??\C:\c".into(),
+                ]),
             )
-            .with_value(Hive::Software, r"Microsoft\Updates", "UpdateExeVolatile", Value::Dword(1));
-        let files = Files([win.join("WinSxS").join("pending.xml")].into_iter().collect());
+            .with_value(
+                Hive::Software,
+                r"Microsoft\Updates",
+                "UpdateExeVolatile",
+                Value::Dword(1),
+            );
+        let files = Files(
+            [win.join("WinSxS").join("pending.xml")]
+                .into_iter()
+                .collect(),
+        );
         let reasons = reboot_reasons(&reg, &files, &win);
         assert_eq!(
             reasons,
@@ -121,8 +155,21 @@ mod tests {
         let cs = "CurrentControlSet";
         let reg = FakeRegistry::default()
             .with_key(Hive::System, cs)
-            .with_value(Hive::System, &format!(r"{cs}\Control\ComputerName\ActiveComputerName"), "ComputerName", Value::Str("OLD".into()))
-            .with_value(Hive::System, &format!(r"{cs}\Control\ComputerName\ComputerName"), "ComputerName", Value::Str("NEW".into()));
-        assert_eq!(reboot_reasons(&reg, &Files(HashSet::new()), Path::new("C:")), [RebootReason::ComputerRename]);
+            .with_value(
+                Hive::System,
+                &format!(r"{cs}\Control\ComputerName\ActiveComputerName"),
+                "ComputerName",
+                Value::Str("OLD".into()),
+            )
+            .with_value(
+                Hive::System,
+                &format!(r"{cs}\Control\ComputerName\ComputerName"),
+                "ComputerName",
+                Value::Str("NEW".into()),
+            );
+        assert_eq!(
+            reboot_reasons(&reg, &Files(HashSet::new()), Path::new("C:")),
+            [RebootReason::ComputerRename]
+        );
     }
 }

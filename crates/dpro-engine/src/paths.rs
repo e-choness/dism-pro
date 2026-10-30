@@ -29,7 +29,9 @@ pub fn journal_file(volume_root: &Path, job: JobId) -> PathBuf {
 /// Milliseconds since the Unix epoch (0 if the clock is before it).
 #[must_use]
 pub fn now() -> UnixMillis {
-    let ms = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis());
+    let ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis());
     UnixMillis(u64::try_from(ms).unwrap_or(u64::MAX))
 }
 
@@ -42,7 +44,10 @@ pub fn new_job_id() -> JobId {
     a.write_u64(time.0);
     let mut b = RandomState::new().build_hasher();
     b.write_u64(!time.0);
-    JobId::from_parts(time, (u128::from(a.finish()) << 64) | u128::from(b.finish()))
+    JobId::from_parts(
+        time,
+        (u128::from(a.finish()) << 64) | u128::from(b.finish()),
+    )
 }
 
 #[cfg(test)]
@@ -53,7 +58,14 @@ mod tests {
     fn journal_paths_are_under_program_data() {
         let job = JobId::from_parts(UnixMillis(0), 0);
         let p = journal_file(Path::new("D:"), job);
-        assert!(p.ends_with(Path::new("ProgramData").join("DismPro").join("journal").join(format!("{job}.dpj"))));
+        assert!(
+            p.ends_with(
+                Path::new("ProgramData")
+                    .join("DismPro")
+                    .join("journal")
+                    .join(format!("{job}.dpj"))
+            )
+        );
     }
 
     #[test]

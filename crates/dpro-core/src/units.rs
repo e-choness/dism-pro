@@ -5,7 +5,9 @@ use std::iter::Sum;
 use serde::{Deserialize, Serialize};
 
 /// A byte count. Arithmetic saturates: sizes are estimates and must never wrap.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 #[serde(transparent)]
 pub struct Bytes(pub u64);
 

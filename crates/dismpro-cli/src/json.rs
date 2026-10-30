@@ -50,11 +50,43 @@ pub(crate) struct JobDoc {
     pub(crate) schema: &'static str,
     pub(crate) job: String,
     pub(crate) target: String,
+    /// The plan's operation id (`features.enable`, `journal.undo`, …).
+    pub(crate) op: String,
+    /// RFC 3339 UTC.
+    pub(crate) created: String,
+    /// For an undo job: the job it undid.
+    pub(crate) undoes: Option<String>,
     /// `completed`, `cancelled`, `aborted`, or `interrupted` (no commit record).
     pub(crate) status: &'static str,
     pub(crate) applied: Vec<u32>,
     pub(crate) failed: Vec<FailedJson>,
     pub(crate) without_outcome: Vec<u32>,
+    /// Windows reported that an applied change finishes at the next restart.
+    pub(crate) reboot_required: bool,
+    pub(crate) journal: String,
+}
+
+/// `journal list` (`journals.v1`), oldest job first.
+#[derive(Debug, Serialize)]
+pub(crate) struct JournalsDoc {
+    pub(crate) schema: &'static str,
+    pub(crate) jobs: Vec<JournalJson>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct JournalJson {
+    pub(crate) job: String,
+    pub(crate) op: String,
+    pub(crate) created: String,
+    pub(crate) status: &'static str,
+    /// Number of applied changes.
+    pub(crate) applied: usize,
+    /// Number of failed changes.
+    pub(crate) failed: usize,
+    pub(crate) reboot_required: bool,
+    pub(crate) undoes: Option<String>,
+    /// The job that undid this one, if any.
+    pub(crate) undone_by: Option<String>,
     pub(crate) journal: String,
 }
 
@@ -134,7 +166,10 @@ mod tests {
 
     #[test]
     fn hresult_text() {
-        assert_eq!(hresult(i32::from_ne_bytes(0x8007_0005_u32.to_ne_bytes())), "0x80070005");
+        assert_eq!(
+            hresult(i32::from_ne_bytes(0x8007_0005_u32.to_ne_bytes())),
+            "0x80070005"
+        );
         assert_eq!(hresult(0), "0x00000000");
     }
 

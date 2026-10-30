@@ -16,8 +16,17 @@ pub struct Table {
 impl Table {
     #[must_use]
     pub fn new(headers: &[(String, bool)]) -> Self {
-        let columns = headers.iter().map(|(h, r)| Column { header: h.clone(), align_right: *r }).collect();
-        Self { columns, rows: Vec::new() }
+        let columns = headers
+            .iter()
+            .map(|(h, r)| Column {
+                header: h.clone(),
+                align_right: *r,
+            })
+            .collect();
+        Self {
+            columns,
+            rows: Vec::new(),
+        }
     }
 
     pub fn push(&mut self, row: Vec<String>) {
@@ -36,7 +45,11 @@ pub fn render(table: &Table, width: usize) -> String {
     if n == 0 {
         return String::new();
     }
-    let mut widths: Vec<usize> = table.columns.iter().map(|c| c.header.chars().count()).collect();
+    let mut widths: Vec<usize> = table
+        .columns
+        .iter()
+        .map(|c| c.header.chars().count())
+        .collect();
     for row in &table.rows {
         for (w, cell) in widths.iter_mut().zip(row) {
             *w = (*w).max(cell.chars().count());
@@ -45,7 +58,9 @@ pub fn render(table: &Table, width: usize) -> String {
     // Shrink the widest left-aligned column (the "object" column) to fit.
     let total: usize = widths.iter().sum::<usize>() + GAP * (n - 1);
     if total > width
-        && let Some(flex) = (0..n).filter(|&i| !table.columns[i].align_right).max_by_key(|&i| widths[i])
+        && let Some(flex) = (0..n)
+            .filter(|&i| !table.columns[i].align_right)
+            .max_by_key(|&i| widths[i])
     {
         widths[flex] = widths[flex].saturating_sub(total - width).max(8);
     }

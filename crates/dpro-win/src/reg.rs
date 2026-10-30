@@ -13,9 +13,9 @@ use std::{
 use windows_sys::Win32::{
     Foundation::{ERROR_FILE_NOT_FOUND, ERROR_MORE_DATA},
     System::Registry::{
-        HKEY, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WRITE, REG_BINARY, REG_DWORD, REG_EXPAND_SZ, REG_MULTI_SZ,
-        REG_QWORD, REG_SZ, RegCloseKey, RegDeleteValueW, RegLoadAppKeyW, RegOpenKeyExW, RegQueryValueExW,
-        RegSetValueExW,
+        HKEY, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WRITE, REG_BINARY, REG_DWORD, REG_EXPAND_SZ,
+        REG_MULTI_SZ, REG_QWORD, REG_SZ, RegCloseKey, RegDeleteValueW, RegLoadAppKeyW,
+        RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
     },
 };
 
@@ -49,7 +49,10 @@ pub enum RegValue {
     Qword(u64),
     Binary(Vec<u8>),
     /// Any other type, kept raw so it can be restored exactly on undo.
-    Other { ty: u32, data: Vec<u8> },
+    Other {
+        ty: u32,
+        data: Vec<u8>,
+    },
 }
 
 /// An open registry key. Predefined roots (`HKEY_LOCAL_MACHINE`) are never closed.
@@ -74,7 +77,10 @@ impl RegKey {
     /// `HKEY_LOCAL_MACHINE` of the running OS.
     #[must_use]
     pub fn local_machine() -> Self {
-        Self { hkey: HKEY_LOCAL_MACHINE, owned: false }
+        Self {
+            hkey: HKEY_LOCAL_MACHINE,
+            owned: false,
+        }
     }
 
     /// Loads an offline hive file (e.g. `<offline>\Windows\System32\config\SOFTWARE`) as a
@@ -87,7 +93,7 @@ impl RegKey {
         let file = WideCString::new(long_path(file))?;
         let mut hkey: HKEY = ptr::null_mut();
         // SAFETY: `file` is NUL-terminated and outlives the call; `hkey` is a valid out pointer.
-        let status = unsafe { RegLoadAppKeyW(file.as_ptr(), &mut hkey, access.sam(), 0, 0) };
+        let status = unsafe { RegLoadAppKeyW(file.as_ptr(), &raw mut hkey, access.sam(), 0, 0) };
         win32(status, "RegLoadAppKeyW")?;
         Ok(Self { hkey, owned: true })
     }
@@ -100,7 +106,8 @@ impl RegKey {
         let subkey = WideCString::new(subkey)?;
         let mut hkey: HKEY = ptr::null_mut();
         // SAFETY: `self.hkey` is open; `subkey` is NUL-terminated; `hkey` is a valid out pointer.
-        let status = unsafe { RegOpenKeyExW(self.hkey, subkey.as_ptr(), 0, access.sam(), &mut hkey) };
+        let status =
+            unsafe { RegOpenKeyExW(self.hkey, subkey.as_ptr(), 0, access.sam(), &raw mut hkey) };
         win32(status, "RegOpenKeyExW")?;
         Ok(Self { hkey, owned: true })
     }
@@ -117,7 +124,14 @@ impl RegKey {
             let mut len = u32::try_from(data.len()).unwrap_or(u32::MAX);
             // SAFETY: `name` is NUL-terminated; `data` has `len` writable bytes; out pointers are valid.
             let status = unsafe {
-                RegQueryValueExW(self.hkey, name.as_ptr(), ptr::null(), &mut ty, data.as_mut_ptr(), &mut len)
+                RegQueryValueExW(
+                    self.hkey,
+                    name.as_ptr(),
+                    ptr::null(),
+                    &raw mut ty,
+                    data.as_mut_ptr(),
+                    &raw mut len,
+                )
             };
             match status {
                 0 => {
@@ -170,7 +184,11 @@ impl RegKey {
 /// [`Error::BadValueSize`] for a DWORD/QWORD of the wrong length.
 pub fn decode(ty: u32, data: &[u8]) -> Result<RegValue> {
     let units = || -> Vec<u16> {
-        data.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect()
+        data.as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_le_bytes(*c))
+            .collect()
     };
     let string = |u: &[u16]| {
         let end = u.iter().position(|&c| c == 0).unwrap_or(u.len());
@@ -183,7 +201,7 @@ pub fn decode(ty: u32, data: &[u8]) -> Result<RegValue> {
             let u = units();
             let mut out: Vec<OsString> = u.split(|&c| c == 0).map(OsString::from_wide).collect();
             // A well-formed value ends with "\0\0": drop the empty tail entries.
-            while out.last().is_some_and(OsString::is_empty) {
+            while out.last().is_some_and(|s| s.is_empty()) {
                 out.pop();
             }
             RegValue::MultiSz(out)
@@ -191,14 +209,22 @@ pub fn decode(ty: u32, data: &[u8]) -> Result<RegValue> {
         REG_DWORD => RegValue::Dword(u32::from_le_bytes(fixed(data)?)),
         REG_QWORD => RegValue::Qword(u64::from_le_bytes(fixed(data)?)),
         REG_BINARY => RegValue::Binary(data.to_vec()),
-        ty => RegValue::Other { ty, data: data.to_vec() },
+        ty => RegValue::Other {
+            ty,
+            data: data.to_vec(),
+        },
     })
 }
 
 /// Encodes for `RegSetValueExW`: strings get their terminating NUL(s).
 #[must_use]
 pub fn encode(value: &RegValue) -> (u32, Vec<u8>) {
-    let wide = |s: &OsStr| -> Vec<u8> { s.encode_wide().chain([0]).flat_map(u16::to_le_bytes).collect() };
+    let wide = |s: &OsStr| -> Vec<u8> {
+        s.encode_wide()
+            .chain([0])
+            .flat_map(u16::to_le_bytes)
+            .collect()
+    };
     match value {
         RegValue::Sz(s) => (REG_SZ, wide(s)),
         RegValue::ExpandSz(s) => (REG_EXPAND_SZ, wide(s)),
@@ -215,34 +241,46 @@ pub fn encode(value: &RegValue) -> (u32, Vec<u8>) {
 }
 
 fn fixed<const N: usize>(data: &[u8]) -> Result<[u8; N]> {
-    data.try_into().map_err(|_| Error::BadValueSize { expected: N, actual: data.len() })
+    data.try_into().map_err(|_| Error::BadValueSize {
+        expected: N,
+        actual: data.len(),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn round_trip(v: RegValue) {
-        let (ty, data) = encode(&v);
-        assert_eq!(decode(ty, &data).unwrap(), v);
+    fn round_trip(v: &RegValue) {
+        let (ty, data) = encode(v);
+        assert_eq!(&decode(ty, &data).unwrap(), v);
     }
 
     #[test]
     fn values_round_trip() {
-        round_trip(RegValue::Sz("C:\\Program Files\\X".into()));
-        round_trip(RegValue::ExpandSz("%SystemRoot%\\x".into()));
-        round_trip(RegValue::MultiSz(vec!["a".into(), "bc".into()]));
-        round_trip(RegValue::MultiSz(vec![]));
-        round_trip(RegValue::Dword(0xDEAD_BEEF));
-        round_trip(RegValue::Qword(u64::MAX));
-        round_trip(RegValue::Binary(vec![1, 2, 3]));
-        round_trip(RegValue::Other { ty: 8, data: vec![9] });
+        round_trip(&RegValue::Sz("C:\\Program Files\\X".into()));
+        round_trip(&RegValue::ExpandSz("%SystemRoot%\\x".into()));
+        round_trip(&RegValue::MultiSz(vec!["a".into(), "bc".into()]));
+        round_trip(&RegValue::MultiSz(vec![]));
+        round_trip(&RegValue::Dword(0xDEAD_BEEF));
+        round_trip(&RegValue::Qword(u64::MAX));
+        round_trip(&RegValue::Binary(vec![1, 2, 3]));
+        round_trip(&RegValue::Other {
+            ty: 8,
+            data: vec![9],
+        });
     }
 
     #[test]
     fn strings_without_nul_and_bad_sizes() {
         let data: Vec<u8> = "ab".encode_utf16().flat_map(u16::to_le_bytes).collect();
         assert_eq!(decode(REG_SZ, &data).unwrap(), RegValue::Sz("ab".into()));
-        assert!(matches!(decode(REG_DWORD, &[1, 2]), Err(Error::BadValueSize { expected: 4, actual: 2 })));
+        assert!(matches!(
+            decode(REG_DWORD, &[1, 2]),
+            Err(Error::BadValueSize {
+                expected: 4,
+                actual: 2
+            })
+        ));
     }
 }

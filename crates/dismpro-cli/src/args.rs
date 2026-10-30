@@ -2,6 +2,7 @@
 
 use std::{ffi::OsString, path::PathBuf};
 
+use dpro_core::id::JobId;
 use lexopt::{Arg, Parser, ValueExt};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -13,21 +14,25 @@ pub(crate) enum TargetSel {
     Image(PathBuf),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ColorMode {
-    Auto,
-    Always,
-    Never,
+/// What a mutating command does with its plan (TD-0002 §4). `--dry-run` and `--yes` are
+/// mutually exclusive, so they're one setting rather than two flags.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum ApplyMode {
+    /// Print the plan, then ask on a console or stop with exit 3.
+    #[default]
+    Ask,
+    /// `--dry-run`: print the plan and stop.
+    DryRun,
+    /// `--yes`: apply without asking (permanent changes still need `--allow-irreversible`).
+    Yes,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Global {
     pub(crate) target: TargetSel,
     pub(crate) json: bool,
-    pub(crate) dry_run: bool,
-    pub(crate) yes: bool,
+    pub(crate) mode: ApplyMode,
     pub(crate) allow_irreversible: bool,
-    pub(crate) color: ColorMode,
     pub(crate) sources: Vec<PathBuf>,
     pub(crate) limit_access: bool,
 }
@@ -37,10 +42,8 @@ impl Default for Global {
         Self {
             target: TargetSel::Online,
             json: false,
-            dry_run: false,
-            yes: false,
+            mode: ApplyMode::Ask,
             allow_irreversible: false,
-            color: ColorMode::Auto,
             sources: Vec::new(),
             limit_access: false,
         }
@@ -59,9 +62,24 @@ pub(crate) enum Command {
     Health { scan: bool },
     HealthRestore,
     RebootReasons,
-    JournalShow(PathBuf),
-    JournalUndo(PathBuf),
+    JournalList,
+    JournalShow(JournalRef),
+    JournalUndo(JournalRef),
     Purge,
+}
+
+/// A journaled job: by id (looked up in the target's journal folder) or by file path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum JournalRef {
+    Id(JobId),
+    File(PathBuf),
+}
+
+impl JournalRef {
+    fn parse(s: &str) -> Self {
+        s.parse()
+            .map_or_else(|_| Self::File(PathBuf::from(s)), Self::Id)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,32 +105,29 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli, Usa
     let mut words: Vec<String> = Vec::new();
     let mut help = false;
     let mut version = false;
+    let mut dry_run = false;
+    let mut yes = false;
     while let Some(arg) = p.next()? {
         match arg {
             Arg::Short('h') | Arg::Long("help") => help = true,
             Arg::Short('V') | Arg::Long("version") => version = true,
             Arg::Long("json") => g.json = true,
-            Arg::Long("dry-run") => g.dry_run = true,
-            Arg::Long("yes") | Arg::Short('y') => g.yes = true,
+            Arg::Long("dry-run") => dry_run = true,
+            Arg::Long("yes") | Arg::Short('y') => yes = true,
             Arg::Long("allow-irreversible") => g.allow_irreversible = true,
             Arg::Long("limit-access") => g.limit_access = true,
             Arg::Long("source") => g.sources.push(PathBuf::from(p.value()?)),
             Arg::Long("target") => g.target = target(&p.value()?.string()?)?,
-            Arg::Long("color") => {
-                g.color = match p.value()?.string()?.as_str() {
-                    "auto" => ColorMode::Auto,
-                    "always" => ColorMode::Always,
-                    "never" => ColorMode::Never,
-                    other => return Err(UsageError(format!("invalid --color value {other:?}"))),
-                };
-            }
             Arg::Value(v) => words.push(v.string()?),
             other => return Err(other.unexpected().into()),
         }
     }
-    if g.dry_run && g.yes {
-        return Err(UsageError("--dry-run and --yes can't be combined".into()));
-    }
+    g.mode = match (dry_run, yes) {
+        (true, true) => return Err(UsageError("--dry-run and --yes can't be combined".into())),
+        (true, false) => ApplyMode::DryRun,
+        (false, true) => ApplyMode::Yes,
+        (false, false) => ApplyMode::Ask,
+    };
     let command = if help {
         Command::Help
     } else if version {
@@ -134,17 +149,27 @@ fn target(s: &str) -> Result<TargetSel, UsageError> {
     let is_drive = bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
     if is_drive {
         // `D:` alone means the volume root, not the current directory on D:.
-        let root = if s.len() == 2 { format!("{s}\\") } else { s.to_owned() };
+        let root = if s.len() == 2 {
+            format!("{s}\\")
+        } else {
+            s.to_owned()
+        };
         return Ok(TargetSel::Root(PathBuf::from(root)));
     }
-    Err(UsageError(format!("invalid --target {s:?} (use online, D:, a path like D:\\ or image:<dir>)")))
+    Err(UsageError(format!(
+        "invalid --target {s:?} (use online, D:, a path like D:\\ or image:<dir>)"
+    )))
 }
 
 fn command(words: &[String]) -> Result<Command, UsageError> {
     let w: Vec<&str> = words.iter().map(String::as_str).collect();
     let rest = |n: usize| words[n..].to_vec();
     let need = |n: usize, what: &str| {
-        if words.len() > n { Ok(()) } else { Err(UsageError(format!("{what} needs at least one name"))) }
+        if words.len() > n {
+            Ok(())
+        } else {
+            Err(UsageError(format!("{what} needs at least one name")))
+        }
     };
     Ok(match w.as_slice() {
         [] => Command::Help,
@@ -157,14 +182,18 @@ fn command(words: &[String]) -> Result<Command, UsageError> {
         ["features", "list"] | ["features"] => Command::FeaturesList,
         ["features", verb @ ("enable" | "disable"), ..] => {
             need(2, "features enable/disable")?;
-            Command::FeaturesSet { enable: *verb == "enable", names: rest(2) }
+            Command::FeaturesSet {
+                enable: *verb == "enable",
+                names: rest(2),
+            }
         }
         ["health", "check"] => Command::Health { scan: false },
         ["health", "scan"] => Command::Health { scan: true },
         ["health", "restore"] => Command::HealthRestore,
         ["reboot-reasons"] => Command::RebootReasons,
-        ["journal", "show", file] => Command::JournalShow(PathBuf::from(file)),
-        ["journal", "undo", file] => Command::JournalUndo(PathBuf::from(file)),
+        ["journal", "list"] | ["journal"] => Command::JournalList,
+        ["journal", "show", job] => Command::JournalShow(JournalRef::parse(job)),
+        ["journal", "undo", job] => Command::JournalUndo(JournalRef::parse(job)),
         ["purge"] => Command::Purge,
         _ => return Err(UsageError(format!("unknown command {:?}", words.join(" ")))),
     })
@@ -186,15 +215,39 @@ mod tests {
             ("targets list", Command::TargetsList),
             ("--version", Command::Version),
             ("packages", Command::PackagesList),
-            ("packages remove A B", Command::PackagesRemove(vec!["A".into(), "B".into()])),
-            ("features disable SMB1Protocol", Command::FeaturesSet { enable: false, names: vec!["SMB1Protocol".into()] }),
-            ("features enable X", Command::FeaturesSet { enable: true, names: vec!["X".into()] }),
+            (
+                "packages remove A B",
+                Command::PackagesRemove(vec!["A".into(), "B".into()]),
+            ),
+            (
+                "features disable SMB1Protocol",
+                Command::FeaturesSet {
+                    enable: false,
+                    names: vec!["SMB1Protocol".into()],
+                },
+            ),
+            (
+                "features enable X",
+                Command::FeaturesSet {
+                    enable: true,
+                    names: vec!["X".into()],
+                },
+            ),
             ("health check", Command::Health { scan: false }),
             ("health scan", Command::Health { scan: true }),
             ("health restore", Command::HealthRestore),
             ("reboot-reasons", Command::RebootReasons),
-            ("journal show j.dpj", Command::JournalShow("j.dpj".into())),
-            ("journal undo j.dpj", Command::JournalUndo("j.dpj".into())),
+            ("journal list", Command::JournalList),
+            (
+                "journal show j.dpj",
+                Command::JournalShow(JournalRef::File("j.dpj".into())),
+            ),
+            (
+                "journal undo 01JBCDEFGHJKMNPQRSTVWXYZ01",
+                Command::JournalUndo(JournalRef::Id(
+                    "01JBCDEFGHJKMNPQRSTVWXYZ01".parse().unwrap(),
+                )),
+            ),
             ("purge", Command::Purge),
         ];
         for (args, expected) in cases {
@@ -205,11 +258,20 @@ mod tests {
     #[test]
     fn globals_anywhere() {
         let cli = p("features --json disable --target D: X --dry-run").unwrap();
-        assert!(cli.global.json && cli.global.dry_run);
+        assert!(cli.global.json);
+        assert_eq!(cli.global.mode, ApplyMode::DryRun);
+        assert_eq!(p("-y purge").unwrap().global.mode, ApplyMode::Yes);
+        assert_eq!(p("purge").unwrap().global.mode, ApplyMode::Ask);
         assert_eq!(cli.global.target, TargetSel::Root(PathBuf::from("D:\\")));
         let cli = p("--target image:C:\\mnt --source E:\\sources\\install.wim --limit-access health restore").unwrap();
-        assert_eq!(cli.global.target, TargetSel::Image(PathBuf::from("C:\\mnt")));
-        assert_eq!(cli.global.sources, [PathBuf::from("E:\\sources\\install.wim")]);
+        assert_eq!(
+            cli.global.target,
+            TargetSel::Image(PathBuf::from("C:\\mnt"))
+        );
+        assert_eq!(
+            cli.global.sources,
+            [PathBuf::from("E:\\sources\\install.wim")]
+        );
         assert!(cli.global.limit_access);
     }
 
@@ -220,7 +282,7 @@ mod tests {
             "features enable",
             "frobnicate",
             "--target nowhere targets",
-            "--color pink targets",
+            "--color never targets",
             "--bogus targets",
             "--dry-run --yes features disable X",
             "journal show",

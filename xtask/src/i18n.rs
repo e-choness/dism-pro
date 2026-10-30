@@ -83,7 +83,10 @@ fn sorted_entries(dir: &Path) -> Result<Vec<PathBuf>> {
 }
 
 fn file_name(path: &Path) -> String {
-    path.file_name().unwrap_or_default().to_string_lossy().into_owned()
+    path.file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// IDs of the messages (`id = …`) and terms (`-id = …`) in one `.ftl` file, in order.
@@ -118,7 +121,9 @@ fn check(catalogs: &Catalogs, release: bool) -> Report {
     let mut report = Report::default();
     let Some(source) = catalogs.get(SOURCE) else {
         if !catalogs.is_empty() {
-            report.errors.push(format!("source locale {SOURCE} is missing"));
+            report
+                .errors
+                .push(format!("source locale {SOURCE} is missing"));
         }
         return report;
     };
@@ -131,7 +136,9 @@ fn check(catalogs: &Catalogs, release: bool) -> Report {
                 report.errors.push(format!("{file}: duplicate ID {id}"));
             }
             if !source_ids.contains(id.as_str()) {
-                report.errors.push(format!("{file}: {id} is not in {SOURCE}"));
+                report
+                    .errors
+                    .push(format!("{file}: {id} is not in {SOURCE}"));
             }
         }
         let missing = source_ids.difference(&seen).count();
@@ -167,8 +174,10 @@ mod tests {
             .iter()
             .map(|(locale, ids)| {
                 let file = format!("{locale}/main.ftl");
-                let ids: Vec<(String, String)> =
-                    ids.iter().map(|id| ((*id).to_owned(), file.clone())).collect();
+                let ids: Vec<(String, String)> = ids
+                    .iter()
+                    .map(|id| ((*id).to_owned(), file.clone()))
+                    .collect();
                 ((*locale).to_owned(), ids)
             })
             .collect()
@@ -189,7 +198,10 @@ apply-count = { $count ->
 review-changes=Review changes
 ";
         let ids = parse_ids(ftl).unwrap();
-        assert_eq!(ids, ["-brand", "nav-clean", "apply-count", "review-changes"]);
+        assert_eq!(
+            ids,
+            ["-brand", "nav-clean", "apply-count", "review-changes"]
+        );
     }
 
     #[test]
@@ -213,11 +225,22 @@ review-changes=Review changes
     fn missing_tier1_ids_fail_only_for_release() {
         let c = catalogs(&[("en-US", &["a", "b"]), ("ja", &["a"]), ("fr", &[])]);
         let dev = check(&c, false);
-        assert!(dev.errors.is_empty());
-        assert!(dev.warnings.contains(&"ja: 1 ID(s) missing (tier-1 locale)".to_owned()));
+        assert_eq!(dev.errors, Vec::<String>::new());
+        assert!(
+            dev.warnings
+                .contains(&"ja: 1 ID(s) missing (tier-1 locale)".to_owned())
+        );
         let release = check(&c, true);
-        assert!(release.errors.contains(&"ja: 1 ID(s) missing (tier-1 locale)".to_owned()));
-        assert!(release.errors.contains(&"ru: tier-1 locale has no catalog".to_owned()));
+        assert!(
+            release
+                .errors
+                .contains(&"ja: 1 ID(s) missing (tier-1 locale)".to_owned())
+        );
+        assert!(
+            release
+                .errors
+                .contains(&"ru: tier-1 locale has no catalog".to_owned())
+        );
         assert!(!release.errors.iter().any(|e| e.starts_with("fr")));
     }
 

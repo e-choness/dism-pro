@@ -15,7 +15,11 @@ pub enum Target {
         windows_dir: PathBuf,
     },
     /// An image mounted from a WIM/ESD/VHD.
-    MountedImage { image: PathBuf, index: u32, mount_dir: PathBuf },
+    MountedImage {
+        image: PathBuf,
+        index: u32,
+        mount_dir: PathBuf,
+    },
 }
 
 impl Target {

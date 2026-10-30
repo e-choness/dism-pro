@@ -108,7 +108,10 @@ impl File<'_> {
     fn c_string(&self, rva: u32) -> Result<String, String> {
         let start = self.offset(rva)?;
         let rest = self.bytes.get(start..).ok_or("name past end of file")?;
-        let len = rest.iter().position(|&b| b == 0).ok_or("unterminated name")?;
+        let len = rest
+            .iter()
+            .position(|&b| b == 0)
+            .ok_or("unterminated name")?;
         let name = &rest[..len];
         if !name.is_ascii() {
             return Err(format!("non-ASCII DLL name at RVA {rva:#x}"));
@@ -190,8 +193,10 @@ pub(crate) mod tests {
     fn reads_imports_and_delay_imports() {
         let pe = synthetic_pe(&["KERNEL32.dll", "ntdll.dll"], &["d3d11.dll"]);
         let found = imports(&pe).unwrap();
-        let names: Vec<(&str, bool)> =
-            found.iter().map(|i| (i.dll.as_str(), i.delay_loaded)).collect();
+        let names: Vec<(&str, bool)> = found
+            .iter()
+            .map(|i| (i.dll.as_str(), i.delay_loaded))
+            .collect();
         let expected = [
             ("KERNEL32.dll", false),
             ("ntdll.dll", false),
