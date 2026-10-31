@@ -1,0 +1,55 @@
+# Throwaway cross-check of the regf reader against offreg.dll (ADR-0008). Lives on diag/** only.
+name: t3-diag
+
+on:
+  push:
+    branches: ["diag/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/toolchain
+      - name: build the dump tool
+        run: >-
+          docker compose run --rm --entrypoint bash test -c
+          'set -e;
+          cargo xwin build --locked --release -p dpro-engine --example regf_dump --target x86_64-pc-windows-msvc;
+          mkdir -p dist-diag;
+          cp target/x86_64-pc-windows-msvc/release/examples/regf_dump.exe dist-diag/'
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: regf-dump
+          path: dist-diag/
+          if-no-files-found: error
+          retention-days: 3
+
+  check:
+    needs: build
+    runs-on: windows-2025
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: regf-dump
+          path: dist-diag/
+      - name: offline image
+        run: |
+          Start-Service docker -ErrorAction SilentlyContinue
+          ./.github/scripts/offline-image.ps1 -Out "$env:RUNNER_TEMP\t3-image"
+      - name: compare
+        run: ./.github/scripts/regf-check.ps1 -Dump dist-diag/regf_dump.exe -Image "$env:RUNNER_TEMP\t3-image"
