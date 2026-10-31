@@ -11,6 +11,7 @@ failure is reported.
   -Step Fake       bench + check of the fake installer (parent exits, a child writes), with a noise
                    writer running in another process
   -Step Msi        bench + check of the MSI (the Windows Installer service writes), same noise
+  -Step Loss       the MSI under several session settings: when events go missing, what stops it
   -Step Container  tracker probe and a short fake bench inside a servercore container
 #>
 param([Parameter(Mandatory)] [string] $Step)
@@ -28,14 +29,32 @@ function Format-Annotation([string] $Text) {
     $Text.Replace('%', '%25').Replace("`r", '').Replace("`n", '%0A')
 }
 
-# Job summary + one annotation per report.
+# Annotations are cut at about 4 KB: long reports go out in parts, split between lines.
+function Split-Report([string] $Text, [int] $Limit = 3600) {
+    $part = ''
+    foreach ($line in $Text -split "`r?`n") {
+        if ($line.Length -gt $Limit) { $line = $line.Substring(0, $Limit) }
+        if ($part.Length + $line.Length + 1 -gt $Limit) {
+            $part
+            $part = ''
+        }
+        $part += "$line`n"
+    }
+    if ($part) { $part }
+}
+
+# Job summary + annotations.
 function Publish([string] $Title, [string] $Text, [switch] $Failed) {
     $Text = $Text.TrimEnd()
     Write-Host $Text
     "## $Title`n`n$Text`n" | Add-Content $env:GITHUB_STEP_SUMMARY
     $kind = $Failed ? 'warning' : 'notice'
-    $t = (Format-Annotation "S-07 $Title").Replace(':', '%3A').Replace(',', '%2C')
-    Write-Host "::$kind title=$t::$(Format-Annotation $Text)"
+    $parts = @(Split-Report $Text)
+    for ($i = 0; $i -lt $parts.Count; $i++) {
+        $label = $parts.Count -gt 1 ? " ($($i + 1)/$($parts.Count))" : ''
+        $t = (Format-Annotation "S-07 $Title$label").Replace(':', '%3A').Replace(',', '%2C')
+        Write-Host "::$kind title=$t::$(Format-Annotation $parts[$i])"
+    }
 }
 
 # Runs the tracker; returns its output with the exit status and wall time.
@@ -132,7 +151,20 @@ switch ($Step) {
             Publish-Tracker 'msi check full' (@('check') + $common + @('--profile', 'full'))
         } finally { Stop-Noise $noise }
     }
+    'Loss' {
+        if (-not (Test-Path $msi)) {
+            Publish 'loss' "no MSI at $msi (see the setup step)" -Failed
+            break
+        }
+        $noise = Start-Noise
+        try {
+            $common = @('loss', 'msi', '--msi', $msi, '--files', '1000', '--keys', '50', '--runs', '3')
+            Publish-Tracker 'loss lean' ($common + @('--profile', 'lean'))
+            Publish-Tracker 'loss full' ($common + @('--profile', 'full'))
+        } finally { Stop-Noise $noise }
+    }
     'Container' {
+        Start-Service docker
         $image = 'mcr.microsoft.com/windows/servercore:ltsc2025'
         $sw = [Diagnostics.Stopwatch]::StartNew()
         docker pull -q $image | Out-Null

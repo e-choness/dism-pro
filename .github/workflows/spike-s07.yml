@@ -68,6 +68,9 @@ jobs:
       - name: MSI
         if: always()
         run: ./.github/scripts/spike-s07.ps1 -Step Msi
+      - name: event loss by session settings
+        if: always()
+        run: ./.github/scripts/spike-s07.ps1 -Step Loss
       - name: servercore container
         if: always()
         run: ./.github/scripts/spike-s07.ps1 -Step Container

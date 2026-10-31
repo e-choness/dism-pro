@@ -7,11 +7,13 @@
 //!   tracker make-msi <dir> [--files N] [--keys K]
 //!   tracker bench fake|msi [--runs R] [--modes none,lean,full] [installer options]
 //!   tracker check fake|msi [--profile lean|full] [installer options]
+//!   tracker loss fake|msi [--profile lean|full] [--runs R] [installer options]
 //!   tracker fake-install|fake-child|fake-uninstall [installer options]
 //!
 //! Installer options: `--files N --keys K` (what it writes), `--root DIR` (where; default
 //! `%ProgramFiles%\S07Fake|S07Msi`), `--modify FILE` (fake: an existing file to append to),
-//! `--msi FILE` (msi: the package built from `make-msi`'s source).
+//! `--msi FILE` (msi: the package built from `make-msi`'s source). Session options for bench and
+//! check: `--buffer-kb N --min-buffers N --max-buffers N --flush S --etl 0|1`.
 
 #![cfg_attr(not(windows), allow(dead_code))]
 
@@ -38,6 +40,11 @@ struct Args {
     root: Option<String>,
     modify: Option<String>,
     msi: Option<String>,
+    buffer_kb: u32,
+    min_buffers: u32,
+    max_buffers: u32,
+    flush: u32,
+    etl: bool,
 }
 
 fn parse_args(raw: &[String]) -> Result<Args> {
@@ -58,6 +65,11 @@ fn parse_args(raw: &[String]) -> Result<Args> {
         root: None,
         modify: None,
         msi: None,
+        buffer_kb: 256,
+        min_buffers: 64,
+        max_buffers: 1024,
+        flush: 1,
+        etl: false,
     };
     let mut it = rest.iter();
     while let Some(arg) = it.next() {
@@ -80,6 +92,11 @@ fn parse_args(raw: &[String]) -> Result<Args> {
             "--root" => a.root = Some(value.clone()),
             "--modify" => a.modify = Some(value.clone()),
             "--msi" => a.msi = Some(value.clone()),
+            "--buffer-kb" => a.buffer_kb = number()? as u32,
+            "--min-buffers" => a.min_buffers = number()? as u32,
+            "--max-buffers" => a.max_buffers = number()? as u32,
+            "--flush" => a.flush = number()? as u32,
+            "--etl" => a.etl = number()? != 0,
             _ => return Err(format!("unknown option {arg}")),
         }
     }
@@ -101,8 +118,15 @@ fn run(raw: &[String]) -> Result<String> {
 #[cfg(windows)]
 fn platform(a: &Args) -> Result<String> {
     use std::path::PathBuf;
-    use win::{Installer, Profile};
+    use win::{Installer, Profile, Tuning};
 
+    let tuning = Tuning {
+        buffer_kb: a.buffer_kb,
+        min: a.min_buffers,
+        max: a.max_buffers,
+        flush: a.flush,
+        etl: a.etl,
+    };
     let program_files =
         std::env::var("ProgramFiles").unwrap_or_else(|_| r"C:\Program Files".into());
     let root = |default: &str| {
@@ -147,11 +171,15 @@ fn platform(a: &Args) -> Result<String> {
                 .iter()
                 .map(|m| Profile::parse(m))
                 .collect::<Result<Vec<_>>>()?;
-            win::bench(&installer(&a.target)?, a.runs, &modes)
+            win::bench(&installer(&a.target)?, a.runs, &modes, tuning)
         }
         "check" => {
             let profile = Profile::parse(&a.profile)?.ok_or("check needs --profile lean|full")?;
-            win::check(&installer(&a.target)?, profile)
+            win::check(&installer(&a.target)?, profile, tuning)
+        }
+        "loss" => {
+            let profile = Profile::parse(&a.profile)?.ok_or("loss needs --profile lean|full")?;
+            win::loss(&installer(&a.target)?, a.runs, profile)
         }
         other => Err(format!("unknown command {other}")),
     }

@@ -41,7 +41,8 @@ use windows_sys::{
                 Etw::{
                     CONTROLTRACE_HANDLE, CloseTrace, ControlTraceW,
                     EVENT_CONTROL_CODE_ENABLE_PROVIDER, EVENT_HEADER_FLAG_64_BIT_HEADER,
-                    EVENT_PROPERTY_INFO, EVENT_RECORD, EVENT_TRACE_CONTROL_STOP,
+                    EVENT_PROPERTY_INFO, EVENT_RECORD, EVENT_TRACE_CONTROL_QUERY,
+                    EVENT_TRACE_CONTROL_STOP, EVENT_TRACE_FILE_MODE_SEQUENTIAL,
                     EVENT_TRACE_LOGFILEW, EVENT_TRACE_LOGFILEW_0, EVENT_TRACE_LOGFILEW_1,
                     EVENT_TRACE_PROPERTIES, EVENT_TRACE_REAL_TIME_MODE, EnableTraceEx2,
                     EventKeywordInformation, OpenTraceW, PROCESS_TRACE_MODE_EVENT_RECORD,
@@ -728,12 +729,14 @@ unsafe extern "system" fn on_event(record: *mut EVENT_RECORD) {
 struct Properties {
     p: EVENT_TRACE_PROPERTIES,
     name: [u16; 1024],
+    file: [u16; 1024],
 }
 
 fn properties() -> Box<Properties> {
     let mut b = Box::new(Properties {
         p: EVENT_TRACE_PROPERTIES::default(),
         name: [0; 1024],
+        file: [0; 1024],
     });
     b.p.Wnode.BufferSize = size_of::<Properties>() as u32;
     b.p.Wnode.Flags = WNODE_FLAG_TRACED_GUID;
@@ -765,6 +768,100 @@ pub struct EtwStats {
     pub buffers_written: u32,
 }
 
+/// Session buffer settings, and where the events go.
+#[derive(Clone, Copy, Debug)]
+pub struct Tuning {
+    pub buffer_kb: u32,
+    pub min: u32,
+    pub max: u32,
+    pub flush: u32,
+    /// Log to an ETL file and decode it after the install, instead of consuming in real time.
+    pub etl: bool,
+}
+
+impl Tuning {
+    pub const DEFAULT: Self = Self {
+        buffer_kb: 256,
+        min: 64,
+        max: 1024,
+        flush: 1,
+        etl: false,
+    };
+
+    fn label(self) -> String {
+        format!(
+            "{} {} KiB × {}..{}, flush {} s",
+            if self.etl { "etl" } else { "real-time" },
+            self.buffer_kb,
+            self.min,
+            self.max,
+            self.flush
+        )
+    }
+}
+
+/// What the session reported at one moment of the install.
+#[derive(Clone, Copy, Debug)]
+pub struct Sample {
+    pub t: i64,
+    pub lost: u32,
+    pub buffers: u32,
+    pub free: u32,
+}
+
+/// Polls the session's counters while it runs. Lost events carry no time of their own.
+struct Sampler {
+    stop: Arc<AtomicBool>,
+    thread: JoinHandle<Vec<Sample>>,
+}
+
+impl Sampler {
+    fn start(handle: CONTROLTRACE_HANDLE) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&stop);
+        let thread = thread::spawn(move || {
+            let mut samples = Vec::new();
+            while !flag.load(Ordering::Acquire) {
+                let mut props = properties();
+                // SAFETY: the session outlives this thread (stop() joins it first); `props` is a
+                // sized properties buffer.
+                let status = unsafe {
+                    ControlTraceW(
+                        handle,
+                        ptr::null(),
+                        &raw mut props.p,
+                        EVENT_TRACE_CONTROL_QUERY,
+                    )
+                };
+                if status == 0 {
+                    samples.push(Sample {
+                        t: qpc(),
+                        lost: props.p.EventsLost,
+                        buffers: props.p.NumberOfBuffers,
+                        free: props.p.FreeBuffers,
+                    });
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+            samples
+        });
+        Self { stop, thread }
+    }
+
+    fn finish(self) -> Vec<Sample> {
+        self.stop.store(true, Ordering::Release);
+        self.thread.join().unwrap_or_default()
+    }
+}
+
+/// What a stopped session leaves.
+pub struct Stopped {
+    pub collector: Box<Collector>,
+    pub stats: EtwStats,
+    pub cpu_ms: f64,
+    pub timeline: Vec<Sample>,
+}
+
 struct Consumed {
     collector: Box<Collector>,
     cpu_ms: f64,
@@ -774,18 +871,33 @@ struct Consumed {
 pub struct Session {
     handle: CONTROLTRACE_HANDLE,
     consumer: Option<JoinHandle<Result<Consumed>>>,
+    sampler: Option<Sampler>,
+    /// ETL mode: the file and the collector that will decode it after the stop.
+    etl: Option<(PathBuf, Box<Collector>)>,
 }
 
 impl Session {
-    pub fn start(profile: Profile, samples: bool) -> Result<Self> {
+    pub fn start(profile: Profile, samples: bool, tuning: Tuning) -> Result<Self> {
         stop_by_name();
         let name = wide(SESSION);
         let mut props = properties();
-        props.p.BufferSize = 256; // KiB
-        props.p.MinimumBuffers = 64;
-        props.p.MaximumBuffers = 1024;
-        props.p.FlushTimer = 1;
+        props.p.BufferSize = tuning.buffer_kb;
+        props.p.MinimumBuffers = tuning.min;
+        props.p.MaximumBuffers = tuning.max;
+        props.p.FlushTimer = tuning.flush;
         props.p.LogFileMode = EVENT_TRACE_REAL_TIME_MODE;
+        let etl = tuning
+            .etl
+            .then(|| std::env::temp_dir().join("dpro-s07.etl"));
+        if let Some(path) = &etl {
+            let file = wide(&path.display().to_string());
+            if file.len() > props.file.len() {
+                return Err(format!("ETL path too long: {}", path.display()));
+            }
+            props.file[..file.len()].copy_from_slice(&file);
+            props.p.LogFileMode = EVENT_TRACE_FILE_MODE_SEQUENTIAL;
+            props.p.LogFileNameOffset = offset_of!(Properties, file) as u32;
+        }
         let mut handle = CONTROLTRACE_HANDLE::default();
         // SAFETY: NUL-terminated name; `props` is sized and initialized as StartTraceW requires.
         let status = unsafe { StartTraceW(&raw mut handle, name.as_ptr(), &raw mut props.p) };
@@ -802,6 +914,8 @@ impl Session {
         let mut session = Self {
             handle,
             consumer: None,
+            sampler: None,
+            etl: None,
         };
         for (provider, id, keywords) in profile.providers() {
             // SAFETY: live session handle; `id` outlives the call; no extra parameters.
@@ -823,16 +937,23 @@ impl Session {
         }
         let ready = Arc::new(AtomicBool::new(false));
         let collector = Box::new(Collector::new(Arc::clone(&ready), samples));
-        session.consumer = Some(thread::spawn(move || consume(collector)));
-        // System-wide providers are never quiet for long: the first event means we're consuming.
-        let t = Instant::now();
-        while !ready.load(Ordering::Acquire) && t.elapsed() < Duration::from_secs(5) {
-            thread::sleep(Duration::from_millis(5));
+        if let Some(path) = etl {
+            session.etl = Some((path, collector));
+        } else {
+            session.consumer = Some(thread::spawn(move || consume(collector, None)));
+            // System-wide providers are never quiet for long: the first event means we're
+            // consuming.
+            let t = Instant::now();
+            while !ready.load(Ordering::Acquire) && t.elapsed() < Duration::from_secs(5) {
+                thread::sleep(Duration::from_millis(5));
+            }
         }
+        session.sampler = Some(Sampler::start(handle));
         Ok(session)
     }
 
-    pub fn stop(mut self) -> Result<(Box<Collector>, EtwStats, f64)> {
+    pub fn stop(mut self) -> Result<Stopped> {
+        let timeline = self.sampler.take().map_or_else(Vec::new, Sampler::finish);
         let mut props = properties();
         // SAFETY: live session handle; `props` receives the final statistics.
         let status = unsafe {
@@ -849,10 +970,17 @@ impl Session {
             buffers_lost: props.p.RealTimeBuffersLost,
             buffers_written: props.p.BuffersWritten,
         };
-        let thread = self.consumer.take().ok_or("no consumer thread")?;
+        let etl_path = self.etl.as_ref().map(|(path, _)| path.clone());
+        let thread = match self.etl.take() {
+            Some((path, collector)) => thread::spawn(move || consume(collector, Some(&path))),
+            None => self.consumer.take().ok_or("no consumer thread")?,
+        };
         let consumed = thread
             .join()
             .map_err(|_| "the consumer thread panicked".to_owned())??;
+        if let Some(path) = etl_path {
+            let _ = fs::remove_file(path);
+        }
         if status != 0 {
             return Err(win_error("ControlTraceW stop", status));
         }
@@ -860,7 +988,12 @@ impl Session {
         if consumed.status != 0 && consumed.status != ERROR_CANCELLED {
             return Err(win_error("ProcessTrace", consumed.status));
         }
-        Ok((consumed.collector, totals, consumed.cpu_ms))
+        Ok(Stopped {
+            collector: consumed.collector,
+            stats: totals,
+            cpu_ms: consumed.cpu_ms,
+            timeline,
+        })
     }
 }
 
@@ -881,14 +1014,24 @@ impl Drop for Session {
     }
 }
 
-fn consume(mut collector: Box<Collector>) -> Result<Consumed> {
+/// Consumes the live session, or the ETL file when one is given.
+fn consume(mut collector: Box<Collector>, etl: Option<&Path>) -> Result<Consumed> {
     let mut name = wide(SESSION);
+    let mut file = etl.map(|p| wide(&p.display().to_string()));
+    let mode = PROCESS_TRACE_MODE_EVENT_RECORD | PROCESS_TRACE_MODE_RAW_TIMESTAMP;
     let mut log = EVENT_TRACE_LOGFILEW {
-        LoggerName: name.as_mut_ptr(),
+        LogFileName: file.as_mut().map_or(ptr::null_mut(), Vec::as_mut_ptr),
+        LoggerName: if file.is_some() {
+            ptr::null_mut()
+        } else {
+            name.as_mut_ptr()
+        },
         Anonymous1: EVENT_TRACE_LOGFILEW_0 {
-            ProcessTraceMode: PROCESS_TRACE_MODE_REAL_TIME
-                | PROCESS_TRACE_MODE_EVENT_RECORD
-                | PROCESS_TRACE_MODE_RAW_TIMESTAMP,
+            ProcessTraceMode: if file.is_some() {
+                mode
+            } else {
+                mode | PROCESS_TRACE_MODE_REAL_TIME
+            },
         },
         Anonymous2: EVENT_TRACE_LOGFILEW_1 {
             EventRecordCallback: Some(on_event),
@@ -1640,6 +1783,7 @@ pub struct Options {
     /// Keep sample events (see `Collector::keep_samples`).
     pub samples: bool,
     pub settle: Duration,
+    pub tuning: Tuning,
 }
 
 pub struct Etw {
@@ -1647,6 +1791,7 @@ pub struct Etw {
     pub stats: EtwStats,
     pub cpu_ms: f64,
     pub start_ms: f64,
+    pub timeline: Vec<Sample>,
 }
 
 pub struct Trace {
@@ -1706,7 +1851,7 @@ pub fn track(command: &str, opt: &Options) -> Result<Trace> {
         .collect();
     let session = match opt.profile {
         Some(p) => {
-            let (s, start_ms) = timed(|| Session::start(p, opt.samples));
+            let (s, start_ms) = timed(|| Session::start(p, opt.samples, opt.tuning));
             Some((s?, start_ms))
         }
         None => None,
@@ -1718,12 +1863,13 @@ pub fn track(command: &str, opt: &Options) -> Result<Trace> {
     thread::sleep(opt.settle);
     let etw = match session {
         Some((s, start_ms)) => {
-            let (collector, stats, cpu_ms) = s.stop()?;
+            let stopped = s.stop()?;
             Some(Etw {
-                collector,
-                stats,
-                cpu_ms,
+                collector: stopped.collector,
+                stats: stopped.stats,
+                cpu_ms: stopped.cpu_ms,
                 start_ms,
+                timeline: stopped.timeline,
             })
         }
         None => None,
@@ -1870,6 +2016,8 @@ impl Installer {
                 wait_msi_idle(Duration::from_secs(120));
                 let status = std::process::Command::new("msiexec.exe")
                     .args(["/x", MSI_PRODUCT_CODE, "/qn", "/norestart"])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
                     .status()
                     .map_err(|e| format!("msiexec /x: {e}"))?;
                 wait_msi_idle(Duration::from_secs(120));
@@ -1987,7 +2135,12 @@ fn row(mode: Option<Profile>, trace: &Trace, truth: &Truth) -> Row {
 
 /// Interleaved rounds of install → uninstall per tracing mode; reports the install time (launch
 /// → job empty) per mode as a ratio to no tracing, and the trace's recall of the truth.
-pub fn bench(inst: &Installer, runs: usize, modes: &[Option<Profile>]) -> Result<String> {
+pub fn bench(
+    inst: &Installer,
+    runs: usize,
+    modes: &[Option<Profile>],
+    tuning: Tuning,
+) -> Result<String> {
     let _ = enable_privilege("SeBackupPrivilege");
     let _ = inst.uninstall();
     let command = inst.command()?;
@@ -1998,6 +2151,7 @@ pub fn bench(inst: &Installer, runs: usize, modes: &[Option<Profile>]) -> Result
         registry: false,
         samples: false,
         settle: Duration::ZERO,
+        tuning,
     };
     // Warm-up, untraced: caches and the msiserver service start the same for every mode.
     let _ = track(&command, &plain)?;
@@ -2012,6 +2166,7 @@ pub fn bench(inst: &Installer, runs: usize, modes: &[Option<Profile>]) -> Result
                 registry: false,
                 samples: false,
                 settle: Duration::from_secs(2),
+                tuning,
             };
             let trace = track(&command, &opt)?;
             rows.push(row(mode, &trace, &truth));
@@ -2134,8 +2289,116 @@ fn bench_report(inst: &Installer, runs: usize, modes: &[Option<Profile>], rows: 
     s
 }
 
+/// The session settings `loss` compares.
+const LOSS_TUNINGS: [Tuning; 6] = [
+    Tuning::DEFAULT,
+    Tuning {
+        buffer_kb: 64,
+        min: 512,
+        max: 4096,
+        ..Tuning::DEFAULT
+    },
+    Tuning {
+        buffer_kb: 1024,
+        min: 128,
+        max: 512,
+        ..Tuning::DEFAULT
+    },
+    Tuning {
+        flush: 0,
+        ..Tuning::DEFAULT
+    },
+    Tuning {
+        etl: true,
+        ..Tuning::DEFAULT
+    },
+    Tuning {
+        buffer_kb: 1024,
+        min: 128,
+        max: 512,
+        etl: true,
+        ..Tuning::DEFAULT
+    },
+];
+
+/// Installs repeatedly under each session setting: when do events go missing, what does the
+/// session report at that moment, and does any setting stop it?
+pub fn loss(inst: &Installer, runs: usize, profile: Profile) -> Result<String> {
+    let _ = enable_privilege("SeBackupPrivilege");
+    let _ = inst.uninstall();
+    let command = inst.command()?;
+    let truth = inst.truth();
+    let mut opt = Options {
+        profile: None,
+        usn: false,
+        registry: false,
+        samples: false,
+        settle: Duration::ZERO,
+        tuning: Tuning::DEFAULT,
+    };
+    let _ = track(&command, &opt)?;
+    inst.uninstall()?;
+    opt.profile = Some(profile);
+    opt.settle = Duration::from_secs(2);
+    let mut s = String::new();
+    let _ = writeln!(
+        s,
+        "### Event loss: {} — profile {}\n",
+        inst.describe(),
+        Profile::name(Some(profile))
+    );
+    let _ = writeln!(
+        s,
+        "| session | install ms | start ms | events | lost | lost window (from launch) | buffers | free min | written | realtime lost | decode CPU ms | files | keys | values |"
+    );
+    let _ = writeln!(
+        s,
+        "|---|--:|--:|--:|--:|---|---|--:|--:|--:|--:|---|---|---|"
+    );
+    for tuning in LOSS_TUNINGS {
+        opt.tuning = tuning;
+        for _ in 0..runs {
+            let trace = track(&command, &opt)?;
+            let etw = trace.etw.as_ref().ok_or("no trace")?;
+            let check = model::check_etw(&truth, &etw.collector.ops, &trace.attributed());
+            let t = &etw.timeline;
+            let window = t.iter().find(|x| x.lost > 0).map_or("-".into(), |first| {
+                let last = t
+                    .iter()
+                    .find(|x| x.lost == etw.stats.events_lost)
+                    .unwrap_or(first);
+                format!(
+                    "{:+.0} .. {:+.0} ms",
+                    rel_ms(&trace, first.t),
+                    rel_ms(&trace, last.t)
+                )
+            });
+            let _ = writeln!(
+                s,
+                "| {} | {:.0} | {:.0} | {} | {} | {window} | {}..{} | {} | {} | {} | {:.0} | {} | {} | {} |",
+                tuning.label(),
+                trace.install_ms(),
+                etw.start_ms,
+                etw.collector.events,
+                etw.stats.events_lost,
+                t.iter().map(|x| x.buffers).min().unwrap_or(0),
+                t.iter().map(|x| x.buffers).max().unwrap_or(0),
+                t.iter().map(|x| x.free).min().unwrap_or(0),
+                etw.stats.buffers_written,
+                etw.stats.buffers_lost,
+                etw.cpu_ms,
+                check.files.cell(),
+                check.keys.cell(),
+                check.values.cell(),
+            );
+            inst.uninstall()?;
+        }
+    }
+    Ok(s)
+}
+
 /// One install traced with ETW, the USN delta and the registry diff, compared item by item.
-pub fn check(inst: &Installer, profile: Profile) -> Result<String> {
+pub fn check(inst: &Installer, profile: Profile, tuning: Tuning) -> Result<String> {
     enable_privilege("SeBackupPrivilege")?;
     let _ = inst.uninstall();
     let opt = Options {
@@ -2144,6 +2407,7 @@ pub fn check(inst: &Installer, profile: Profile) -> Result<String> {
         registry: true,
         samples: true,
         settle: Duration::from_secs(3),
+        tuning,
     };
     let trace = track(&inst.command()?, &opt)?;
     let report = check_report(inst, profile, &trace, &inst.truth());
@@ -2529,11 +2793,12 @@ pub fn probe() -> String {
             }
         }
     }
-    match Session::start(Profile::Full, false) {
+    match Session::start(Profile::Full, false, Tuning::DEFAULT) {
         Ok(session) => {
             thread::sleep(Duration::from_secs(2));
             match session.stop() {
-                Ok((c, stats, cpu)) => {
+                Ok(stopped) => {
+                    let (c, stats, cpu) = (stopped.collector, stopped.stats, stopped.cpu_ms);
                     let _ = writeln!(
                         s,
                         "- 2 s full-profile session: {} events, lost {}/{} buffers, consumer CPU {cpu:.0} ms, TDH failures {}",
