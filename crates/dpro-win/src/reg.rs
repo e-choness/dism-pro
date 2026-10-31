@@ -66,7 +66,7 @@ pub struct RegKey {
 impl Drop for RegKey {
     fn drop(&mut self) {
         if self.owned {
-            // SAFETY: `hkey` came from RegOpenKeyExW/RegLoadAppKeyW and is closed exactly once.
+            // SAFETY: `hkey` came from RegOpenKeyExW and is closed exactly once.
             // ignore: nothing useful to do if closing fails during drop.
             let _ = unsafe { RegCloseKey(self.hkey) };
         }
