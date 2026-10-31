@@ -151,6 +151,7 @@ health-finding-unknown-error = Servicing reported an error.
 health-next-source = Point the repair at a matching install image (install.wim) with --source.
 health-restore-wu-note = The repair may download files from Windows Update. Pass --limit-access to use only --source.
 reboot-none = No reboot is pending.
+reboot-dirty-hives = This installation wasn't shut down cleanly, so its latest registry changes can't be read.
 reboot-reason-cbs = Windows servicing finished installing or removing components and needs a restart.
 reboot-reason-cbs-packages = Windows servicing has package changes waiting for a restart.
 reboot-reason-pending-xml = Component changes are queued to finish at the next restart.

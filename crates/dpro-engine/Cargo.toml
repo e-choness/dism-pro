@@ -28,5 +28,9 @@ harness = false
 name = "cbs_parse"
 harness = false
 
+[[bench]]
+name = "regf_lookup"
+harness = false
+
 [lints]
 workspace = true

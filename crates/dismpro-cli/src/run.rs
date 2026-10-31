@@ -167,6 +167,9 @@ fn reboot_reasons(cli: &Cli, m: &Messages) -> Result<ExitCode, CliError> {
     } else {
         require_elevation()?;
         let hives = OfflineRegistry::load(&target.windows_dir)?;
+        if hives.is_dirty() {
+            eprintln!("{}", m.text("reboot-dirty-hives"));
+        }
         reboot_mod::reboot_reasons(&hives, &RealFiles, &target.windows_dir)
     };
     let messages: Vec<String> = reasons
