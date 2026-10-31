@@ -12,6 +12,7 @@
 #![cfg(windows)]
 
 pub mod console;
+pub mod crash;
 pub mod dism;
 pub mod error;
 pub mod event;

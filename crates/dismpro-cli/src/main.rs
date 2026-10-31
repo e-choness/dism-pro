@@ -22,7 +22,23 @@ use args::{Cli, Command, JournalRef};
 use dpro_cli_fmt::{exit::ExitCode, messages::Messages};
 use error::CliError;
 
+/// Crash dumps go to the running OS's state folder, whatever the target.
+#[cfg(windows)]
+fn install_crash_handler() {
+    let root = dpro_win::system::windows_directory()
+        .ok()
+        .and_then(|windows| windows.parent().map(std::path::Path::to_path_buf));
+    if let Some(root) = root {
+        dpro_win::crash::install(dpro_engine::paths::state_dir(&root), |path| {
+            let m = Messages::en_us();
+            eprintln!("{}", m.get("cli-crash-dump", &[("path", &path.display())]));
+        });
+    }
+}
+
 fn main() -> std::process::ExitCode {
+    #[cfg(windows)]
+    install_crash_handler();
     let m = Messages::en_us();
     let argv: Vec<_> = std::env::args_os().skip(1).collect();
     let cli = match args::parse(argv.clone()) {
