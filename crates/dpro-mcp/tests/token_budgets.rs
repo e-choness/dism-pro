@@ -1,12 +1,16 @@
 //! TD-0013 §7 token budgets, estimated at 4 bytes per token (TD-0013 §7; calibrated quarterly).
 //! A default list page must stay within 2,000 tokens, and any result within 8k tokens (32 KiB).
-//! The tool catalog budget (3,500 tokens) joins this file with the catalog.
+//! The default tool catalog, as `tools/list` returns it, must stay within 3,500 tokens.
 
-use dpro_mcp::shape::{ListArgs, MAX_RESULT_BYTES, Row, SortKey, page};
+use dpro_mcp::{
+    catalog::{Toolset, enabled},
+    shape::{ListArgs, MAX_RESULT_BYTES, Row, SortKey, page},
+};
 use serde::Serialize;
 
 const BYTES_PER_TOKEN: usize = 4;
 const DEFAULT_PAGE_TOKENS: usize = 2_000;
+const CATALOG_TOKENS: usize = 3_500;
 
 /// A `packages.v1` row with realistic lengths: the widest list the first toolsets return.
 #[derive(Debug, Serialize)]
@@ -73,4 +77,20 @@ fn any_page_fits_the_result_cap() {
     let bytes = serde_json::to_vec(&p).unwrap().len();
     eprintln!("capped page: {} rows, {bytes} bytes", p.items.len());
     assert!(bytes <= MAX_RESULT_BYTES + 128, "{bytes} bytes");
+}
+
+#[test]
+fn the_default_catalog_fits_its_budget() {
+    let defs: Vec<_> = enabled(&Toolset::DEFAULT)
+        .into_iter()
+        .map(|t| t.def)
+        .collect();
+    let list = serde_json::json!({ "tools": defs });
+    let bytes = serde_json::to_vec(&list).map_or(usize::MAX, |v| v.len());
+    let t = bytes / BYTES_PER_TOKEN;
+    eprintln!(
+        "default catalog: {} tools, {bytes} bytes, {t} tokens",
+        defs.len()
+    );
+    assert!(t <= CATALOG_TOKENS, "default catalog: {t} tokens");
 }

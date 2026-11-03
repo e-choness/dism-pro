@@ -5,6 +5,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod catalog;
 pub mod protocol;
 pub mod shape;
 pub mod tool;
