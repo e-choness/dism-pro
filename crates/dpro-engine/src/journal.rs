@@ -22,7 +22,7 @@ use dpro_core::{
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-use crate::crc32c::crc32c;
+use crate::{crc32c::crc32c, paths};
 
 pub const MAGIC: [u8; 4] = *b"DPJ1";
 pub const JOURNAL_SCHEMA: u16 = 1;
@@ -136,12 +136,23 @@ pub struct Commit {
     pub status: JobStatus,
 }
 
+/// The inverse of change `index`, learned while applying it (TD-0001 addendum, TD-0002 §5.6).
+/// Some inverses only exist after the change: DISM picks a driver package's published name
+/// (`oem3.inf`) during the add. Written just before the change's done record; undo prefers it
+/// over the intent's inverse.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Learned {
+    pub index: u32,
+    pub inverse: ChangeKind<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Record {
     Begin(Begin),
     Intent(Intent),
     Done(Done),
     Commit(Commit),
+    Learned(Learned),
 }
 
 // Kind bytes: part of the format; never reuse a value.
@@ -149,6 +160,7 @@ const KIND_BEGIN: u8 = 1;
 const KIND_INTENT: u8 = 2;
 const KIND_DONE: u8 = 3;
 const KIND_COMMIT: u8 = 4;
+const KIND_LEARNED: u8 = 5;
 
 /// Buffers records and appends + syncs them on [`JournalWriter::flush`].
 #[derive(Debug)]
@@ -194,6 +206,16 @@ impl<W: JournalSink> JournalWriter<W> {
     /// Encoding errors.
     pub fn done(&mut self, done: Done) -> Result<(), JournalError> {
         self.push(KIND_DONE, &done)
+    }
+
+    /// Buffers an inverse learned while applying a change. Like a done record, it is durable
+    /// after the next [`JournalWriter::flush`] or the commit; a crash before then leaves the
+    /// change in doubt, and recovery probes it.
+    ///
+    /// # Errors
+    /// Encoding errors.
+    pub fn learned(&mut self, learned: &Learned) -> Result<(), JournalError> {
+        self.push(KIND_LEARNED, learned)
     }
 
     /// Appends everything buffered and syncs. No-op when nothing is buffered.
@@ -333,6 +355,7 @@ fn read_frame(bytes: &[u8], offset: usize) -> Option<(Record, usize)> {
         KIND_INTENT => Record::Intent(decode(payload)?),
         KIND_DONE => Record::Done(decode(payload)?),
         KIND_COMMIT => Record::Commit(decode(payload)?),
+        KIND_LEARNED => Record::Learned(decode(payload)?),
         _ => return None,
     };
     Some((record, body_start + len))
@@ -387,7 +410,7 @@ pub fn analyze(rec: &Recovered) -> JobReport {
                 report.failed.push((*index, *code));
             }
             Record::Commit(c) => report.status = Some(c.status),
-            Record::Begin(_) => {}
+            Record::Begin(_) | Record::Learned(_) => {}
         }
     }
     // Sets, not Vec::contains: recovery of 100k records has a 300 ms budget (§7.2).
@@ -406,10 +429,11 @@ pub fn analyze(rec: &Recovered) -> JobReport {
 
 /// The changes that undo a job: the inverses of applied changes, newest first.
 /// `also_applied` lists interrupted intents that probing found applied. Expired
-/// (`ReversibleUntil` before `now`) and irreversible changes are skipped. Each undo
-/// change is itself undoable, so an undo can be undone: a captured inverse becomes
-/// `Reversible` (its own inverse is captured when it runs), a `ReversibleVia` change
-/// becomes `ReversibleVia` the original change.
+/// (`ReversibleUntil` before `now`) and irreversible changes are skipped. An inverse learned
+/// at apply time ([`Learned`]) wins over the one captured before it. Each undo change is
+/// itself undoable, so an undo can be undone: a captured or learned inverse becomes
+/// `Reversible` (its own inverse is captured or learned when it runs), a `ReversibleVia`
+/// change becomes `ReversibleVia` the original change.
 #[must_use]
 pub fn undo_changes(rec: &Recovered, also_applied: &[u32], now: UnixMillis) -> Vec<Change<String>> {
     let report = analyze(rec);
@@ -429,6 +453,14 @@ pub fn undo_changes(rec: &Recovered, also_applied: &[u32], now: UnixMillis) -> V
             _ => None,
         })
         .collect();
+    let learned: HashMap<u32, &ChangeKind<String>> = rec
+        .records
+        .iter()
+        .filter_map(|r| match r {
+            Record::Learned(l) => Some((l.index, &l.inverse)),
+            _ => None,
+        })
+        .collect();
     let mut out = Vec::new();
     for index in order.into_iter().rev() {
         let Some(intent) = intents.get(&index) else {
@@ -443,10 +475,14 @@ pub fn undo_changes(rec: &Recovered, also_applied: &[u32], now: UnixMillis) -> V
                 },
             )),
             Reversibility::ReversibleUntil { until } if *until < now => None,
-            Reversibility::ReversibleUntil { .. } | Reversibility::Reversible => intent
-                .inverse
-                .clone()
-                .map(|kind| (kind, Reversibility::Reversible)),
+            Reversibility::ReversibleUntil { .. } | Reversibility::Reversible => learned
+                .get(&index)
+                .map(|&kind| kind.clone())
+                .or_else(|| intent.inverse.clone())
+                .map(|kind| {
+                    let reversibility = undo_reversibility(&kind, now);
+                    (kind, reversibility)
+                }),
         };
         if let Some((kind, reversibility)) = undo {
             out.push(Change {
@@ -457,6 +493,20 @@ pub fn undo_changes(rec: &Recovered, also_applied: &[u32], now: UnixMillis) -> V
         }
     }
     out
+}
+
+/// How a captured or learned inverse, run as an undo change, can itself be undone. A driver
+/// removal keeps its store copy in quarantine (TD-0002 §5.6), so its own undo lasts as long as
+/// the quarantine does.
+fn undo_reversibility(kind: &ChangeKind<String>, now: UnixMillis) -> Reversibility<String> {
+    match kind {
+        ChangeKind::DriverRemove { .. } | ChangeKind::FileQuarantine { .. } => {
+            Reversibility::ReversibleUntil {
+                until: paths::quarantine_deadline(now),
+            }
+        }
+        _ => Reversibility::Reversible,
+    }
 }
 
 /// A journal file and what it says (`journal list`).
@@ -753,6 +803,37 @@ mod tests {
             UnixMillis(0),
         );
         assert_eq!(redo, [original]);
+    }
+
+    #[test]
+    fn a_learned_inverse_wins_and_survives_a_round_trip() {
+        let intent = reg_set(0);
+        let learned = ChangeKind::RegSet {
+            key: r"HKLM\SOFTWARE\X".into(),
+            value: "v0".into(),
+            new: RegData::Dword(7),
+        };
+        let mut w = JournalWriter::create(Vec::new(), &begin()).unwrap();
+        w.intent(&intent).unwrap();
+        w.flush().unwrap();
+        w.learned(&Learned {
+            index: 0,
+            inverse: learned.clone(),
+        })
+        .unwrap();
+        w.done(Done {
+            index: 0,
+            outcome: Outcome::Applied,
+        })
+        .unwrap();
+        let bytes = w.commit(JobStatus::Completed).unwrap();
+        let rec = read(&bytes).unwrap();
+        assert!(!rec.torn);
+        assert_eq!(analyze(&rec).applied, [0]);
+        let undo = undo_changes(&rec, &[], UnixMillis(0));
+        assert_eq!(undo.len(), 1);
+        assert_eq!(undo[0].kind, learned);
+        assert_eq!(undo[0].reversibility, Reversibility::Reversible);
     }
 
     #[test]

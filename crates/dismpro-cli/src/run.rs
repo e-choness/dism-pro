@@ -2,6 +2,7 @@
 //! so DISM calls run inline on the main thread instead of through a `TargetActor`.
 
 use std::{
+    ffi::OsStr,
     fs::{self, File},
     path::{Path, PathBuf},
 };
@@ -25,14 +26,14 @@ use dpro_engine::{
     },
     identity,
     job::{self, Applied, Backend, MonotonicClock, RunConfig},
-    journal::{self, Begin, JobStatus, JournalWriter},
-    ops::{self, FeatureEntry, PackageEntry},
+    journal::{self, Begin, JobStatus, JournalWriter, Recovered},
+    ops::{self, DriverEntry, DriverSignature, FeatureEntry, PackageEntry, Probed},
     paths,
     registry::{OfflineRegistry, OnlineRegistry},
 };
 use dpro_win::{
     console,
-    dism::{Call, DismApi, LogLevel, Session},
+    dism::{Call, DismApi, DriverPackageInfo, LogLevel, Session},
     event::Event,
     privilege, security, system,
 };
@@ -41,8 +42,8 @@ use crate::{
     args::{Cli, Command, JournalRef, TargetSel},
     error::CliError,
     json::{
-        FeatureJson, FeaturesDoc, FindingJson, HealthDoc, JournalsDoc, PackageJson, PackagesDoc,
-        RebootDoc, TargetJson, TargetsDoc, hresult, state_name,
+        DriverJson, DriversDoc, FeatureJson, FeaturesDoc, FindingJson, HealthDoc, JournalsDoc,
+        PackageJson, PackagesDoc, RebootDoc, TargetJson, TargetsDoc, hresult, state_name,
     },
     out::{self, Confirm, Decision, ProgressLine},
 };
@@ -92,6 +93,45 @@ pub(crate) fn run(cli: &Cli, m: &Messages) -> Result<ExitCode, CliError> {
                 Command::PackagesRemove(ids) => {
                     let current = ctx.package_entries()?;
                     let plan = ops::plan_package_removal(target_id, os_build, &current, ids)?;
+                    ctx.apply(&plan, None)
+                }
+                Command::DriversList { all } => ctx.drivers(*all),
+                Command::DriversAdd {
+                    paths,
+                    recurse,
+                    force_unsigned,
+                } => {
+                    ctx.offline_drivers_only()?;
+                    let infs = ops::collect_infs(paths, *recurse)?;
+                    let candidates = infs
+                        .iter()
+                        .map(|inf| ctx.driver_candidate(inf))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let staged = driver_entries(&ctx.session, false)?;
+                    let plan = ops::plan_driver_add(
+                        target_id,
+                        os_build,
+                        &staged,
+                        &candidates,
+                        *force_unsigned,
+                        same_bytes,
+                    )?;
+                    ctx.apply(&plan, None)
+                }
+                Command::DriversRemove {
+                    names,
+                    allow_boot_critical,
+                } => {
+                    ctx.offline_drivers_only()?;
+                    let staged = driver_entries(&ctx.session, false)?;
+                    let plan = ops::plan_driver_removal(
+                        target_id,
+                        os_build,
+                        &staged,
+                        names,
+                        *allow_boot_critical,
+                        paths::now(),
+                    )?;
                     ctx.apply(&plan, None)
                 }
                 Command::JournalUndo(job) => ctx.undo(job),
@@ -484,6 +524,74 @@ impl Ctx<'_, '_> {
             .collect())
     }
 
+    /// `drivers list [--all]` (TD-0002 §5.6).
+    fn drivers(&self, all: bool) -> Result<ExitCode, CliError> {
+        let m = self.m;
+        let progress = ProgressLine::new(self.cli.global.json, m);
+        if all {
+            progress.waiting("drivers-reading-all");
+        }
+        let listed = self.session.drivers(all);
+        progress.finish();
+        let rows: Vec<DriverJson> = listed?.iter().map(driver_json).collect();
+        if self.cli.global.json {
+            out::print_json(&DriversDoc {
+                schema: "drivers.v1",
+                drivers: rows,
+            })?;
+        } else if rows.is_empty() {
+            println!("{}", m.text("drivers-none"));
+        } else {
+            let mut t = table::Table::new(&[
+                (m.text("col-published"), false),
+                (m.text("col-class"), false),
+                (m.text("col-provider"), false),
+                (m.text("col-version"), false),
+                (m.text("col-date"), false),
+                (m.text("col-signature"), false),
+            ]);
+            for r in rows {
+                t.push(vec![
+                    r.published,
+                    r.class,
+                    r.provider,
+                    r.version,
+                    r.date,
+                    m.text(&format!("signature-{}", r.signature)),
+                ]);
+            }
+            print!("{}", table::render(&t, out::width()));
+        }
+        Ok(ExitCode::Ok)
+    }
+
+    /// Driver changes go to offline images only in v1: DISM won't remove drivers from the
+    /// running Windows (`0x80070032`, measured), and online changes belong to the driver-store
+    /// API in P-11 (TD-0002 §5.6).
+    fn offline_drivers_only(&self) -> Result<(), CliError> {
+        if self.target.image_root.is_none() {
+            return Err(CliError::Failed(self.m.text("drivers-online-refused")));
+        }
+        Ok(())
+    }
+
+    /// An INF to add, as `DismGetDriverInfo` reads it. Its path is made absolute: DISM resolves
+    /// relative paths against its own working folder.
+    fn driver_candidate(&self, inf: &Path) -> Result<DriverEntry, CliError> {
+        let inf = std::path::absolute(inf).map_err(|e| CliError::io_at(inf, &e))?;
+        let (_, package) = self.session.driver_info(inf.as_os_str())?;
+        let package = package.ok_or_else(|| {
+            CliError::Failed(self.m.get(
+                "drivers-no-package-info",
+                &[("inf", &inf.display().to_string())],
+            ))
+        })?;
+        Ok(DriverEntry {
+            inf: inf.to_string_lossy().into_owned(),
+            ..driver_entry(&package)
+        })
+    }
+
     fn feature_entries(&self) -> Result<Vec<FeatureEntry>, CliError> {
         feature_entries(&self.session)
     }
@@ -579,8 +687,8 @@ impl Ctx<'_, '_> {
 
     /// Undo a journaled job: the inverse changes become a new plan, previewed and journaled
     /// like any other (TD-0001 §5.2). Refused for another installation, another build, or a
-    /// job that was already undone. For an interrupted job, feature changes without an
-    /// outcome are probed against the image.
+    /// job that was already undone. For an interrupted job, feature and driver changes without
+    /// an outcome are probed against the image.
     fn undo(&mut self, job_ref: &JournalRef) -> Result<ExitCode, CliError> {
         let path = match job_ref {
             JournalRef::Id(job) => paths::journal_file(&self.target.volume_root, *job),
@@ -590,7 +698,7 @@ impl Ctx<'_, '_> {
             self.target,
             (self.target_id, self.os_build),
             &path,
-            || self.feature_entries(),
+            |rec, in_doubt| probe_in_doubt(&self.session, rec, in_doubt),
             self.m,
         )?;
         self.apply(&plan, Some(job))
@@ -635,14 +743,13 @@ impl Ctx<'_, '_> {
 
         let progress = ProgressLine::new(g.json, m);
         let sink = |p: Progress| progress.report(p);
+        let mut inner = DismBackend::new(&mut self.session);
+        inner.sources.clone_from(&g.sources);
+        inner.limit_access = g.limit_access;
+        inner.progress = Some(&sink);
+        inner.quarantine = Some(paths::quarantine_dir(root, job));
         let mut backend = Stepping {
-            inner: DismBackend {
-                session: &mut self.session,
-                sources: g.sources.clone(),
-                limit_access: g.limit_access,
-                progress: Some(&sink),
-                errors: Vec::new(),
-            },
+            inner,
             line: &progress,
             total: doc.changes.len(),
             started: 0,
@@ -659,6 +766,9 @@ impl Ctx<'_, '_> {
         let (summary, _) = ran?;
         for e in &backend.inner.errors {
             eprintln!("{}", m.get("cli-error", &[("message", e)]));
+        }
+        for note in &backend.inner.notes {
+            eprintln!("{}", m.get("cli-note", &[("message", note)]));
         }
         if summary.status == JobStatus::Cancelled {
             eprintln!("{}", m.text("cli-cancelled"));
@@ -744,17 +854,17 @@ pub(crate) fn finding_rows(
 
 /// The plan that undoes a journaled job: its inverse changes, previewed and journaled like any
 /// other plan (TD-0001 §5.2). Refused for another installation, another build, or a job that
-/// was already undone. For an interrupted job, feature changes without an outcome are probed
-/// against the image, which is what `features` reads. Returns the plan and the job it undoes.
+/// was already undone. For an interrupted job, `probe` checks the changes without an outcome
+/// against the image ([`probe_in_doubt`]). Returns the plan and the job it undoes.
 pub(crate) fn undo_plan(
     target: &Resolved,
     (target_id, os_build): (TargetId, OsBuild),
     journal_file: &Path,
-    features: impl FnOnce() -> Result<Vec<FeatureEntry>, CliError>,
+    probe: impl FnOnce(&Recovered, &[u32]) -> Result<Probed, CliError>,
     m: &Messages,
 ) -> Result<(Plan, JobId), CliError> {
     let bytes = fs::read(journal_file).map_err(|e| CliError::io_at(journal_file, &e))?;
-    let rec = journal::read(&bytes)?;
+    let mut rec = journal::read(&bytes)?;
     let job = rec.begin.job;
     let known = |t: TargetId| t != UNKNOWN_TARGET;
     if known(rec.begin.target) && known(target_id) && rec.begin.target != target_id {
@@ -781,10 +891,13 @@ pub(crate) fn undo_plan(
     }
     let report = journal::analyze(&rec);
     let probed = if report.status.is_none() && !report.without_outcome.is_empty() {
-        ops::probe_features(&rec, &report.without_outcome, &features()?)
+        probe(&rec, &report.without_outcome)?
     } else {
-        Vec::new()
+        Probed::default()
     };
+    // Inverses that probing found stand in for learned records lost in the crash.
+    rec.records
+        .extend(probed.learned.into_iter().map(journal::Record::Learned));
     let doc = PlanDoc {
         schema: PLAN_SCHEMA.to_owned(),
         target: target_id,
@@ -795,10 +908,97 @@ pub(crate) fn undo_plan(
             category: "journal".into(),
             cancellable: false,
         },
-        changes: journal::undo_changes(&rec, &probed, paths::now()),
+        changes: journal::undo_changes(&rec, &probed.applied, paths::now()),
         summary: PlanSummary::default(),
     };
     Ok((Plan::from_doc(doc)?, job))
+}
+
+/// Which of an interrupted job's `in_doubt` changes landed. Lists only what those changes need:
+/// features (a listing can take a minute) when a feature change is in doubt, the driver store
+/// when a driver change is. Other kinds stay in doubt, and undo skips them.
+pub(crate) fn probe_in_doubt(
+    session: &Session<'_>,
+    rec: &Recovered,
+    in_doubt: &[u32],
+) -> Result<Probed, CliError> {
+    let mut probed = Probed::default();
+    if ops::in_doubt_has(rec, in_doubt, |k| {
+        matches!(k, ChangeKind::FeatureState { .. })
+    }) {
+        probed.applied = ops::probe_features(rec, in_doubt, &feature_entries(session)?);
+    }
+    if ops::in_doubt_has(rec, in_doubt, |k| {
+        matches!(
+            k,
+            ChangeKind::DriverAdd { .. } | ChangeKind::DriverRemove { .. }
+        )
+    }) {
+        let staged = driver_entries(session, false)?;
+        let identity = |inf: &str| {
+            let (_, package) = session.driver_info(OsStr::new(inf)).ok()?;
+            package.map(|p| driver_entry(&p))
+        };
+        let drivers = ops::probe_drivers(rec, in_doubt, &staged, identity);
+        probed.applied.extend(drivers.applied);
+        probed.learned.extend(drivers.learned);
+    }
+    Ok(probed)
+}
+
+/// The driver packages of an open session, as the planners and the probe take them.
+pub(crate) fn driver_entries(
+    session: &Session<'_>,
+    all: bool,
+) -> Result<Vec<DriverEntry>, CliError> {
+    Ok(session.drivers(all)?.iter().map(driver_entry).collect())
+}
+
+fn driver_entry(p: &DriverPackageInfo) -> DriverEntry {
+    DriverEntry {
+        published: p.published_name.to_string_lossy().into_owned(),
+        inf: p.original_file.to_string_lossy().into_owned(),
+        inbox: p.inbox,
+        boot_critical: p.boot_critical,
+        signature: match p.signature {
+            dpro_win::dism::DismDriverSignatureSigned => DriverSignature::Signed,
+            dpro_win::dism::DismDriverSignatureUnsigned => DriverSignature::Unsigned,
+            _ => DriverSignature::Unknown,
+        },
+        provider: p.provider.to_string_lossy().into_owned(),
+        class: p.class_name.to_string_lossy().into_owned(),
+        version: p.version,
+        date: format!(
+            "{:04}-{:02}-{:02}",
+            p.date.wYear, p.date.wMonth, p.date.wDay
+        ),
+    }
+}
+
+fn driver_json(package: &DriverPackageInfo) -> DriverJson {
+    let entry = driver_entry(package);
+    let version: Vec<String> = entry.version.iter().map(u32::to_string).collect();
+    DriverJson {
+        published: entry.published,
+        inf: entry.inf,
+        inbox: entry.inbox,
+        class: entry.class,
+        class_guid: package.class_guid.to_string_lossy().into_owned(),
+        class_description: package.class_description.to_string_lossy().into_owned(),
+        provider: entry.provider,
+        version: version.join("."),
+        date: entry.date,
+        signature: entry.signature.name(),
+        boot_critical: entry.boot_critical,
+        catalog: package.catalog_file.to_string_lossy().into_owned(),
+    }
+}
+
+/// Whether two INFs are byte for byte the same: an identical package is already staged
+/// (TD-0002 §5.6). An unreadable file counts as different, so the add is planned and DISM
+/// decides.
+fn same_bytes(a: &str, b: &str) -> bool {
+    matches!((fs::read(a), fs::read(b)), (Ok(x), Ok(y)) if x == y)
 }
 
 /// The features of an open session, as the planners and the undo probe take them.
@@ -849,5 +1049,9 @@ impl<B: Backend> Backend for Stepping<'_, '_, B> {
             self.line.step(self.started, self.total);
         }
         self.inner.apply(change)
+    }
+
+    fn learned_inverse(&mut self) -> Option<ChangeKind<String>> {
+        self.inner.learned_inverse()
     }
 }

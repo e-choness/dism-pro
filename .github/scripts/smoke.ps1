@@ -147,6 +147,149 @@ Test-Step 'restore original state' {
     $job = Invoke-Job 'journal', 'undo', $jobC.job
     Assert-Feature $initial $job
 }
+# Drivers (TD-0002 §5.6, roadmap 2.5). An unsigned null-driver package: one root-enumerated model
+# that installs nothing and copies no file, so staging it changes only the driver store.
+$infName = 'dpro-smoke-null.inf'
+$infDir = Join-Path ([IO.Path]::GetTempPath()) "dpro-smoke-drivers-$PID"
+$null = New-Item -ItemType Directory -Force (Join-Path $infDir 'empty')
+@'
+; DISM Pro smoke test package: a device that never exists. Never installed.
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = System
+ClassGuid   = {4d36e97d-e325-11ce-bfc1-08002be10318}
+Provider    = %Provider%
+DriverVer   = 11/03/2026,1.0.0.0
+PnpLockdown = 1
+
+[Manufacturer]
+%Provider% = Models, NTamd64, NTarm64
+
+[Models.NTamd64]
+%Device% = NullInstall, ROOT\DPRO_SMOKE_NULL
+
+[Models.NTarm64]
+%Device% = NullInstall, ROOT\DPRO_SMOKE_NULL
+
+[NullInstall.NT]
+
+[NullInstall.NT.Services]
+AddService = , 0x00000002
+
+[Strings]
+Provider = "DISM Pro smoke"
+Device   = "DISM Pro smoke null device"
+'@ | Set-Content -Encoding ascii (Join-Path $infDir $infName)
+
+# Our package in the target's store, or $null.
+function Get-OurDriver {
+    $d = Get-Doc (Invoke-Cli 'drivers', 'list') 'drivers.v1'
+    @($d.drivers) | Where-Object { (Split-Path $_.inf -Leaf) -eq $infName } | Select-Object -First 1
+}
+
+function Assert-OurDriver([bool] $Staged, $Job) {
+    $p = Get-OurDriver
+    if ([bool] $p -ne $Staged) { throw "after job $($Job.job) the package is $(if ($p) { "staged as $($p.published)" } else { 'not staged' }), expected staged=$Staged" }
+    if ($p) { "job $($Job.job), staged as $($p.published) ($($p.signature))" } else { "job $($Job.job), not staged" }
+}
+
+function Get-Median([double[]] $Values) {
+    $s = @($Values | Sort-Object)
+    $mid = [int][Math]::Floor($s.Count / 2)
+    if ($s.Count % 2) { $s[$mid] } else { ($s[$mid - 1] + $s[$mid]) / 2 }
+}
+
+Test-Step 'drivers list' {
+    $d = Get-Doc (Invoke-Cli 'drivers', 'list') 'drivers.v1'
+    if (Get-OurDriver) { throw "$infName is already staged: a previous run didn't clean up" }
+    "$(@($d.drivers).Count) third-party package(s)"
+}
+
+# G1 ratio gate (TD-0002 §7): the whole command against dism.exe on the same VM and target. One
+# warm-up each, then 5 interleaved runs; the medians' ratio must be at most 1.3. Offline lists the
+# inbox packages too (2.5 s, 246 packages); online stays third-party (inbox online takes 17-30 s).
+Test-Step 'drivers list vs dism.exe /Get-Drivers (gate 1.3x)' {
+    $all = if ($Target) { @('--all') } else { @() }
+    $dismArgs = if ($Target) { @("/Image:$((Resolve-Path $Target).Path)", '/Get-Drivers', '/All') } else { @('/Online', '/Get-Drivers') }
+    $dism = Join-Path $env:SystemRoot 'System32\dism.exe'
+    $ours = {
+        $null = & $Cli 'drivers' 'list' @all @targetArgs '--json' 2> $null
+        if ($LASTEXITCODE) { throw "dismpro-cli drivers list exited $LASTEXITCODE" }
+    }
+    $theirs = {
+        $null = & $dism @dismArgs '/English'
+        if ($LASTEXITCODE) { throw "dism.exe $($dismArgs -join ' ') exited $LASTEXITCODE" }
+    }
+    & $ours
+    & $theirs
+    $a = [Collections.Generic.List[double]]::new()
+    $b = [Collections.Generic.List[double]]::new()
+    for ($i = 0; $i -lt 5; $i++) {
+        $a.Add((Measure-Command $ours).TotalMilliseconds)
+        $b.Add((Measure-Command $theirs).TotalMilliseconds)
+    }
+    $ma = Get-Median $a
+    $mb = Get-Median $b
+    $ratio = $ma / $mb
+    $text = 'ratio {0:N2} (median {1:N0} ms vs {2:N0} ms{3})' -f $ratio, $ma, $mb, $(if ($Target) { ', --all' } else { '' })
+    if ($ratio -gt 1.3) { throw "over the gate: $text" }
+    $text
+}
+
+if (-not $Target) {
+    Test-Step 'drivers add online (refused)' {
+        $e = Get-Doc (Invoke-Cli 'drivers', 'add', $infDir, '--force-unsigned', '--yes' -Expect 1) 'error.v1'
+        if (Get-OurDriver) { throw 'a refused add staged the package' }
+        $e.message
+    }
+} else {
+    Test-Step 'drivers add refusals' {
+        $e = Get-Doc (Invoke-Cli 'drivers', 'add', $infDir, '--yes' -Expect 1) 'error.v1'
+        if ($e.message -notmatch 'force-unsigned') { throw "unsigned refusal: $($e.message)" }
+        $null = Get-Doc (Invoke-Cli 'drivers', 'add', (Join-Path $infDir 'empty'), '--force-unsigned', '--yes' -Expect 1) 'error.v1'
+        $null = Get-Doc (Invoke-Cli 'drivers', 'remove', 'oem99999.inf', '--yes' -Expect 1) 'error.v1'
+        $plan = Get-Doc (Invoke-Cli 'drivers', 'add', $infDir, '--force-unsigned', '--dry-run') 'plan.v1'
+        if (@($plan.changes).Count -ne 1) { throw "dry run planned $(@($plan.changes).Count) changes" }
+        if (Get-OurDriver) { throw 'a refused or dry-run command staged the package' }
+        'unsigned (1), folder without INFs (1), unknown package (1), dry run (0, unchanged)'
+    }
+    Test-Step 'drivers add' {
+        $script:drvA = Invoke-Job 'drivers', 'add', $infDir, '--force-unsigned'
+        Assert-OurDriver $true $drvA
+    }
+    Test-Step 'drivers add again (already staged)' {
+        $plan = Get-Doc (Invoke-Cli 'drivers', 'add', (Join-Path $infDir $infName), '--force-unsigned', '--dry-run') 'plan.v1'
+        if (@($plan.changes).Count) { throw "planned $(@($plan.changes).Count) change(s) for a package the store has" }
+        'nothing to do'
+    }
+    Test-Step 'undo the add (learned inverse)' {
+        $script:drvB = Invoke-Job 'journal', 'undo', $drvA.job
+        Assert-OurDriver $false $drvB
+    }
+    Test-Step 'undo the undo (re-add from quarantine)' {
+        $script:drvC = Invoke-Job 'journal', 'undo', $drvB.job
+        $root = Get-Item -Force (Join-Path (Resolve-Path $Target).Path '$DismProQuarantine')
+        if (-not ($root.Attributes -band [IO.FileAttributes]::Hidden)) { throw "$($root.FullName) isn't hidden" }
+        $copy = Join-Path $root.FullName "$($drvB.job)\drivers"
+        if (-not (Get-ChildItem $copy -Recurse -Filter $infName -ErrorAction SilentlyContinue)) { throw "no store copy under $copy" }
+        Assert-OurDriver $true $drvC
+    }
+    Test-Step 'drivers remove' {
+        $published = (Get-OurDriver).published
+        $script:drvD = Invoke-Job 'drivers', 'remove', $published
+        Assert-OurDriver $false $drvD
+    }
+    Test-Step 'undo the removal' {
+        $script:drvE = Invoke-Job 'journal', 'undo', $drvD.job
+        Assert-OurDriver $true $drvE
+    }
+    Test-Step 'undo again (store as it was)' {
+        $job = Invoke-Job 'journal', 'undo', $drvE.job
+        Assert-OurDriver $false $job
+    }
+}
+Remove-Item -Recurse -Force $infDir -ErrorAction SilentlyContinue
+
 Test-Step 'purge' {
     $docs = Invoke-Cli 'purge', '--yes', '--allow-irreversible'
     $left = @((Get-Doc (Invoke-Cli 'journal', 'list') 'journals.v1').jobs).Count

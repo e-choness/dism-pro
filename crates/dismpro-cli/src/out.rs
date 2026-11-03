@@ -286,6 +286,8 @@ pub(crate) struct ProgressLine<'m> {
     step: AtomicU32,
     /// Last percentage printed + 1; 0 = nothing on the line.
     shown: AtomicU32,
+    /// Characters a waiting message put on the line, for `finish` to clear.
+    waiting: AtomicU32,
 }
 
 impl<'m> ProgressLine<'m> {
@@ -295,7 +297,25 @@ impl<'m> ProgressLine<'m> {
             m,
             step: AtomicU32::new(0),
             shown: AtomicU32::new(0),
+            waiting: AtomicU32::new(0),
         }
+    }
+
+    /// A call that reports no progress is running (`DismGetDrivers` with inbox packages takes
+    /// up to half a minute): says so once, until [`ProgressLine::finish`].
+    pub(crate) fn waiting(&self, message_id: &str) {
+        if !self.enabled {
+            return;
+        }
+        let text = self.m.text(message_id);
+        let width = u32::try_from(text.chars().count()).unwrap_or(u32::MAX);
+        if self.waiting.swap(width, Ordering::Relaxed) != 0 {
+            return;
+        }
+        let mut err = io::stderr().lock();
+        // ignore: progress is cosmetic.
+        let _ = write!(err, "\r{text}");
+        let _ = err.flush();
     }
 
     /// The next change of a job starts (1-based).
@@ -335,8 +355,11 @@ impl<'m> ProgressLine<'m> {
 
     /// Clears the line so the next output starts at column 0.
     pub(crate) fn finish(&self) {
-        if self.enabled && self.shown.swap(0, Ordering::Relaxed) != 0 {
-            eprint!("\r{:24}\r", "");
+        let waiting = self.waiting.swap(0, Ordering::Relaxed);
+        let shown = self.shown.swap(0, Ordering::Relaxed);
+        if self.enabled && (waiting != 0 || shown != 0) {
+            let width = usize::try_from(waiting).unwrap_or(0).max(24);
+            eprint!("\r{:width$}\r", "");
         }
     }
 }

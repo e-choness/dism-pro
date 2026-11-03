@@ -28,6 +28,10 @@ use dpro_sys::{
 
 /// `HRESULT_FROM_WIN32(ERROR_CANCELLED)`: what a call returns after its cancel event is set.
 pub use dpro_sys::dism::HRESULT_ERROR_CANCELLED;
+/// `DriverPackageInfo::signature` values.
+pub use dpro_sys::dism::{
+    DismDriverSignatureSigned, DismDriverSignatureUnknown, DismDriverSignatureUnsigned,
+};
 
 use crate::{
     error::{Error, Result},

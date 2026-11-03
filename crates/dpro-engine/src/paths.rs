@@ -26,6 +26,29 @@ pub fn journal_file(volume_root: &Path, job: JobId) -> PathBuf {
     journal_dir(volume_root).join(format!("{job}.dpj"))
 }
 
+/// How long quarantined data is kept, and so how long the changes that moved it there can be
+/// undone: 7 days (TD-0001 §12, decision #8).
+pub const QUARANTINE_TTL_MS: u64 = 7 * 24 * 60 * 60 * 1000;
+
+/// `<root>\$DismProQuarantine`: hidden and admin-only, on the volume of the OS it belongs to
+/// (TD-0001 §5.2).
+#[must_use]
+pub fn quarantine_root(volume_root: &Path) -> PathBuf {
+    volume_root.join("$DismProQuarantine")
+}
+
+/// What job `job` moved aside.
+#[must_use]
+pub fn quarantine_dir(volume_root: &Path, job: JobId) -> PathBuf {
+    quarantine_root(volume_root).join(job.to_string())
+}
+
+/// Until when a change quarantined at `now` can be undone.
+#[must_use]
+pub fn quarantine_deadline(now: UnixMillis) -> UnixMillis {
+    UnixMillis(now.0.saturating_add(QUARANTINE_TTL_MS))
+}
+
 /// Milliseconds since the Unix epoch (0 if the clock is before it).
 #[must_use]
 pub fn now() -> UnixMillis {

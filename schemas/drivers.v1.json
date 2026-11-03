@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/e-choness/dism-pro/schemas/drivers.v1.json",
+  "title": "dismpro-cli drivers list --json",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": "drivers.v1"
+    },
+    "drivers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "published": {
+            "description": "oemN.inf for a third-party package; an inbox package keeps its INF name",
+            "type": "string"
+          },
+          "inf": {
+            "description": "The INF's copy in the driver store",
+            "type": "string"
+          },
+          "inbox": {
+            "type": "boolean"
+          },
+          "class": {
+            "type": "string"
+          },
+          "class_guid": {
+            "type": "string"
+          },
+          "class_description": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string",
+            "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$"
+          },
+          "date": {
+            "type": "string",
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+          },
+          "signature": {
+            "enum": [
+              "signed",
+              "unsigned",
+              "unknown"
+            ]
+          },
+          "boot_critical": {
+            "type": "boolean"
+          },
+          "catalog": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "published",
+          "inf",
+          "inbox",
+          "class",
+          "class_guid",
+          "class_description",
+          "provider",
+          "version",
+          "date",
+          "signature",
+          "boot_critical",
+          "catalog"
+        ]
+      }
+    }
+  },
+  "required": [
+    "schema",
+    "drivers"
+  ],
+  "additionalProperties": true
+}
