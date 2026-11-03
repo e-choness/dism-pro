@@ -46,17 +46,23 @@ case "${task}" in
   t3-tools)
     # Dev tools the T3 job runs on the x64 runner VM, never shipped (dist/ stays release-only):
     # regf_dump, the hive reader's side of .github/scripts/regf-check.ps1 (ADR-0008); pipe_t3,
-    # the broker pipe probe (roadmap 2.7); and the dpro-win test binary, whose crash-dump and
-    # pipe tests need real Windows (dbghelp.dll, WER, integrity labels).
+    # the broker pipe probe (roadmap 2.7); and the dpro-win and dpro-broker test binaries, whose
+    # crash-dump, pipe and peer tests need real Windows (dbghelp.dll, WER, integrity labels).
     t=x86_64-pc-windows-msvc
     cargo xwin build --locked --release -p dpro-engine --example regf_dump --target "${t}" "$@"
     cargo xwin build --locked --release -p dpro-win --example pipe_t3 --target "${t}" "$@"
-    tests=$(cargo xwin test --color never --locked --no-run -p dpro-win --target "${t}" "$@" 2>&1 \
-      | tee /dev/stderr | sed -n 's/^ *Executable unittests src\/lib\.rs (\(.*\))$/\1/p')
+    # The unit-test binary of package $1: cargo prints "Executable unittests src/lib.rs (<path>)".
+    test_exe() {
+      cargo xwin test --color never --locked --no-run -p "$1" --target "${t}" "${@:2}" 2>&1 \
+        | tee /dev/stderr | sed -n 's/^ *Executable unittests src\/lib\.rs (\(.*\))$/\1/p'
+    }
+    win_tests=$(test_exe dpro-win "$@")
+    broker_tests=$(test_exe dpro-broker "$@")
     rm -rf dist-t3
     mkdir -p dist-t3
     cp "target/${t}/release/examples/regf_dump.exe" "target/${t}/release/examples/pipe_t3.exe" dist-t3/
-    cp "${tests:?no dpro-win test binary}" dist-t3/dpro-win-tests.exe
+    cp "${win_tests:?no dpro-win test binary}" dist-t3/dpro-win-tests.exe
+    cp "${broker_tests:?no dpro-broker test binary}" dist-t3/dpro-broker-tests.exe
     ;;
   build)
     # Ship binaries only: xtask is a host tool, and dist/ starts empty so no stale exe lingers.

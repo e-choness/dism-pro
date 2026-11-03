@@ -32,7 +32,8 @@ use windows_sys::Win32::{
     Security::{
         Authorization::ConvertSidToStringSidW,
         Cryptography::{BCRYPT_SHA256_ALG_HANDLE, BCryptHash},
-        GetTokenInformation, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser,
+        GetTokenInformation, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenSessionId,
+        TokenUser,
     },
     Storage::FileSystem::{
         CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_READ_ATTRIBUTES, FILE_READ_DATA,
@@ -309,13 +310,7 @@ impl Pipe {
 /// # Errors
 /// OS errors (`ERROR_INVALID_PARAMETER` for a process that has exited).
 pub fn process_image(pid: u32) -> Result<PathBuf> {
-    // SAFETY: no pointer arguments.
-    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
-    if process.is_null() {
-        return Err(last_os_error("OpenProcess").into());
-    }
-    // SAFETY: OpenProcess returned a valid handle that nothing else owns.
-    let process = unsafe { OwnedHandle::from_raw_handle(process) };
+    let process = open_process(pid)?;
     let mut buf = vec![0_u16; 32 * 1024];
     let mut len = u32::try_from(buf.len()).unwrap_or(u32::MAX);
     // SAFETY: valid process handle; `buf` holds `len` units; `len` is a valid in/out pointer.
@@ -337,12 +332,64 @@ pub fn process_image(pid: u32) -> Result<PathBuf> {
 /// # Errors
 /// OS errors.
 pub fn current_user_sid() -> Result<String> {
+    // SAFETY: GetCurrentProcess returns a pseudo handle that needs no closing.
+    token_user_sid(&process_token(unsafe { GetCurrentProcess() })?)
+}
+
+/// The user SID of another process's token, as `S-1-…`. An unelevated caller can't read an
+/// elevated process's token; the broker reads its fronts'.
+///
+/// # Errors
+/// OS errors (`ERROR_ACCESS_DENIED` for a process this one may not inspect).
+pub fn process_user_sid(pid: u32) -> Result<String> {
+    let process = open_process(pid)?;
+    token_user_sid(&process_token(process.as_raw_handle())?)
+}
+
+/// The Remote Desktop session this process runs in (its token's session id).
+///
+/// # Errors
+/// OS errors.
+pub fn current_session_id() -> Result<u32> {
+    // SAFETY: GetCurrentProcess returns a pseudo handle that needs no closing.
+    let token = process_token(unsafe { GetCurrentProcess() })?;
+    let mut session = 0_u32;
+    let mut needed = 0_u32;
+    // SAFETY: valid token handle; `session` is writable for its size; `needed` is valid.
+    let ok = unsafe {
+        GetTokenInformation(
+            token.as_raw_handle(),
+            TokenSessionId,
+            (&raw mut session).cast::<c_void>(),
+            u32::try_from(size_of::<u32>()).unwrap_or(0),
+            &raw mut needed,
+        )
+    };
+    last_error_if_false(ok, "GetTokenInformation")?;
+    Ok(session)
+}
+
+fn open_process(pid: u32) -> Result<OwnedHandle> {
+    // SAFETY: no pointer arguments.
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if process.is_null() {
+        return Err(last_os_error("OpenProcess").into());
+    }
+    // SAFETY: OpenProcess returned a valid handle that nothing else owns.
+    Ok(unsafe { OwnedHandle::from_raw_handle(process) })
+}
+
+fn process_token(process: HANDLE) -> Result<OwnedHandle> {
     let mut token: HANDLE = ptr::null_mut();
-    // SAFETY: GetCurrentProcess returns a pseudo handle; `token` is a valid out pointer.
-    let ok = unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw mut token) };
+    // SAFETY: `process` is a valid process handle (or the current-process pseudo handle);
+    // `token` is a valid out pointer.
+    let ok = unsafe { OpenProcessToken(process, TOKEN_QUERY, &raw mut token) };
     last_error_if_false(ok, "OpenProcessToken")?;
     // SAFETY: OpenProcessToken returned a valid handle that nothing else owns.
-    let token = unsafe { OwnedHandle::from_raw_handle(token) };
+    Ok(unsafe { OwnedHandle::from_raw_handle(token) })
+}
+
+fn token_user_sid(token: &OwnedHandle) -> Result<String> {
     // TOKEN_USER plus its SID: well under 256 bytes. u64 elements keep the buffer aligned.
     let mut buf = [0_u64; 64];
     let mut needed = 0_u32;
@@ -561,6 +608,14 @@ mod tests {
             .map(|i| u8::from_str_radix(&want[i..i + 2], 16).unwrap())
             .collect();
         assert_eq!(h.as_slice(), want.as_slice());
+    }
+
+    #[test]
+    fn reads_its_own_user_and_session() {
+        let sid = current_user_sid().unwrap();
+        assert_eq!(process_user_sid(std::process::id()).unwrap(), sid);
+        // Session 0 is services'; tests run in a user session, but Wine has only one.
+        let _session = current_session_id().unwrap();
     }
 
     #[test]

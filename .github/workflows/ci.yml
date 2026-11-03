@@ -91,7 +91,7 @@ jobs:
           $text = $out.Trim().Replace('%', '%25').Replace("`r", '').Replace("`n", '%0A')
           Write-Host "::$kind title=dpro-win crash tests (real Windows, exit $code)::$text"
           exit $code
-      - name: T3 broker pipe (tests + probe)
+      - name: T3 broker pipe (dpro-win + dpro-broker tests, probe)
         # Round-trip times against the budget, plus what Wine can't show: the integrity label,
         # remote and squatter refusal (roadmap 2.7). A hung accept must not eat the job.
         if: ${{ !cancelled() }}
@@ -101,6 +101,7 @@ jobs:
           $failed = 0
           foreach ($run in @(
               @{ Title = 'dpro-win pipe tests'; Exe = 'dist-t3/dpro-win-tests.exe'; Args = @('pipe::', '--test-threads', '1') },
+              @{ Title = 'dpro-broker tests'; Exe = 'dist-t3/dpro-broker-tests.exe'; Args = @('--test-threads', '1') },
               @{ Title = 'broker pipe probe'; Exe = 'dist-t3/pipe_t3.exe'; Args = @() })) {
             $out = & $run.Exe @($run.Args) 2>&1 | Out-String
             $code = $LASTEXITCODE

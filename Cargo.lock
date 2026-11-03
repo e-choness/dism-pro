@@ -304,6 +304,12 @@ version = "0.1.0"
 [[package]]
 name = "dpro-broker"
 version = "0.1.0"
+dependencies = [
+ "dpro-win",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
 
 [[package]]
 name = "dpro-cli-fmt"
