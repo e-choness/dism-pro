@@ -44,12 +44,8 @@ pub struct ToolDef {
 
 /// Who made a call: per request in 2026-07-28, per process after a legacy `initialize`. The
 /// client's name and version are its own claim (TD-0013 §8.3: recorded, labelled unverified).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Caller {
-    pub protocol_version: String,
-    pub client_name: Option<String>,
-    pub client_version: Option<String>,
-}
+/// The same type crosses the broker pipe.
+pub use dpro_broker::wire::Caller;
 
 /// Why a call produced no result. `Invalid` and `Failed` reach the model as a tool error it can
 /// act on (`isError: true`); `UnknownTool` is a protocol error.
