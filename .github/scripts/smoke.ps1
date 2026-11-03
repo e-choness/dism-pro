@@ -25,13 +25,15 @@ $failures = 0
 $targetArgs = if ($Target) { '--target', (Resolve-Path $Target).Path } else { @() }
 $targetName = if ($Target) { 'offline image' } else { 'online' }
 
-# Runs the CLI with --json and returns the parsed JSON Lines. Throws unless it exits with $Expect.
-function Invoke-Cli([string[]] $Arguments, [int] $Expect = 0) {
+# Runs the CLI with --json and returns the parsed JSON Lines. Throws unless it exits with one of
+# $Expect; $script:lastExit keeps the code.
+function Invoke-Cli([string[]] $Arguments, [int[]] $Expect = 0) {
     $lines = & $Cli @Arguments @targetArgs --json 2> $errFile
     $code = $LASTEXITCODE
-    if ($code -ne $Expect) {
+    $script:lastExit = $code
+    if ($code -notin $Expect) {
         $err = Get-Content $errFile -Raw -ErrorAction SilentlyContinue
-        throw "dismpro-cli $($Arguments -join ' ') exited $code, expected $Expect. stdout: $($lines -join ' ') stderr: $err"
+        throw "dismpro-cli $($Arguments -join ' ') exited $code, expected $($Expect -join ' or '). stdout: $($lines -join ' ') stderr: $err"
     }
     @($lines | Where-Object { $_ } | ForEach-Object { $_ | ConvertFrom-Json })
 }
@@ -209,7 +211,9 @@ Test-Step 'drivers list' {
 # warm-up each, then 5 interleaved runs; the medians' ratio must be at most 1.3. Offline lists the
 # inbox packages too (2.5 s, 246 packages); online stays third-party (inbox online takes 17-30 s).
 Test-Step 'drivers list vs dism.exe /Get-Drivers (gate 1.3x)' {
-    $all = if ($Target) { @('--all') } else { @() }
+    # @(...) keeps it an array: an `if` unwraps a one-item array to a string, and splatting a
+    # string passes each character as an argument.
+    $all = @(if ($Target) { '--all' })
     $dismArgs = if ($Target) { @("/Image:$((Resolve-Path $Target).Path)", '/Get-Drivers', '/All') } else { @('/Online', '/Get-Drivers') }
     $dism = Join-Path $env:SystemRoot 'System32\dism.exe'
     $ours = {
@@ -262,11 +266,17 @@ if (-not $Target) {
         if (@($plan.changes).Count) { throw "planned $(@($plan.changes).Count) change(s) for a package the store has" }
         'nothing to do'
     }
+    # A step whose input job is missing says so, rather than failing as a usage error.
+    function Assert-Prior($Job, [string] $Step) {
+        if (-not $Job) { throw "skipped: '$Step' produced no job" }
+    }
     Test-Step 'undo the add (learned inverse)' {
+        Assert-Prior $drvA 'drivers add'
         $script:drvB = Invoke-Job 'journal', 'undo', $drvA.job
         Assert-OurDriver $false $drvB
     }
     Test-Step 'undo the undo (re-add from quarantine)' {
+        Assert-Prior $drvB 'undo the add'
         $script:drvC = Invoke-Job 'journal', 'undo', $drvB.job
         $root = Get-Item -Force (Join-Path (Resolve-Path $Target).Path '$DismProQuarantine')
         if (-not ($root.Attributes -band [IO.FileAttributes]::Hidden)) { throw "$($root.FullName) isn't hidden" }
@@ -274,16 +284,30 @@ if (-not $Target) {
         if (-not (Get-ChildItem $copy -Recurse -Filter $infName -ErrorAction SilentlyContinue)) { throw "no store copy under $copy" }
         Assert-OurDriver $true $drvC
     }
+    # DISM counts a root-enumerated System-class package as boot-critical (run 41720190520), so
+    # the removal is refused first and then confirmed with --allow-boot-critical.
     Test-Step 'drivers remove' {
-        $published = (Get-OurDriver).published
-        $script:drvD = Invoke-Job 'drivers', 'remove', $published
-        Assert-OurDriver $false $drvD
+        $ours = Get-OurDriver
+        if (-not $ours) { throw "skipped: $infName isn't staged" }
+        $flags = @()
+        $said = "boot_critical=$($ours.boot_critical)"
+        if ($ours.boot_critical) {
+            $e = Get-Doc (Invoke-Cli 'drivers', 'remove', $ours.published, '--yes' -Expect 1) 'error.v1'
+            if ($e.message -notmatch 'allow-boot-critical') { throw "boot-critical refusal: $($e.message)" }
+            if (-not (Get-OurDriver)) { throw 'a refused removal removed the package' }
+            $flags = @('--allow-boot-critical')
+            $said += ', refused without --allow-boot-critical (1)'
+        }
+        $script:drvD = Invoke-Job (@('drivers', 'remove', $ours.published) + $flags)
+        "${said}; $(Assert-OurDriver $false $drvD)"
     }
     Test-Step 'undo the removal' {
+        Assert-Prior $drvD 'drivers remove'
         $script:drvE = Invoke-Job 'journal', 'undo', $drvD.job
         Assert-OurDriver $true $drvE
     }
     Test-Step 'undo again (store as it was)' {
+        Assert-Prior $drvE 'undo the removal'
         $job = Invoke-Job 'journal', 'undo', $drvE.job
         Assert-OurDriver $false $job
     }
