@@ -103,6 +103,38 @@ jobs:
         shell: pwsh
         run: ./.github/scripts/smoke.ps1 -Cli dist/x86_64-pc-windows-msvc/dismpro-cli.exe -Target "$env:RUNNER_TEMP\t3-image"
 
+  health:
+    # TD-0006 §10 (roadmap 2.6): the full scan and the repair take minutes each, so they run next to
+    # the T3 job instead of lengthening it. Same triggers as T3.
+    name: T3 health (windows-2025)
+    needs: linux
+    if: >-
+      github.event_name == 'push' || github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.pull_request.labels.*.name, 'needs-windows')
+    runs-on: windows-2025
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist/
+      - name: Health scan (runner VM, online target)
+        shell: pwsh
+        run: ./.github/scripts/smoke.ps1 -Health -Cli dist/x86_64-pc-windows-msvc/dismpro-cli.exe
+      - name: T3 offline image (servercore base layer)
+        id: image
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: ./.github/scripts/offline-image.ps1 -Out "$env:RUNNER_TEMP\t3-image"
+      - name: T3 health scan and restore (offline image)
+        if: ${{ !cancelled() && steps.image.outcome == 'success' }}
+        shell: pwsh
+        run: ./.github/scripts/smoke.ps1 -Health -Cli dist/x86_64-pc-windows-msvc/dismpro-cli.exe -Target "$env:RUNNER_TEMP\t3-image"
+
   smoke-arm64:
     name: CLI smoke (windows-11-arm)
     needs: linux

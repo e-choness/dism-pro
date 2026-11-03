@@ -5,6 +5,9 @@ job, so this makes a real feature change and undoes it. Without -Target it servi
 from .github/scripts/offline-image.ps1. Spike S-02 found DISM can't service images inside a container,
 so T3 runs on the VM.
 
+With -Health it runs the Health & Repair checks instead (roadmap 2.6, TD-0006 §10): the full scan and,
+on an offline image, the repair. They take minutes, so CI runs them in a job of their own.
+
 Each check is reported in the log, in the job summary, and as one annotation (readable without signing
 in). Exits 1 if any check fails.
 #>
@@ -13,7 +16,8 @@ param(
     # Offline Windows root passed as --target; empty for the online OS.
     [string] $Target,
     # A small optional feature whose payload ships with Windows Server; no restart needed.
-    [string] $Feature = 'TelnetClient'
+    [string] $Feature = 'TelnetClient',
+    [switch] $Health
 )
 
 $ErrorActionPreference = 'Stop'
@@ -79,6 +83,75 @@ function Test-Step([string] $Name, [scriptblock] $Body) {
 }
 
 function Format-Annotation([string] $Text) { $Text.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A') }
+
+# Reports the results in the job summary and as one annotation, then exits 1 if any check failed.
+function Complete-Run([string] $Suite) {
+    $report = $results -join "`n"
+    $arch = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture
+    if ($env:GITHUB_STEP_SUMMARY) {
+        "### dismpro-cli $Suite ($arch runner VM, $targetName)`n``````n$report`n``````" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+    }
+    $kind = if ($failures) { 'error' } else { 'notice' }
+    Write-Host "::$kind title=dismpro-cli $Suite $arch $targetName ($failures failed)::$(Format-Annotation $report)"
+    exit [int] [bool] $failures
+}
+
+function Format-Duration([Diagnostics.Stopwatch] $Watch) { '{0:N1} min' -f $Watch.Elapsed.TotalMinutes }
+
+if ($Health) {
+    # Which CBS.log a check writes decides where the CLI looks for findings: the target's own (what it
+    # reads today) or the runner's, when DISM services an offline image with the runner's stack.
+    $windows = if ($Target) { Join-Path (Resolve-Path $Target).Path 'Windows' } else { $env:SystemRoot }
+    $logs = [ordered] @{
+        'target CBS.log' = Join-Path $windows 'Logs\CBS\CBS.log'
+        'runner CBS.log' = Join-Path $env:SystemRoot 'Logs\CBS\CBS.log'
+        'runner dism.log' = Join-Path $env:SystemRoot 'Logs\DISM\dism.log'
+    }
+    if (-not $Target) { $logs.Remove('target CBS.log') }
+    function Get-LogSize([string] $Path) { if (Test-Path $Path) { (Get-Item $Path).Length } else { -1 } }
+
+    Test-Step 'health scan' {
+        $before = @{}; foreach ($k in $logs.Keys) { $before[$k] = Get-LogSize $logs[$k] }
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        $d = Get-Doc (Invoke-Cli 'health', 'scan') 'health.v1'
+        $took = Format-Duration $sw
+        $growth = foreach ($k in $logs.Keys) {
+            $after = Get-LogSize $logs[$k]
+            if ($after -lt 0) { "$k missing" } else { "$k +$($after - [math]::Max($before[$k], 0)) B" }
+        }
+        # The runner's own store is reported, not judged; a fresh image must be healthy.
+        if ($Target -and $d.state -ne 'healthy') { throw "state $($d.state), findings $($d.findings | ConvertTo-Json -Compress)" }
+        "$($d.state), $(@($d.findings).Count) finding(s), $took; $($growth -join ', ')"
+    }
+    if ($Target) {
+        Test-Step 'health restore needs --allow-irreversible' {
+            $plan = Get-Doc (Invoke-Cli 'health', 'restore', '--limit-access', '--yes' -Expect 3) 'plan.v1'
+            if ($plan.summary.irreversible -ne 1) { throw "summary $($plan.summary | ConvertTo-Json -Compress)" }
+            "exit 3, $($plan.summary.changes) change(s) planned, $($plan.summary.irreversible) permanent"
+        }
+        Test-Step 'health restore --limit-access' {
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            $docs = Invoke-Cli 'health', 'restore', '--limit-access', '--yes', '--allow-irreversible'
+            $took = Format-Duration $sw
+            $job = Get-Doc $docs 'job.v1'
+            if ($job.status -ne 'completed' -or @($job.failed).Count -or @($job.applied).Count -ne 1) {
+                throw "job $($job.job): $($job.status), applied $(@($job.applied).Count), failed $($job.failed | ConvertTo-Json -Compress)"
+            }
+            "job $($job.job) $($job.status), reboot_required=$($job.reboot_required), $took"
+        }
+        Test-Step 'journal list (restore)' {
+            $last = @((Get-Doc (Invoke-Cli 'journal', 'list') 'journals.v1').jobs)[-1]
+            if ($last.status -ne 'completed') { throw ($last | ConvertTo-Json -Compress) }
+            "last job: $($last.op), $($last.status)"
+        }
+        Test-Step 'health check after restore' {
+            $d = Get-Doc (Invoke-Cli 'health', 'check') 'health.v1'
+            if ($d.state -ne 'healthy') { throw "state $($d.state)" }
+            "$($d.state), $(@($d.findings).Count) finding(s)"
+        }
+    }
+    Complete-Run 'health'
+}
 
 Test-Step 'targets list' {
     $d = Get-Doc (Invoke-Cli 'targets', 'list') 'targets.v1'
@@ -154,11 +227,4 @@ Test-Step 'purge' {
     "removed $(@((Get-Doc $docs 'plan.v1').changes).Count) item(s)"
 }
 
-$report = $results -join "`n"
-$arch = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture
-if ($env:GITHUB_STEP_SUMMARY) {
-    "### dismpro-cli smoke ($arch runner VM, $targetName)`n``````n$report`n``````" | Out-File $env:GITHUB_STEP_SUMMARY -Append
-}
-$kind = if ($failures) { 'error' } else { 'notice' }
-Write-Host "::$kind title=dismpro-cli smoke $arch $targetName ($failures failed)::$(Format-Annotation $report)"
-exit [int] [bool] $failures
+Complete-Run 'smoke'
