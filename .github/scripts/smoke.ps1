@@ -112,11 +112,73 @@ if ($Health) {
     if (-not $Target) { $logs.Remove('target CBS.log') }
     function Get-LogSize([string] $Path) { if (Test-Path $Path) { (Get-Item $Path).Length } else { -1 } }
 
+    # An offline check writes neither CBS.log above (runs 41637221034, 41640930548). DISM's scratch
+    # folder goes away when its session closes, so a thread polls for logs while the scan runs and
+    # keeps a copy of any CBS log it sees; the step reports where they were and their error lines.
+    function Start-LogWatch {
+        $state = [hashtable]::Synchronized(@{ seen = @{}; copies = @{}; stop = $false })
+        $holding = Join-Path ([IO.Path]::GetTempPath()) 'dpro-log-watch'
+        $roots = @([IO.Path]::GetTempPath(), (Join-Path $env:SystemRoot 'Logs'), (Join-Path $windows 'Logs'))
+        $job = Start-ThreadJob -ArgumentList $state, $roots, $holding -ScriptBlock {
+            param($State, $Roots, $Holding)
+            $null = New-Item -ItemType Directory -Force $Holding
+            $start = (Get-Date).AddSeconds(-2)
+            while (-not $State.stop) {
+                foreach ($root in $Roots) {
+                    Get-ChildItem $root -Recurse -File -Filter *.log -ErrorAction SilentlyContinue |
+                        Where-Object { $_.LastWriteTime -ge $start -and $_.FullName -notlike "$Holding*" } |
+                        ForEach-Object {
+                            $State.seen[$_.FullName] = [math]::Max([long] $State.seen[$_.FullName], $_.Length)
+                            if ($_.Name -like 'CBS*.log') {
+                                $copy = Join-Path $Holding "$([Math]::Abs($_.FullName.GetHashCode())).log"
+                                try {
+                                    $src = [IO.File]::Open($_.FullName, 'Open', 'Read', 'ReadWrite, Delete')
+                                    try { $dst = [IO.File]::Create($copy); $src.CopyTo($dst); $dst.Dispose() } finally { $src.Dispose() }
+                                    $State.copies[$_.FullName] = $copy
+                                } catch { }
+                            }
+                        }
+                }
+                Start-Sleep -Milliseconds 500
+            }
+        }
+        @{ state = $state; job = $job }
+    }
+
+    function Stop-LogWatch($Watch) {
+        $Watch.state.stop = $true
+        $null = Wait-Job $Watch.job -Timeout 30
+        Remove-Job $Watch.job -Force
+        $lines = @(foreach ($e in ($Watch.state.seen.GetEnumerator() | Sort-Object Name)) { "$($e.Name): $($e.Value) B" })
+        foreach ($e in $Watch.state.copies.GetEnumerator()) {
+            $hits = @(Select-String -Path $e.Value -Pattern ', (Error|Warning) |corrupt|Summary|HRESULT' |
+                Select-Object -First 25 | ForEach-Object { $_.Line.Trim() })
+            $lines += "--- $($e.Name): $($hits.Count) matching line(s)"
+            $lines += $hits
+        }
+        $dism = $logs['runner dism.log']
+        if ((Get-LogSize $dism) -gt $script:dismBefore) {
+            $s = [IO.File]::Open($dism, 'Open', 'Read', 'ReadWrite, Delete')
+            try {
+                $null = $s.Seek([math]::Max($script:dismBefore, 0), 'Begin')
+                $lines += '--- runner dism.log, written during the scan:'
+                $lines += ([IO.StreamReader]::new($s)).ReadToEnd().TrimEnd()
+            } finally { $s.Dispose() }
+        }
+        Write-Host "::notice title=offline health scan logs::$(Format-Annotation ($lines -join "`n"))"
+    }
+
     $script:scanState = $null
     Test-Step 'health scan' {
         $before = @{}; foreach ($k in $logs.Keys) { $before[$k] = Get-LogSize $logs[$k] }
+        $script:dismBefore = $before['runner dism.log']
+        $watch = if ($Target) { Start-LogWatch }
         $sw = [Diagnostics.Stopwatch]::StartNew()
-        $d = Get-Doc (Invoke-Cli 'health', 'scan') 'health.v1'
+        try {
+            $d = Get-Doc (Invoke-Cli 'health', 'scan') 'health.v1'
+        } finally {
+            if ($watch) { Stop-LogWatch $watch }
+        }
         $took = Format-Duration $sw
         $growth = foreach ($k in $logs.Keys) {
             $after = Get-LogSize $logs[$k]
