@@ -101,95 +101,76 @@ function Complete-Run([string] $Suite) {
 function Format-Duration([Diagnostics.Stopwatch] $Watch) { '{0:N1} min' -f $Watch.Elapsed.TotalMinutes }
 
 if ($Health) {
-    # Which CBS.log a check writes decides where the CLI looks for findings: the target's own (what it
-    # reads today) or the runner's, when DISM services an offline image with the runner's stack.
-    $windows = if ($Target) { Join-Path (Resolve-Path $Target).Path 'Windows' } else { $env:SystemRoot }
+    # Where a check explains itself (TD-0006 §7): online, the running Windows's CBS.log; offline, the
+    # runner's dism.log, because DISM runs the image's servicing stack in its own process and the
+    # image's CBS.log stays untouched (run 41670190046 found the CSI line there).
     $logs = [ordered] @{
-        'target CBS.log' = Join-Path $windows 'Logs\CBS\CBS.log'
         'runner CBS.log' = Join-Path $env:SystemRoot 'Logs\CBS\CBS.log'
         'runner dism.log' = Join-Path $env:SystemRoot 'Logs\DISM\dism.log'
     }
-    if (-not $Target) { $logs.Remove('target CBS.log') }
+    $explains = if ($Target) { $logs['runner dism.log'] } else { $logs['runner CBS.log'] }
     function Get-LogSize([string] $Path) { if (Test-Path $Path) { (Get-Item $Path).Length } else { -1 } }
 
-    # An offline check writes neither CBS.log above (runs 41637221034, 41640930548). DISM's scratch
-    # folder goes away when its session closes, so a thread polls for logs while the scan runs and
-    # keeps a copy of any CBS log it sees; the step reports where they were and their error lines.
-    function Start-LogWatch {
-        $state = [hashtable]::Synchronized(@{ seen = @{}; copies = @{}; stop = $false })
-        $holding = Join-Path ([IO.Path]::GetTempPath()) 'dpro-log-watch'
-        $roots = @([IO.Path]::GetTempPath(), (Join-Path $env:SystemRoot 'Logs'), (Join-Path $windows 'Logs'))
-        $job = Start-ThreadJob -ArgumentList $state, $roots, $holding -ScriptBlock {
-            param($State, $Roots, $Holding)
-            $null = New-Item -ItemType Directory -Force $Holding
-            $start = (Get-Date).AddSeconds(-2)
-            while (-not $State.stop) {
-                foreach ($root in $Roots) {
-                    Get-ChildItem $root -Recurse -File -Filter *.log -ErrorAction SilentlyContinue |
-                        Where-Object { $_.LastWriteTime -ge $start -and $_.FullName -notlike "$Holding*" } |
-                        ForEach-Object {
-                            $State.seen[$_.FullName] = [math]::Max([long] $State.seen[$_.FullName], $_.Length)
-                            if ($_.Name -like 'CBS*.log') {
-                                $copy = Join-Path $Holding "$([Math]::Abs($_.FullName.GetHashCode())).log"
-                                try {
-                                    $src = [IO.File]::Open($_.FullName, 'Open', 'Read', 'ReadWrite, Delete')
-                                    try { $dst = [IO.File]::Create($copy); $src.CopyTo($dst); $dst.Dispose() } finally { $src.Dispose() }
-                                    $State.copies[$_.FullName] = $copy
-                                } catch { }
-                            }
-                        }
-                }
-                Start-Sleep -Milliseconds 500
-            }
-        }
-        @{ state = $state; job = $job }
+    # What a log gained past $From bytes, for the annotation when a scan goes unexplained.
+    function Get-LogTail([string] $Path, [long] $From) {
+        if ((Get-LogSize $Path) -le $From) { return '(nothing)' }
+        $s = [IO.File]::Open($Path, 'Open', 'Read', 'ReadWrite, Delete')
+        try {
+            $null = $s.Seek([math]::Max($From, 0), 'Begin')
+            ([IO.StreamReader]::new($s)).ReadToEnd().TrimEnd()
+        } finally { $s.Dispose() }
     }
 
-    function Stop-LogWatch($Watch) {
-        $Watch.state.stop = $true
-        $null = Wait-Job $Watch.job -Timeout 30
-        Remove-Job $Watch.job -Force
-        $lines = @(foreach ($e in ($Watch.state.seen.GetEnumerator() | Sort-Object Name)) { "$($e.Name): $($e.Value) B" })
-        foreach ($e in $Watch.state.copies.GetEnumerator()) {
-            $hits = @(Select-String -Path $e.Value -Pattern ', (Error|Warning) |corrupt|Summary|HRESULT' |
-                Select-Object -First 25 | ForEach-Object { $_.Line.Trim() })
-            $lines += "--- $($e.Name): $($hits.Count) matching line(s)"
-            $lines += $hits
+    function Format-Health($Doc) {
+        $kinds = @($Doc.findings | Group-Object diagnosis | ForEach-Object { "$($_.Name) x$($_.Count)" }) -join ', '
+        "$($Doc.state), $(@($Doc.findings).Count) finding(s) [$kinds]"
+    }
+
+    # Checks a health.v1 document: findings read from the right log, and no damage reported on a
+    # healthy store (a bare "Payload Corrupt" pattern read the scan summary's zero counts as damage,
+    # run 41670190046). Returns whether a state that isn't healthy went unexplained.
+    function Test-Health($Doc, [string] $Summary) {
+        if ($Doc.log -ne $explains) { throw "findings read from $($Doc.log), expected $explains; $Summary" }
+        $damage = @($Doc.findings | Where-Object diagnosis -In 'health-finding-payload-corrupt', 'health-finding-store-corrupt')
+        if ($Doc.state -eq 'healthy' -and $damage.Count) { throw "healthy, yet $($damage.Count) damage finding(s): $Summary" }
+        $Doc.state -ne 'healthy' -and -not @($Doc.findings).Count
+    }
+
+    # A quick check reads only the store's flag, so it may go unexplained; the text output then says
+    # to run a scan.
+    Test-Step 'health check' {
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        $d = Get-Doc (Invoke-Cli 'health', 'check') 'health.v1'
+        $summary = "$(Format-Health $d), $(Format-Duration $sw)"
+        if (Test-Health $d $summary) {
+            $text = (& $Cli 'health', 'check' @targetArgs 2> $errFile) -join "`n"
+            if ($LASTEXITCODE -ne 0 -or $text -notmatch '"health scan"') {
+                throw "unexplained, and the text output (exit $LASTEXITCODE) doesn't suggest a scan: $text"
+            }
+            $summary += '; unexplained, and the text output suggests "health scan"'
         }
-        $dism = $logs['runner dism.log']
-        if ((Get-LogSize $dism) -gt $script:dismBefore) {
-            $s = [IO.File]::Open($dism, 'Open', 'Read', 'ReadWrite, Delete')
-            try {
-                $null = $s.Seek([math]::Max($script:dismBefore, 0), 'Begin')
-                $lines += '--- runner dism.log, written during the scan:'
-                $lines += ([IO.StreamReader]::new($s)).ReadToEnd().TrimEnd()
-            } finally { $s.Dispose() }
-        }
-        Write-Host "::notice title=offline health scan logs::$(Format-Annotation ($lines -join "`n"))"
+        $summary
     }
 
     $script:scanState = $null
     Test-Step 'health scan' {
         $before = @{}; foreach ($k in $logs.Keys) { $before[$k] = Get-LogSize $logs[$k] }
-        $script:dismBefore = $before['runner dism.log']
-        $watch = if ($Target) { Start-LogWatch }
         $sw = [Diagnostics.Stopwatch]::StartNew()
-        try {
-            $d = Get-Doc (Invoke-Cli 'health', 'scan') 'health.v1'
-        } finally {
-            if ($watch) { Stop-LogWatch $watch }
-        }
+        $d = Get-Doc (Invoke-Cli 'health', 'scan') 'health.v1'
         $took = Format-Duration $sw
         $growth = foreach ($k in $logs.Keys) {
             $after = Get-LogSize $logs[$k]
             if ($after -lt 0) { "$k missing" } else { "$k +$($after - [math]::Max($before[$k], 0)) B" }
         }
         $script:scanState = $d.state
-        $kinds = @($d.findings | Group-Object diagnosis | ForEach-Object { "$($_.Name) x$($_.Count)" }) -join ', '
-        $summary = "$($d.state), $(@($d.findings).Count) finding(s) [$kinds], $took; $($growth -join ', ')"
+        $summary = "$(Format-Health $d), $took; $($growth -join ', ')"
         # Any state is the store's business (a container base layer is trimmed, so it can be
-        # repairable); a damaged state that no finding explains is ours (TD-0006 §5.2).
-        if ($d.state -ne 'healthy' -and -not @($d.findings).Count) { throw "nothing explains it: $summary" }
+        # repairable); a state that isn't healthy and that no finding explains is ours (TD-0006 §5.2).
+        if (Test-Health $d $summary) {
+            $key = if ($Target) { 'runner dism.log' } else { 'runner CBS.log' }
+            Write-Host "::notice title=unexplained health scan ($targetName)::$(Format-Annotation (Get-LogTail $explains $before[$key]))"
+            throw "nothing explains it: $summary"
+        }
         $summary
     }
     if ($Target) {

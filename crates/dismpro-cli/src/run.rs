@@ -12,6 +12,7 @@ use dpro_cli_fmt::{
 use dpro_core::{
     OsError,
     cancel::CancelToken,
+    health::LogFile,
     id::{JobId, TargetId},
     plan::{Change, ChangeKind, OpDescriptor, OsBuild, PLAN_SCHEMA, Plan, PlanDoc, PlanSummary},
     progress::Progress,
@@ -519,7 +520,7 @@ impl Ctx<'_, '_> {
     }
 
     /// `health check|scan` (TD-0006 §5.2): read-only, so no plan, and Ctrl+C cancels it.
-    /// Findings come from the part of CBS.log written during the check.
+    /// Findings come from the part of the log written during the check ([`health_log`]).
     fn health(&self, scan: bool) -> Result<ExitCode, CliError> {
         let m = self.m;
         let progress = ProgressLine::new(self.cli.global.json, m);
@@ -528,23 +529,34 @@ impl Ctx<'_, '_> {
             cancel: Some(self.cancel_event),
             progress: Some(&sink),
         };
-        let checked = check_health(&self.session, &self.target.windows_dir, scan, call, m);
+        let checked = check_health(&self.session, self.target, scan, call, m);
         progress.finish();
-        let (state, rows) = checked?;
+        let (state, log, rows) = checked?;
         let state_id = match state {
             dpro_core::health::ImageHealth::Healthy => "health-state-healthy",
             dpro_core::health::ImageHealth::Repairable => "health-state-repairable",
             dpro_core::health::ImageHealth::NonRepairable => "health-state-non-repairable",
         };
+        let unexplained = state != dpro_core::health::ImageHealth::Healthy && rows.is_empty();
         if self.cli.global.json {
             out::print_json(&HealthDoc {
                 schema: "health.v1",
                 state,
                 scanned: scan,
+                log: log.display().to_string(),
                 findings: rows,
             })?;
         } else {
             println!("{}", m.text(state_id));
+            if unexplained {
+                // A quick check reads only the store's flag; a scan looks at every component.
+                let id = if scan {
+                    "health-unexplained"
+                } else {
+                    "health-unexplained-check"
+                };
+                println!("{}", m.get(id, &[("log", &log.display().to_string())]));
+            }
             if !rows.is_empty() {
                 let mut t = table::Table::new(&[
                     (m.text("col-severity"), false),
@@ -699,29 +711,46 @@ pub(crate) fn package_rows(session: &Session<'_>) -> Result<Vec<PackageJson>, Cl
         .collect())
 }
 
-/// A health check or scan (TD-0006 §5.2) and its findings: the lines of the target's CBS.log
-/// written during the call.
+/// The log a health check of `target` explains itself in (TD-0006 §7): the running Windows's
+/// CBS.log, or for an offline image the servicing host's dism.log. DISM runs the image's
+/// servicing stack in its own process, which logs to the log DISM was initialized with (the
+/// default, since DISM Pro passes none), and the image's own CBS.log stays untouched.
+pub(crate) fn health_log(target: &Resolved) -> Result<(PathBuf, LogFile), CliError> {
+    Ok(if target.image_root.is_none() {
+        let cbs = target.windows_dir.join("Logs").join("CBS").join("CBS.log");
+        (cbs, LogFile::Cbs)
+    } else {
+        let host = system::windows_directory()?;
+        (
+            host.join("Logs").join("DISM").join("dism.log"),
+            LogFile::Dism,
+        )
+    })
+}
+
+/// A health check or scan (TD-0006 §5.2), the log it explains itself in, and its findings:
+/// that log's lines written during the call.
 pub(crate) fn check_health(
     session: &Session<'_>,
-    windows_dir: &Path,
+    target: &Resolved,
     scan: bool,
     call: Call<'_>,
     m: &Messages,
-) -> Result<(dpro_core::health::ImageHealth, Vec<FindingJson>), CliError> {
-    let log = windows_dir.join("Logs").join("CBS").join("CBS.log");
+) -> Result<(dpro_core::health::ImageHealth, PathBuf, Vec<FindingJson>), CliError> {
+    let (log, file) = health_log(target)?;
     let start = fs::metadata(&log).map_or(0, |md| md.len());
     let state = health::image_health(session.check_health(scan, call)?);
     let findings = match File::open(&log) {
-        Ok(mut f) => {
-            use std::io::{Seek, SeekFrom};
+        Ok(f) => {
             // A rotated log is shorter than `start`: read it from the beginning.
             let len = f.metadata().map_or(0, |md| md.len());
-            f.seek(SeekFrom::Start(if len >= start { start } else { 0 }))?;
-            logs::scan(std::io::BufReader::new(f), dpro_core::health::LogFile::Cbs)?
+            let skip = if len >= start { start } else { 0 };
+            let reader = std::io::BufReader::with_capacity(64 << 10, f);
+            logs::scan_after(reader, skip, file)?.0
         }
         Err(_) => Vec::new(),
     };
-    Ok((state, finding_rows(&findings, m)))
+    Ok((state, log, finding_rows(&findings, m)))
 }
 
 pub(crate) fn finding_rows(

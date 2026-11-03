@@ -117,6 +117,9 @@ pub(crate) struct HealthDoc {
     /// `healthy`, `repairable`, `non-repairable`.
     pub(crate) state: dpro_core::health::ImageHealth,
     pub(crate) scanned: bool,
+    /// The log the findings' line numbers refer to: the running Windows's CBS.log, or for an
+    /// offline image the servicing host's dism.log (TD-0006 §7).
+    pub(crate) log: String,
     pub(crate) findings: Vec<FindingJson>,
 }
 
