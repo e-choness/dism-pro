@@ -1,4 +1,5 @@
-# Publishes the toolchain images to GHCR as a private package (ADR-0003, decision #29). The `lock`
+# Publishes the toolchain images to GHCR, into the private package the owner created for them
+# (ADR-0003, decision #29; one-time steps in .github/scripts/toolchain-images.sh). The `lock`
 # job prints .github/toolchain.lock for the new digests; a follow-up `build(docker): …` PR commits
 # it, and CI pulls those images instead of building them from then on.
 name: toolchain
@@ -31,9 +32,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Refuse a public package (decision #29)
-        # Pushing there would redistribute the MSVC CRT and Windows SDK files in the images.
-        run: bash .github/scripts/toolchain-images.sh check-private
+      - name: Refuse a public or missing package (decision #29)
+        # Pushing to a public package would redistribute the MSVC CRT and Windows SDK files in the
+        # images, and this job's first push would create the package public, like the repository.
+        # The owner creates it privately first (steps in toolchain-images.sh).
+        env:
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash .github/scripts/toolchain-images.sh check-publish
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
@@ -68,7 +74,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Check the package is still private (decision #29)
-        # A package's first publish makes it private; this catches anything that changed that.
+        # The publish job checked before pushing; this catches a package made public since.
         run: bash .github/scripts/toolchain-images.sh check-private
       - name: Print .github/toolchain.lock
         env:

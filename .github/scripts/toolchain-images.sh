@@ -6,14 +6,28 @@
 #   toolchain-images.sh lock T1 T2     print a lock for this docker/build.Dockerfile and the given
 #                                      ghcr.io/e-choness/dism-pro-build@sha256:… refs
 #   toolchain-images.sh check-private  fail if anyone can pull the package without signing in
+#   toolchain-images.sh check-publish  before a push: check-private, and the package must already
+#                                      exist and be reachable with $GHCR_USER / $GHCR_TOKEN
 #
 # The package is private: t1/t2 hold the xwin splat (MSVC CRT + Windows SDK), which isn't
 # redistributable. Log in to ghcr.io before `pull` (CI: GITHUB_TOKEN with packages: read; a person:
 # a token with read:packages). Anyone without access builds the same images from source, which is
 # what `docker compose` does on first use.
 #
+# A workflow never creates the package: one created by a workflow's GITHUB_TOKEN takes the
+# repository's visibility, public here, and a public package can't be made private again. The
+# owner creates it once, outside Actions, where a new package starts private:
+#   1. With a classic token that has write:packages: docker login ghcr.io -u e-choness
+#   2. docker pull hello-world
+#      docker tag hello-world ghcr.io/e-choness/dism-pro-build:seed
+#      docker push ghcr.io/e-choness/dism-pro-build:seed
+#   3. In the package's settings: check it says Private, then under "Manage Actions access" add
+#      e-choness/dism-pro with the Write role.
+#   4. Run the toolchain workflow. The seed version can be deleted afterwards.
+#
 # Exit codes: 0 done; 1 usage or a malformed lock; 3 nothing is pinned for this Dockerfile (build
-# from source instead); 4 a pull failed; 5 the package is public.
+# from source instead); 4 a pull failed; 5 the package is public; 6 the package doesn't exist yet,
+# or the given credentials can't reach it.
 set -euo pipefail
 
 readonly PACKAGE=e-choness/dism-pro-build
@@ -104,7 +118,7 @@ check_private() {
     -H "Authorization: Bearer ${token:-none}" "https://ghcr.io/v2/$PACKAGE/tags/list") || true
   case $code in
     200)
-      say error "ghcr.io/$PACKAGE can be pulled without signing in. Its images hold Microsoft files that aren't redistributable. A package can't be made private again once public: delete it, then run the toolchain workflow"
+      say error "ghcr.io/$PACKAGE can be pulled without signing in. Its images hold Microsoft files that aren't redistributable. A package can't be made private again once public: delete it, create it again privately (steps at the top of $0), then run the toolchain workflow"
       return 5
       ;;
     401 | 403 | 404)
@@ -117,9 +131,29 @@ check_private() {
   esac
 }
 
+check_publish() {
+  local token code
+  [[ -n ${GHCR_USER:-} && -n ${GHCR_TOKEN:-} ]] ||
+    { echo "usage: GHCR_USER=… GHCR_TOKEN=… $0 check-publish" >&2; exit 1; }
+  check_private || return
+  # A pull token for these credentials, the way `docker login` gets one. The credentials go
+  # through a curl config on stdin, not the command line.
+  token=$(printf 'user = "%s:%s"\n' "$GHCR_USER" "$GHCR_TOKEN" |
+    curl -sS --max-time 30 -K - "https://ghcr.io/token?scope=repository:$PACKAGE:pull" |
+    sed -n 's/.*"token":"\([^"]*\)".*/\1/p') || true
+  code=$(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' \
+    -H "Authorization: Bearer ${token:-none}" "https://ghcr.io/v2/$PACKAGE/tags/list") || true
+  if [[ $code != 200 ]]; then
+    say error "ghcr.io/$PACKAGE isn't reachable from this workflow (HTTP ${code:-none}). A workflow's first push would create it public, like this repository, so the owner creates it privately first: see the steps at the top of $0"
+    return 6
+  fi
+  echo "ghcr.io/$PACKAGE exists, is private, and this workflow can reach it"
+}
+
 case ${1:-} in
   pull) shift; pull "$@" ;;
   lock) shift; lock "$@" ;;
   check-private) check_private ;;
+  check-publish) check_publish ;;
   *) awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0" >&2; exit 1 ;;
 esac
