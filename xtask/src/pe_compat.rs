@@ -1,6 +1,7 @@
 //! `cargo xtask pe-compat --target <triple>…`: fails when a release exe imports (or
 //! delay-loads) a DLL outside the `WinPE` allowlist in `xtask/data/winpe-dlls.txt`.
-//! The substitute for a `WinPE` VM (doc 04 §4). With `--winpe-files <dir>` it checks the allowlist
+//! The substitute for a `WinPE` VM (doc 04 §4). `--exe <file>…` checks any executables by path.
+//! With `--winpe-files <dir>` it checks the allowlist
 //! itself against the DLLs base `WinPE` ships.
 
 use std::{
@@ -21,37 +22,46 @@ pub(crate) fn run(root: &Path, args: &[String]) -> Result<()> {
     {
         return verify_allowlist(Path::new(dir), &parse_allowlist(ALLOWLIST));
     }
-    let targets = parse_targets(args)?;
-    let target_dir =
-        env::var_os("CARGO_TARGET_DIR").map_or_else(|| root.join("target"), PathBuf::from);
     let allowlist = parse_allowlist(ALLOWLIST);
+    let mut exes = Vec::new();
+    // Any executables by path (spikes, prototypes): the same allowlist, and every import listed.
+    let by_path = args.first().is_some_and(|flag| flag == "--exe");
+    if by_path {
+        if args.len() < 2 {
+            return Err("pe-compat: --exe needs at least one file".into());
+        }
+        exes.extend(args[1..].iter().map(|f| (f.clone(), PathBuf::from(f))));
+    } else {
+        let targets = parse_targets(args)?;
+        let target_dir =
+            env::var_os("CARGO_TARGET_DIR").map_or_else(|| root.join("target"), PathBuf::from);
+        for target in &targets {
+            let release = target_dir.join(target).join("release");
+            exes.extend(shipped().map(|name| (format!("{target}/{name}"), release.join(name))));
+        }
+    }
 
-    let mut checked = 0_usize;
     let mut failures = 0_usize;
-    for target in &targets {
-        let release = target_dir.join(target).join("release");
-        for name in shipped() {
-            let label = format!("{target}/{name}");
-            let Ok(bytes) = fs::read(release.join(name)) else {
-                return Err(format!("pe-compat: {label} not found (build first)").into());
-            };
-            let imports = pe::imports(&bytes).map_err(|e| format!("{label}: {e}"))?;
-            let outside = rejected(&imports, &allowlist);
-            checked += 1;
-            if outside.is_empty() {
-                println!("pe-compat: ok   {label} ({} DLLs)", imports.len());
-                continue;
-            }
+    for (label, path) in &exes {
+        let Ok(bytes) = fs::read(path) else {
+            return Err(format!("pe-compat: {label} not found (build first)").into());
+        };
+        let imports = pe::imports(&bytes).map_err(|e| format!("{label}: {e}"))?;
+        let outside = rejected(&imports, &allowlist);
+        if outside.is_empty() {
+            println!("pe-compat: ok   {label} ({} DLLs)", imports.len());
+        } else {
             failures += 1;
             println!("pe-compat: FAIL {label} imports DLLs outside the WinPE allowlist:");
             for dll in &outside {
                 println!("    {dll}");
             }
-            let all: Vec<&str> = imports.iter().map(|i| i.dll.as_str()).collect();
-            println!("  all imports: {}", all.join(", "));
+        }
+        if by_path || !outside.is_empty() {
+            println!("  all imports: {}", listed(&imports).join(", "));
         }
     }
-    if checked == 0 {
+    if exes.is_empty() {
         return Err("pe-compat: no release executables found (build first)".into());
     }
     if failures > 0 {
@@ -79,11 +89,18 @@ fn rejected(imports: &[pe::Import], allowlist: &[String]) -> Vec<String> {
     imports
         .iter()
         .filter(|i| !is_allowed(&i.dll, allowlist))
-        .map(|i| {
-            let note = if i.delay_loaded { " (delay-load)" } else { "" };
-            format!("{}{note}", i.dll)
-        })
+        .map(label)
         .collect()
+}
+
+/// Every imported DLL name, noted the same way.
+fn listed(imports: &[pe::Import]) -> Vec<String> {
+    imports.iter().map(label).collect()
+}
+
+fn label(i: &pe::Import) -> String {
+    let note = if i.delay_loaded { " (delay-load)" } else { "" };
+    format!("{}{note}", i.dll)
 }
 
 /// `pe-compat --winpe-files <dir>`: the evidence check for the allowlist itself. `<dir>` holds one
