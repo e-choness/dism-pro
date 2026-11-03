@@ -4,3 +4,11 @@
 //! Allowed workspace dependencies: `dpro-core`, `dpro-rules`, `dpro-app`, `dpro-broker`.
 
 #![forbid(unsafe_code)]
+
+pub mod catalog;
+pub mod front;
+pub mod gate;
+pub mod policy;
+pub mod protocol;
+pub mod shape;
+pub mod tool;

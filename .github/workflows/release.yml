@@ -11,6 +11,7 @@ permissions:
   contents: write
   id-token: write
   attestations: write
+  packages: read # the pinned toolchain images (decision #29)
 
 jobs:
   release:
@@ -20,7 +21,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # Released exes come from the published toolchain, never a fresh build of it.
       - uses: ./.github/actions/toolchain
+        with:
+          pinned: require
       - run: docker compose run --rm build
       - name: Stage files with per-arch names
         env:

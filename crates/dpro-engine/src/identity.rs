@@ -37,10 +37,32 @@ pub fn os_build(reg: &impl RegistryView) -> Option<OsBuild> {
     })
 }
 
+/// `EditionID` (`Professional`, `ServerDatacenter`, …): stable across releases, unlike
+/// `ProductName`, which still says "Windows 10" on Windows 11.
+#[must_use]
+pub fn edition(reg: &impl RegistryView) -> Option<String> {
+    match reg.value(Hive::Software, CURRENT_VERSION, "EditionID")? {
+        Value::Str(s) if !s.trim().is_empty() => Some(s.trim().to_owned()),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::registry::FakeRegistry;
+
+    #[test]
+    fn reads_the_edition() {
+        let reg = FakeRegistry::default().with_value(
+            Hive::Software,
+            CURRENT_VERSION,
+            "EditionID",
+            Value::Str(" ServerDatacenter ".into()),
+        );
+        assert_eq!(edition(&reg).as_deref(), Some("ServerDatacenter"));
+        assert_eq!(edition(&FakeRegistry::default()), None);
+    }
 
     #[test]
     fn reads_identity() {
