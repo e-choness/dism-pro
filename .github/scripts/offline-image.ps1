@@ -20,11 +20,30 @@ $PSNativeCommandUseErrorActionPreference = $false
 $tar = Join-Path $env:SystemRoot 'System32\tar.exe'
 $hive = 'Windows\System32\config\SYSTEM'
 
-# Runs a native command block; throws on a non-zero exit, logs the time taken.
+function Format-Annotation([string] $Text) {
+    $Text.Replace('%', '%25').Replace("`r", '').Replace("`n", '%0A')
+}
+
+# A failure becomes an annotation with where it happened and the disk space left: the job log needs
+# a token to read, and an image too big for the runner's disk looks like any other failure.
+trap {
+    $at = $_.InvocationInfo
+    $drive = Get-PSDrive ([IO.Path]::GetFullPath($Out).Substring(0, 1))
+    $text = "line $($at.ScriptLineNumber): $("$($at.Line)".Trim())`n$($_.Exception.Message)`n" +
+        ('{0:N1} GiB free on {1}:' -f ($drive.Free / 1GB), $drive.Name)
+    Write-Host "::error title=T3 offline image::$(Format-Annotation $text)"
+    exit 1
+}
+
+# Runs a native command block; throws on a non-zero exit with the last lines it printed, and logs
+# the time taken.
 function Invoke-Step([string] $Name, [scriptblock] $Body) {
     $sw = [Diagnostics.Stopwatch]::StartNew()
-    & $Body
-    if ($LASTEXITCODE) { throw "$Name failed: exit $LASTEXITCODE" }
+    $output = @(& $Body 2>&1 | ForEach-Object { "$_" })
+    $output | Out-Host
+    if ($LASTEXITCODE) {
+        throw "$Name failed: exit $LASTEXITCODE$(($output | Select-Object -Last 5 | ForEach-Object { "`n  $_" }) -join '')"
+    }
     Write-Host "${Name}: $([math]::Round($sw.Elapsed.TotalSeconds)) s"
 }
 
@@ -37,8 +56,10 @@ $null = New-Item -ItemType Directory -Force $work
 $saveTar = Join-Path $work 'save.tar'
 $saved = Join-Path $work 'saved'
 $layer = Join-Path $work 'layer'
-Invoke-Step "docker pull $Image" { docker pull -q $Image | Out-Host }
-Invoke-Step 'docker save' { docker save $Image -o $saveTar | Out-Host }
+Invoke-Step "docker pull $Image" { docker pull -q $Image }
+# Which image this run tested: the tag moves with every servicing update.
+Write-Host "::notice title=T3 offline image::$Image, $(docker image inspect --format '{{.Id}} created {{.Created}}' $Image)"
+Invoke-Step 'docker save' { docker save $Image -o $saveTar }
 $null = New-Item -ItemType Directory -Force $saved, $layer
 Invoke-Step 'unpack the saved image' { & $tar -xf $saveTar -C $saved }
 Remove-Item $saveTar
