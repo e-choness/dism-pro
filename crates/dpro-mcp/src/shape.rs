@@ -201,8 +201,97 @@ fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
     n.len() <= h.len() && h.windows(n.len()).any(|w| w.eq_ignore_ascii_case(n))
 }
 
+/// Profile folders that name no one; they stay visible.
+const SHARED_PROFILES: [&str; 4] = ["Public", "Default", "Default User", "All Users"];
+
+/// Replaces the user name in profile paths, `C:\Users\alice\…` → `C:\Users\<user>\…`, in
+/// every string of `value` (TD-0013 §5.7 `redact_user_paths`). Either slash, any case. A name
+/// runs to the next character Windows forbids in user names, or the end of the string.
+pub fn redact_user_paths(value: &mut Value) {
+    match value {
+        Value::String(s) => {
+            if let Some(redacted) = redact(s) {
+                *s = redacted;
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(redact_user_paths),
+        Value::Object(map) => map.values_mut().for_each(redact_user_paths),
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+}
+
+/// `s` with its profile names replaced, or `None` when it has none.
+fn redact(s: &str) -> Option<String> {
+    const MARK_LEN: usize = ":\\users\\".len();
+    let b = s.as_bytes();
+    let mut out: Option<String> = None;
+    let mut copied = 0;
+    let mut i = 0;
+    while i + MARK_LEN <= b.len() {
+        let mark = b[i] == b':'
+            && is_slash(b[i + 1])
+            && b[i + 2..i + 7].eq_ignore_ascii_case(b"users")
+            && is_slash(b[i + 7]);
+        if !mark {
+            i += 1;
+            continue;
+        }
+        let start = i + MARK_LEN;
+        let end = b[start..]
+            .iter()
+            .position(|&c| ends_name(c))
+            .map_or(b.len(), |p| start + p);
+        // Both ends sit next to ASCII bytes (or the end), so they're char boundaries.
+        let name = &s[start..end];
+        let shared = SHARED_PROFILES.iter().any(|p| p.eq_ignore_ascii_case(name));
+        if !name.is_empty() && !shared {
+            let o = out.get_or_insert_with(|| String::with_capacity(s.len()));
+            o.push_str(&s[copied..start]);
+            o.push_str("<user>");
+            copied = end;
+        }
+        i = end.max(i + 1);
+    }
+    out.map(|mut o| {
+        o.push_str(&s[copied..]);
+        o
+    })
+}
+
+fn is_slash(c: u8) -> bool {
+    c == b'\\' || c == b'/'
+}
+
+/// Characters that can't be in a Windows user name, plus line breaks and tabs.
+fn ends_name(c: u8) -> bool {
+    matches!(
+        c,
+        b'\\'
+            | b'/'
+            | b'"'
+            | b'\''
+            | b':'
+            | b';'
+            | b','
+            | b'|'
+            | b'<'
+            | b'>'
+            | b'['
+            | b']'
+            | b'='
+            | b'+'
+            | b'*'
+            | b'?'
+            | b'\r'
+            | b'\n'
+            | b'\t'
+    )
+}
+
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
 
     #[derive(Debug, Serialize)]
@@ -385,5 +474,62 @@ mod tests {
     fn unknown_list_arguments_are_rejected() {
         let parsed: Result<ListArgs, _> = serde_json::from_str(r#"{"limit": 5, "offset": 2}"#);
         assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn profile_names_are_redacted() {
+        let cases = [
+            (
+                r"C:\Users\alice\AppData\Local\x.log",
+                r"C:\Users\<user>\AppData\Local\x.log",
+            ),
+            (r"d:/USERS/Bob Smith/file", r"d:/USERS/<user>/file"),
+            (r"\\?\C:\Users\Jörg", r"\\?\C:\Users\<user>"),
+            (
+                r"C:\Users\a\x; E:\users\b\y",
+                r"C:\Users\<user>\x; E:\users\<user>\y",
+            ),
+            (
+                r#"open "C:\Users\eve": denied"#,
+                r#"open "C:\Users\<user>": denied"#,
+            ),
+        ];
+        for (raw, want) in cases {
+            let mut v = json!(raw);
+            redact_user_paths(&mut v);
+            assert_eq!(v, json!(want), "{raw}");
+        }
+    }
+
+    #[test]
+    fn shared_profiles_and_other_text_stay() {
+        for raw in [
+            r"C:\Users\Public\Desktop",
+            r"C:\Users\Default\NTUSER.DAT",
+            r"C:\Users\",
+            r"C:\Windows\Users\x",
+            "users",
+            "",
+        ] {
+            let mut v = json!(raw);
+            redact_user_paths(&mut v);
+            assert_eq!(v, json!(raw), "{raw}");
+        }
+    }
+
+    #[test]
+    fn redaction_reaches_nested_strings_only() {
+        let mut v = json!({
+            "a": [r"C:\Users\al\x", 5, null, true],
+            "b": { "c": r"C:\Users\bo" },
+        });
+        redact_user_paths(&mut v);
+        assert_eq!(
+            v,
+            json!({
+                "a": [r"C:\Users\<user>\x", 5, null, true],
+                "b": { "c": r"C:\Users\<user>" },
+            })
+        );
     }
 }
