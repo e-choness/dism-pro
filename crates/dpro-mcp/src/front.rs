@@ -1,16 +1,18 @@
-//! The unelevated front's [`Tools`] (TD-0013 §5.1). It lists the catalog the policy enables and
-//! gates every call by the policy before anything runs, so a refused call never brings up a UAC
-//! prompt. Pure tools run in this process; the rest go to the elevated broker, which reads the
-//! policy again and is the check that counts.
+//! The unelevated front's [`Tools`] (TD-0013 §5.1, §15). It lists the catalog the policy enables
+//! and puts every call through the [`gate`] before anything runs, so a bad or refused call never
+//! brings up a UAC prompt. Pure tools run in this process; the rest go to the elevated broker,
+//! which checks again on the policy as it is then, and whose answer counts.
 //!
-//! Tool errors start with the state an agent can act on (TD-0013 §4.4, §9): `policy_forbids`,
-//! `policy_invalid`, `elevation_declined`, `broker_unavailable`.
+//! Tool errors start with the state an agent can act on (TD-0013 §4.4, §9, §15):
+//! `policy_forbids`, `policy_invalid`, `elevation_declined`, `broker_unavailable`, and whatever
+//! the broker reports.
 
 use dpro_broker::wire::Outcome;
 use serde_json::Value;
 
 use crate::{
     catalog::{self, Runs, Tool, Toolset},
+    gate,
     policy::Policy,
     tool::{CallError, Caller, ToolDef, Tools},
 };
@@ -39,11 +41,22 @@ pub enum Unavailable {
     Broker(String),
 }
 
-/// The front: the policy, the tools it enables, and the way to run them.
+/// What the front could learn of the policy file (TD-0013 §15).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Seen {
+    /// Read and parsed; a missing file is [`Policy::default`].
+    Policy(Policy),
+    /// The file exists but is admin-only (written by hand): list every toolset the client asks
+    /// for and let the broker decide each call.
+    Unreadable,
+    /// It doesn't parse: every call fails with this, as it would in the broker.
+    Invalid(String),
+}
+
+/// The front: what it knows of the policy, the tools it lists, and the way to run them.
 #[derive(Debug)]
 pub struct Front<B> {
-    /// The policy, or why it couldn't be read (then every call fails with that reason).
-    policy: Result<Policy, String>,
+    seen: Seen,
     tools: Vec<Tool>,
     defs: Vec<ToolDef>,
     backend: B,
@@ -52,10 +65,12 @@ pub struct Front<B> {
 impl<B: Backend> Front<B> {
     /// `requested`: the toolsets the client's configuration asks for (`--toolsets`), which can
     /// only narrow what the policy enables; `None` takes all of them.
-    pub fn new(policy: Result<Policy, String>, requested: Option<&[Toolset]>, backend: B) -> Self {
-        let allowed = match &policy {
-            Ok(p) => p.toolsets.clone(),
-            Err(_) => Toolset::DEFAULT.to_vec(),
+    pub fn new(seen: Seen, requested: Option<&[Toolset]>, backend: B) -> Self {
+        let allowed = match &seen {
+            Seen::Policy(p) => p.toolsets.clone(),
+            Seen::Unreadable => Toolset::ALL.to_vec(),
+            // Enough to show what the agent could do once the policy is fixed.
+            Seen::Invalid(_) => Toolset::DEFAULT.to_vec(),
         };
         let toolsets: Vec<Toolset> = allowed
             .into_iter()
@@ -64,7 +79,7 @@ impl<B: Backend> Front<B> {
         let tools = catalog::enabled(&toolsets);
         let defs = tools.iter().map(|t| t.def.clone()).collect();
         Self {
-            policy,
+            seen,
             tools,
             defs,
             backend,
@@ -92,19 +107,15 @@ impl<B: Backend> Tools for Front<B> {
     }
 
     fn call(&self, name: &str, args: Value, caller: &Caller) -> Result<Value, CallError> {
-        let tool = self
-            .tools
-            .iter()
-            .find(|t| t.def.name == name)
-            .ok_or_else(|| CallError::UnknownTool(name.to_owned()))?;
-        let policy = self
-            .policy
-            .as_ref()
-            .map_err(|e| CallError::Failed(format!("policy_invalid: {e}")))?;
-        policy
-            .check_tool(tool)
-            .map_err(|e| CallError::Failed(format!("policy_forbids: {e}")))?;
-        if tool.runs == Runs::Front {
+        let policy = match &self.seen {
+            Seen::Policy(p) => Some(p),
+            Seen::Unreadable | Seen::Invalid(_) => None,
+        };
+        let runs = gate::check(&self.tools, policy, name, &args)?.tool.runs;
+        if let Seen::Invalid(why) = &self.seen {
+            return Err(CallError::Failed(format!("policy_invalid: {why}")));
+        }
+        if runs == Runs::Front {
             return self.backend.local(name, args);
         }
         match self.backend.broker(name, args, caller) {
@@ -158,13 +169,21 @@ mod tests {
         }
     }
 
-    fn front(policy: Result<Policy, String>, fake: Fake) -> Front<Fake> {
-        Front::new(policy, None, fake)
+    fn front(seen: Seen, fake: Fake) -> Front<Fake> {
+        Front::new(seen, None, fake)
+    }
+
+    fn defaults() -> Seen {
+        Seen::Policy(Policy::default())
+    }
+
+    fn apply_args() -> Value {
+        json!({ "plan_id": "p", "fingerprint": "f", "reason": "r" })
     }
 
     #[test]
     fn routes_front_tools_locally_and_the_rest_to_the_broker() {
-        let f = front(Ok(Policy::default()), Fake::default());
+        let f = front(defaults(), Fake::default());
         let c = Caller::default();
         assert_eq!(
             f.call("explain_error", json!({ "code": "5" }), &c).unwrap(),
@@ -178,32 +197,47 @@ mod tests {
     }
 
     #[test]
-    fn refused_calls_never_reach_the_broker() {
+    fn refused_and_malformed_calls_never_reach_the_broker() {
         let observe = Policy {
             tier: Tier::Observe,
             ..Policy::default()
         };
-        let f = front(Ok(observe), Fake::default());
+        let f = front(Seen::Policy(observe), Fake::default());
         let c = Caller::default();
-        for tool in ["undo_plan", "health_repair_plan", "plan_apply"] {
-            let e = f.call(tool, json!({}), &c).unwrap_err();
+        for (tool, args) in [
+            ("undo_plan", json!({ "job_id": "j" })),
+            ("health_repair_plan", json!({})),
+            ("plan_apply", apply_args()),
+        ] {
+            let e = f.call(tool, args, &c).unwrap_err();
             assert!(
                 matches!(&e, CallError::Failed(m) if m.starts_with("policy_forbids: ")),
                 "{tool}: {e}"
             );
         }
-        let plan = front(Ok(Policy::default()), Fake::default());
-        let e = plan.call("plan_apply", json!({}), &c).unwrap_err();
+        let plan = front(defaults(), Fake::default());
+        let e = plan.call("plan_apply", apply_args(), &c).unwrap_err();
         assert!(e.to_string().contains("apply_reversible"), "{e}");
+        let e = plan
+            .call("health_check", json!({ "target": "D:" }), &c)
+            .unwrap_err();
+        assert!(e.to_string().contains("target D:"), "{e}");
+        let e = plan
+            .call("health_check", json!({ "target": 5 }), &c)
+            .unwrap_err();
+        assert!(matches!(e, CallError::Invalid(_)), "{e}");
         assert!(f.backend().broker_calls.borrow().is_empty());
         assert!(plan.backend().broker_calls.borrow().is_empty());
     }
 
     #[test]
     fn an_invalid_policy_refuses_everything_with_its_reason() {
-        let f = front(Err("line 3: unknown key".to_owned()), Fake::default());
+        let f = front(
+            Seen::Invalid("line 3: unknown key".to_owned()),
+            Fake::default(),
+        );
         let e = f
-            .call("explain_error", json!({}), &Caller::default())
+            .call("explain_error", json!({ "code": "5" }), &Caller::default())
             .unwrap_err();
         assert_eq!(
             e,
@@ -214,8 +248,29 @@ mod tests {
     }
 
     #[test]
+    fn an_unreadable_policy_leaves_the_decision_to_the_broker() {
+        let f = front(Seen::Unreadable, Fake::default());
+        assert_eq!(f.list().len(), catalog::enabled(&Toolset::ALL).len());
+        let c = Caller::default();
+        assert!(f.call("plan_apply", apply_args(), &c).is_ok());
+        assert!(
+            f.call("health_check", json!({ "target": "D:" }), &c)
+                .is_err()
+        );
+        assert_eq!(
+            *f.backend().broker_calls.borrow(),
+            ["plan_apply", "health_check"]
+        );
+        // Arguments are still checked here.
+        assert!(matches!(
+            f.call("plan_get", json!({}), &c),
+            Err(CallError::Invalid(_))
+        ));
+    }
+
+    #[test]
     fn broker_outcomes_map_to_call_errors() {
-        let f = front(Ok(Policy::default()), Fake::default());
+        let f = front(defaults(), Fake::default());
         let c = Caller::default();
         assert_eq!(
             f.call("updates_list", json!({}), &c),
@@ -237,7 +292,7 @@ mod tests {
             unavailable: Some(Unavailable::ElevationDeclined),
             ..Fake::default()
         };
-        let f = front(Ok(Policy::default()), fake);
+        let f = front(defaults(), fake);
         let e = f
             .call("targets_list", json!({}), &Caller::default())
             .unwrap_err();
@@ -248,7 +303,7 @@ mod tests {
             unavailable: Some(Unavailable::Broker("pipe closed".to_owned())),
             ..Fake::default()
         };
-        let f = front(Ok(Policy::default()), gone);
+        let f = front(defaults(), gone);
         assert_eq!(
             f.call("targets_list", json!({}), &Caller::default()),
             Err(CallError::Failed(
@@ -263,13 +318,13 @@ mod tests {
             toolsets: vec![Toolset::Core],
             ..Policy::default()
         };
-        let f = Front::new(Ok(core_only), Some(&Toolset::ALL), Fake::default());
-        assert!(f.list().iter().all(|d| d.name != "health_check"));
         let f = Front::new(
-            Ok(Policy::default()),
-            Some(&[Toolset::Maintain]),
+            Seen::Policy(core_only),
+            Some(&Toolset::ALL),
             Fake::default(),
         );
+        assert!(f.list().iter().all(|d| d.name != "health_check"));
+        let f = Front::new(defaults(), Some(&[Toolset::Maintain]), Fake::default());
         assert!(f.list().iter().all(|d| d.name != "targets_list"));
         assert!(f.list().iter().any(|d| d.name == "health_check"));
         assert!(matches!(

@@ -7,6 +7,7 @@
 
 pub mod catalog;
 pub mod front;
+pub mod gate;
 pub mod policy;
 pub mod protocol;
 pub mod shape;
