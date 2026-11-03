@@ -63,6 +63,19 @@ sizes() { # directory
     sizes "$min/x86_64-pc-windows-msvc/release"
 } > "$out/c1/size.txt"
 
+# Where the bytes go: each release exe relinked with lld-link's map (only the final crate rebuilds;
+# the copies in out/bin are already taken), summed per crate by ci/crate-sizes.awk.
+echo "::group::size by crate"
+for o in a b; do
+    map="$CARGO_TARGET_DIR/s01-$o.lldmap"
+    cargo xwin rustc --release -p "$o" --bin "s01-$o" --target x86_64-pc-windows-msvc -- \
+        -C "link-arg=/lldmap:$map"
+    echo "s01-$o.exe, release profile, file bytes by origin:"
+    awk -v top=14 -f ci/crate-sizes.awk "$map"
+done > "$out/c1/crates.txt"
+cat "$out/c1/crates.txt"
+echo "::endgroup::"
+
 # Imported DLLs. pe-compat fails on them (the allowlist is the CLI's), so its exit status is not
 # the verdict here: the WinPE job resolves every import against base WinPE itself.
 (cd /src && env -u CARGO_TARGET_DIR cargo xtask pe-compat --exe \
@@ -114,4 +127,5 @@ notice "S-01 C1 gates" "$out/c1/summary.txt"
 awk '/^pe-compat: (ok|FAIL)/ { exe = $3; sub(/.*\//, "", exe) }
     /all imports:/ { sub(/^ *all imports: /, ""); print exe ": " $0 }' "$out/c1/imports.txt" > "$out/c1/imports-short.txt"
 notice "S-01 imports" "$out/c1/imports-short.txt"
+notice "S-01 size by crate" "$out/c1/crates.txt"
 exit $status

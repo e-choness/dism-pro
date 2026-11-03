@@ -61,6 +61,9 @@ public static class W {
     [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr h, ref POINT p);
     [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
+    [DllImport("user32.dll")] public static extern int GetSystemMetrics(int index);
     [DllImport("user32.dll")] public static extern bool PostMessageW(IntPtr h, uint msg, IntPtr w, IntPtr l);
     [DllImport("user32.dll")] public static extern bool SetSysColors(int n, int[] elements, int[] colors);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern bool SystemParametersInfoW(uint action, uint param, string value, uint ini);
@@ -137,6 +140,19 @@ foreach ($n in $names) {
 Publish 'S-01 G1 startup' $lines
 
 # Windows for sections 3 and 4 ---------------------------------------------------------------------
+# Makes $H the foreground (active) window and says whether it is. The foreground lock refuses
+# SetForegroundWindow to a process without recent input, so a synthetic Alt press comes first.
+# Activation matters: DWM draws an inactive window's Mica (and Acrylic) as a solid color.
+function Set-Foreground([IntPtr] $H) {
+    for ($i = 0; $i -lt 5 -and [W]::GetForegroundWindow() -ne $H; $i++) {
+        [W]::keybd_event(0x12, 0, 0, [UIntPtr]::Zero) # VK_MENU down
+        [W]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero) # and up (KEYEVENTF_KEYUP)
+        [void][W]::SetForegroundWindow($H)
+        Start-Sleep -Milliseconds 300
+    }
+    [W]::GetForegroundWindow() -eq $H
+}
+
 function Start-Window([string] $Path, [string[]] $Arguments, [string] $Title) {
     $p = Start-Process -FilePath $Path -ArgumentList $Arguments -PassThru
     $sw = [Diagnostics.Stopwatch]::StartNew()
@@ -149,9 +165,9 @@ function Start-Window([string] $Path, [string[]] $Arguments, [string] $Title) {
         if (-not $exited) { $p.Kill() }
         throw "no window '$Title' in 30 s ($(if ($exited) { "exited, code $($p.ExitCode)" } else { 'killed' }))"
     }
-    [void][W]::SetForegroundWindow($h)
+    $active = Set-Foreground $h
     Start-Sleep -Milliseconds 1500 # first frames, and DWM's backdrop
-    [pscustomobject]@{ Process = $p; Hwnd = $h }
+    [pscustomobject]@{ Process = $p; Hwnd = $h; Active = $active }
 }
 
 function Stop-Window($w) {
@@ -163,27 +179,39 @@ function Stop-Window($w) {
 # 3. UI Automation ---------------------------------------------------------------------------------
 $ua = [Windows.Automation.AutomationElement]
 $types = [Windows.Automation.ControlType]
+$any = [Windows.Automation.Condition]::TrueCondition
 $lines = @()
 foreach ($o in 'a', 'b') {
     $w = $null
     try {
         $w = Start-Window $exe[$o] @('--screen', 'drawer', '--size', '1000x700') $title[$o]
         $root = $ua::FromHandle($w.Hwnd)
-        $all = @($root.FindAll([Windows.Automation.TreeScope]::Descendants, [Windows.Automation.Condition]::TrueCondition))
+        # AccessKit (both options) may answer the first query with a placeholder and build the tree
+        # on the UI thread afterwards: poll until a button shows up, as a screen reader would wait
+        # for the structure-changed event.
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        do {
+            $all = @($root.FindAll([Windows.Automation.TreeScope]::Descendants, $any))
+            if (@($all | Where-Object { $_.Current.ControlType -eq $types::Button }).Count) { break }
+            Start-Sleep -Milliseconds 250
+        } while ($sw.ElapsedMilliseconds -lt 10000)
+        $waited = $sw.ElapsedMilliseconds
         # Rows: the named list items of the list that has the most of them.
         $best = $null
         $bestRows = @()
         foreach ($list in @($all | Where-Object { $_.Current.ControlType -eq $types::List })) {
-            $rows = @($list.FindAll([Windows.Automation.TreeScope]::Children, [Windows.Automation.Condition]::TrueCondition) |
+            $rows = @($list.FindAll([Windows.Automation.TreeScope]::Children, $any) |
                     Where-Object { $_.Current.ControlType -eq $types::ListItem -and $_.Current.Name })
             if ($rows.Count -gt $bestRows.Count) { $best = $list; $bestRows = $rows }
         }
         $buttons = @($all | Where-Object { $_.Current.ControlType -eq $types::Button -and $_.Current.Name } | ForEach-Object { $_.Current.Name })
         $rowsOk = $bestRows.Count -ge 10
         $buttonsOk = ($buttons -contains 'Cancel') -and ($buttons -contains 'Uninstall')
-        $lines += "${o}: $($all.Count) elements; rows: $($bestRows.Count) named ListItems in List '$(if ($best) { $best.Current.Name })' $(if ($rowsOk) { 'PASS' } else { 'FAIL' })"
+        $lines += "${o}: $($all.Count) elements (tree complete after $waited ms); rows: $($bestRows.Count) named ListItems in List '$(if ($best) { $best.Current.Name })' $(if ($rowsOk) { 'PASS' } else { 'FAIL' })"
         if ($bestRows) { $lines += "    e.g. $(($bestRows | Select-Object -First 3 | ForEach-Object { "'$($_.Current.Name)'" }) -join ', ')" }
         $lines += "    buttons: $(($buttons | Select-Object -Unique) -join ', ') $(if ($buttonsOk) { 'PASS' } else { 'FAIL' })"
+        $roles = $all | Group-Object { $_.Current.ControlType.ProgrammaticName -replace '^ControlType\.', '' } | Sort-Object Count -Descending
+        $lines += "    roles: $(($roles | ForEach-Object { "$($_.Name) $($_.Count)" }) -join ', ')"
         # A click through UIA: Cancel closes the drawer, so Uninstall disappears.
         $cancel = $all | Where-Object { $_.Current.ControlType -eq $types::Button -and $_.Current.Name -eq 'Cancel' } | Select-Object -First 1
         if ($cancel) {
@@ -191,11 +219,11 @@ foreach ($o in 'a', 'b') {
             if ($cancel.TryGetCurrentPattern([Windows.Automation.InvokePattern]::Pattern, [ref] $invoke)) {
                 $invoke.Invoke()
                 Start-Sleep -Milliseconds 800
-                $after = @($root.FindAll([Windows.Automation.TreeScope]::Descendants, [Windows.Automation.Condition]::TrueCondition) |
+                $after = @($root.FindAll([Windows.Automation.TreeScope]::Descendants, $any) |
                         Where-Object { $_.Current.ControlType -eq $types::Button -and $_.Current.Name -eq 'Uninstall' })
-                $lines += "    Invoke(Cancel): drawer $(if ($after.Count -eq 0) { 'closed' } else { 'still open' })"
+                $lines += "    Invoke(Cancel): drawer $(if ($after.Count -eq 0) { 'closed PASS' } else { 'still open FAIL' })"
             } else {
-                $lines += '    Invoke(Cancel): no Invoke pattern'
+                $lines += '    Invoke(Cancel): no Invoke pattern FAIL'
             }
         }
     } catch {
@@ -215,14 +243,22 @@ function Set-Transparency([int] $On) {
     [void][W]::SendMessageTimeoutW([IntPtr] 0xffff, 0x001A, [IntPtr]::Zero, 'ImmersiveColorSet', 2, 5000, [ref] $r)
     Start-Sleep -Milliseconds 2000
 }
-function Set-Desktop([int] $Colorref) {
-    [void][W]::SetSysColors(1, @(1), @($Colorref)) # COLOR_DESKTOP
-    Start-Sleep -Milliseconds 2000
+# A wallpaper of one color (Mica tints from the wallpaper image), and the same desktop color.
+function Set-Desktop([Drawing.Color] $Color) {
+    $s = [Windows.Forms.Screen]::PrimaryScreen.Bounds
+    $path = Join-Path $Out ('wallpaper-{0:X2}{1:X2}{2:X2}.bmp' -f $Color.R, $Color.G, $Color.B)
+    $bmp = [Drawing.Bitmap]::new($s.Width, $s.Height)
+    $g = [Drawing.Graphics]::FromImage($bmp)
+    $g.Clear($Color)
+    $g.Dispose()
+    $bmp.Save($path, [Drawing.Imaging.ImageFormat]::Bmp)
+    $bmp.Dispose()
+    [void][W]::SetSysColors(1, @(1), @([Drawing.ColorTranslator]::ToWin32($Color))) # COLOR_DESKTOP
+    [void][W]::SystemParametersInfoW(0x0014, 0, $path, 3) # SPI_SETDESKWALLPAPER, update + broadcast
+    Start-Sleep -Milliseconds 2500
 }
-# No wallpaper: the desktop is its solid color, which the backdrops sample.
-[void][W]::SystemParametersInfoW(0x0014, 0, '', 3) # SPI_SETDESKWALLPAPER, update + broadcast
-$magenta = 0x00FF00FF
-$green = 0x0000C000
+$magenta = [Drawing.Color]::FromArgb(255, 0, 255)
+$green = [Drawing.Color]::FromArgb(0, 192, 0)
 
 function Get-Screen([string] $Name) {
     $s = [Windows.Forms.Screen]::PrimaryScreen.Bounds
@@ -289,36 +325,49 @@ function Test-Glass([string] $O, [string] $Theme, [string[]] $Extra, [bool] $Pal
         $w = Start-Window $exe[$O] $arguments $title[$O]
         Move-Client $w
         $probes = Get-Probes $w $Palette
-        $phases = [ordered]@{}
+        # The main window active: Mica, the in-app drawer, then the live fallback and back. Then,
+        # with a palette, the palette active (as when it has the keyboard): its Acrylic over both.
         $steps = [ordered]@{
-            'on, magenta'   = { }
-            'on, green'     = { Set-Desktop $green }
-            'off (solid)'   = { Set-Transparency 0 }
-            'on again'      = { Set-Transparency 1 }
+            'on, magenta' = @($w.Hwnd, { })
+            'on, green'   = @($w.Hwnd, { Set-Desktop $green })
+            'off (solid)' = @($w.Hwnd, { Set-Transparency 0 })
+            'on again'    = @($w.Hwnd, { Set-Transparency 1 })
         }
+        $popup = if ($Palette) { [W]::FindWindowW([IntPtr]::Zero, 'S01 palette') } else { [IntPtr]::Zero }
+        if ($Palette -and $popup -eq [IntPtr]::Zero) { $res += '  no palette window' }
+        if ($popup -ne [IntPtr]::Zero) {
+            $steps['palette active, green'] = @($popup, { })
+            $steps['palette active, magenta'] = @($popup, { Set-Desktop $magenta })
+        }
+        $phases = [ordered]@{}
         foreach ($s in $steps.Keys) {
-            & $steps[$s]
-            $bmp = Get-Screen ("glass-{0}-{1}-{2}" -f $O, $Theme, ($s -replace '[^a-z]+', '-').Trim('-'))
+            & $steps[$s][1]
+            $active = Set-Foreground $steps[$s][0]
+            Start-Sleep -Milliseconds 700 # the activation's backdrop transition
+            $bmp = Get-Screen ('glass-{0}-{1}-{2}' -f $O, $Theme, ($s -replace '[^a-z]+', '-').Trim('-'))
             $phases[$s] = [ordered]@{}
             foreach ($k in $probes.Keys) { $phases[$s][$k] = Get-Color $bmp $probes[$k][0] $probes[$k][1] }
             $bmp.Dispose()
-            $res += "  {0,-12} {1}" -f $s, (($probes.Keys | ForEach-Object { "$_ $(Format-Color $phases[$s][$_])" }) -join '; ')
+            $res += '  {0,-24} {1}{2}' -f $s, (($probes.Keys | ForEach-Object { "$_ $(Format-Color $phases[$s][$_])" }) -join '; '), $(if ($active) { '' } else { '  (NOT the active window)' })
         }
         $want = $solid[$Theme]
         $m = $phases['on, magenta']; $g = $phases['on, green']; $off = $phases['off (solid)']; $again = $phases['on again']
         $check = {
             param([string] $Name, [bool] $Ok, [string] $Detail)
-            "  {0} {1}: {2}" -f $(if ($Ok) { 'PASS' } else { 'FAIL' }), $Name, $Detail
+            '  {0} {1}: {2}' -f $(if ($Ok) { 'PASS' } else { 'FAIL' }), $Name, $Detail
         }
-        $res += & $check 'Mica follows the desktop' ((Get-Tint $m.base) - (Get-Tint $g.base) -gt 6) ("base tint {0:N0} over magenta vs {1:N0} over green" -f (Get-Tint $m.base), (Get-Tint $g.base))
-        $res += & $check 'drawer is in-app acrylic, not solid' ((Get-Distance $m.drawer $want.surface) -gt 3) ("{0} vs solid {1}" -f (Format-Color $m.drawer), (Format-Color $want.surface))
-        if ($Palette) {
-            $res += & $check 'palette Acrylic follows the desktop' ((Get-Tint $m.palette) - (Get-Tint $g.palette) -gt 6) ("tint {0:N0} over magenta vs {1:N0} over green" -f (Get-Tint $m.palette), (Get-Tint $g.palette))
+        $res += & $check 'Mica follows the wallpaper' ((Get-Tint $m.base) - (Get-Tint $g.base) -gt 6) ('base tint {0:N0} over magenta vs {1:N0} over green' -f (Get-Tint $m.base), (Get-Tint $g.base))
+        $res += & $check 'drawer is in-app acrylic, not solid' ((Get-Distance $m.drawer $want.surface) -gt 3) ('{0} vs solid {1}' -f (Format-Color $m.drawer), (Format-Color $want.surface))
+        if ($phases.Contains('palette active, magenta')) {
+            $pm = $phases['palette active, magenta']; $pg = $phases['palette active, green']
+            $res += & $check 'palette Acrylic follows the desktop' ((Get-Tint $pm.palette) - (Get-Tint $pg.palette) -gt 6) ('tint {0:N0} over magenta vs {1:N0} over green' -f (Get-Tint $pm.palette), (Get-Tint $pg.palette))
         }
         $solidOk = ((Get-Distance $off.base $want.base) -le 3) -and ((Get-Distance $off.drawer $want.surface) -le 3)
         if ($Palette) { $solidOk = $solidOk -and ((Get-Distance $off.palette $want.surface) -le 3) }
-        $res += & $check 'transparency off: solid fallback, live' $solidOk ("base {0} (want {1}), drawer {2} (want {3})" -f (Format-Color $off.base), (Format-Color $want.base), (Format-Color $off.drawer), (Format-Color $want.surface))
-        $res += & $check 'transparency on again: glass back' ((Get-Distance $again.base $want.base) -gt 6) ("base {0}" -f (Format-Color $again.base))
+        $res += & $check 'transparency off: solid fallback, live' $solidOk ('base {0} (want {1}), drawer {2} (want {3})' -f (Format-Color $off.base), (Format-Color $want.base), (Format-Color $off.drawer), (Format-Color $want.surface))
+        # Back to what it showed before the switch (same wallpaper), and not the solid color.
+        $backOk = ((Get-Distance $again.base $g.base) -le 3) -and ((Get-Distance $again.base $off.base) -ge 3)
+        $res += & $check 'transparency on again: glass back, live' $backOk ('base {0} (before {1}, solid {2})' -f (Format-Color $again.base), (Format-Color $g.base), (Format-Color $off.base))
     } catch {
         $res += "  FAILED: $($_.Exception.Message)"
     } finally {
@@ -328,7 +377,16 @@ function Test-Glass([string] $O, [string] $Theme, [string[]] $Extra, [bool] $Pal
     $res
 }
 
-$lines = @('probes: rgb, 7x7 mean; desktop magenta, then green; then transparency off and on')
+# What decides whether DWM renders a backdrop live, besides activation: the session kind (ADR-0007
+# falls back to solid in a remote session) and the display adapter.
+$remote = [W]::GetSystemMetrics(0x1000) # SM_REMOTESESSION
+$adapters = @(Get-CimInstance Win32_VideoController | ForEach-Object { $_.Name }) -join ', '
+$sessions = @(query session 2>&1 | ForEach-Object { "$_".Trim() } | Where-Object { $_ }) -join ' | '
+$lines = @(
+    "this session $((Get-Process -Id $PID).SessionId), SM_REMOTESESSION $remote; display: $adapters"
+    "sessions: $sessions"
+    'probes: rgb, 7x7 mean; wallpaper magenta, then green; then transparency off and on'
+)
 foreach ($theme in 'light', 'dark') {
     $lines += "A, $theme (Mica window, Acrylic palette popup, in-app acrylic drawer)"
     $lines += Test-Glass 'a' $theme @() $true

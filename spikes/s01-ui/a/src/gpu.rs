@@ -272,23 +272,38 @@ impl Surface {
     }
 }
 
-/// The ADR-0002 acrylic gate: one recomputation of the in-app acrylic of a `w × h` drawer region
-/// with Direct2D on WARP, against a plain Direct2D fill of the same region. Medians of `rounds`, in
-/// ms. Every figure but `tuned_batched` ends when WARP has finished the work (an event query), so
-/// `floor` is part of each.
+type TimePeriod = unsafe extern "system" fn(u32) -> u32;
+
+/// One kind of call, medians in ms: until the calls return (`cpu`), and until WARP has finished
+/// the work too (`total`, an event query).
+#[derive(Clone, Copy)]
+pub struct Timing {
+    pub cpu: f64,
+    pub total: f64,
+}
+
+/// The ADR-0002 acrylic gate: recomputing the in-app acrylic of a `w × h` drawer region with
+/// Direct2D on WARP, against a plain Direct2D fill of the same region. Medians of `rounds`.
 pub struct AcrylicTimes {
-    /// An empty draw and the wait.
-    pub floor: f64,
+    /// An empty draw: the floor of every `total`.
+    pub floor: Timing,
     /// A plain fill of the region: the gate's denominator.
-    pub fill: f64,
+    pub fill: Timing,
     /// As specified: ¼ downsample → Gaussian blur σ 10 at ¼ → ×4 upsample → tint at full size.
-    pub graph: f64,
-    /// The tint at ¼ and the blur's speed mode: one full-size pass.
-    pub tuned: f64,
+    /// Changed input every round.
+    pub graph: Timing,
+    /// The tint at ¼ and the blur's speed mode: one full-size pass. Changed input every round.
+    pub tuned: Timing,
+    /// `tuned` with the input unchanged.
+    pub tuned_same: Timing,
+    /// `tuned` with the system timer at 1 ms; `None` without `winmm.dll`.
+    pub tuned_timer: Option<Timing>,
     /// Uploading the software frame beneath (option A draws in software first).
-    pub upload: f64,
-    /// `tuned` with its upload, `rounds` times back to back and one wait: per recomputation.
+    pub upload: Timing,
+    /// Throughput, ms per recomputation: `tuned` with its upload, back to back, one wait.
     pub tuned_batched: f64,
+    /// Throughput, ms per plain fill, the same way.
+    pub fill_batched: f64,
 }
 
 pub fn acrylic_bench(pixels: &[u8], w: u32, h: u32, rounds: usize) -> Result<AcrylicTimes> {
@@ -466,49 +481,83 @@ pub fn acrylic_bench(pixels: &[u8], w: u32, h: u32, rounds: usize) -> Result<Acr
         };
         let draw_tuned = || draw(&|| copy(&tuned));
         let upload = || source.CopyFromMemory(None, pixels.as_ptr().cast(), w * 4);
-        let timed = |f: &dyn Fn() -> Result<()>| -> Result<f64> {
+        let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
+        let timed = |f: &dyn Fn() -> Result<()>| -> Result<(f64, f64)> {
             let t = Instant::now();
             f()?;
+            let cpu = t.elapsed();
             gpu.finish()?;
-            Ok(t.elapsed().as_secs_f64() * 1e3)
+            Ok((ms(cpu), ms(t.elapsed())))
         };
         // Each kind in a block of its own after 3 warm-ups, so that none waits out another's work.
-        // An acrylic round starts from a fresh upload (untimed): its input has changed, as when the
-        // content beneath scrolls.
-        let block = |f: &dyn Fn() -> Result<()>, fresh: bool| -> Result<f64> {
-            let mut v = Vec::with_capacity(rounds);
+        // A `fresh` round starts from an upload (untimed): the effect graph's input has changed, as
+        // when the content beneath scrolls.
+        let block = |f: &dyn Fn() -> Result<()>, fresh: bool| -> Result<Timing> {
+            let (mut cpu, mut total) = (Vec::with_capacity(rounds), Vec::with_capacity(rounds));
             for i in 0..rounds + 3 {
                 if fresh {
                     upload()?;
                     gpu.finish()?;
                 }
-                let t = timed(f)?;
+                let (c, t) = timed(f)?;
                 if i >= 3 {
-                    v.push(t);
+                    cpu.push(c);
+                    total.push(t);
                 }
             }
-            Ok(scene::stats::median(&mut v).unwrap_or(f64::NAN))
+            let med = |v: &mut Vec<f64>| scene::stats::median(v).unwrap_or(f64::NAN);
+            Ok(Timing {
+                cpu: med(&mut cpu),
+                total: med(&mut total),
+            })
+        };
+        // Throughput: `rounds` calls back to back, then one wait; per call.
+        let batched = |f: &dyn Fn() -> Result<()>| -> Result<f64> {
+            gpu.finish()?;
+            let t = Instant::now();
+            for _ in 0..rounds {
+                f()?;
+            }
+            gpu.finish()?;
+            Ok(ms(t.elapsed()) / rounds as f64)
         };
         let floor = block(&draw_empty, false)?;
         let fill = block(&draw_fill, false)?;
         let graph = block(&draw_spec, true)?;
-        let tuned_ms = block(&draw_tuned, true)?;
+        let tuned_fresh = block(&draw_tuned, true)?;
+        let tuned_same = block(&draw_tuned, false)?;
         let upload_ms = block(&upload, false)?;
-        // Throughput: `rounds` recomputations back to back, each after its upload, then one wait.
-        let t = Instant::now();
-        for _ in 0..rounds {
+        let tuned_batched = batched(&|| {
             upload()?;
-            draw_tuned()?;
-        }
-        gpu.finish()?;
-        let batched = t.elapsed().as_secs_f64() * 1e3 / rounds as f64;
+            draw_tuned()
+        })?;
+        let fill_batched = batched(&draw_fill)?;
+        // The same fresh rounds with the system timer at 1 ms (the default tick is 15.6 ms): shows
+        // whether the single-recomputation latency is a wait on the timer rather than work.
+        let begin = resolve(w!("winmm.dll"), s!("timeBeginPeriod"));
+        let end = resolve(w!("winmm.dll"), s!("timeEndPeriod"));
+        let tuned_timer = match begin.zip(end) {
+            Some((begin, end)) => {
+                // The exports have this signature (timeapi.h); every begin is paired with an end.
+                let begin: TimePeriod = std::mem::transmute(begin);
+                let end: TimePeriod = std::mem::transmute(end);
+                begin(1);
+                let t = block(&draw_tuned, true);
+                end(1);
+                Some(t?)
+            }
+            None => None,
+        };
         Ok(AcrylicTimes {
             floor,
             fill,
             graph,
-            tuned: tuned_ms,
+            tuned: tuned_fresh,
+            tuned_same,
+            tuned_timer,
             upload: upload_ms,
-            tuned_batched: batched,
+            tuned_batched,
+            fill_batched,
         })
     }
 }

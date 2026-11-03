@@ -165,20 +165,29 @@ pub fn acrylic_bench(rounds: usize) -> Result<()> {
     region.to_bgra(&mut bgra);
     match crate::gpu::acrylic_bench(&bgra, W, H, rounds) {
         Ok(t) => {
+            let f = |t: crate::gpu::Timing| format!("{:.3}/{:.3}", t.cpu, t.total);
             println!(
-                "acrylic d2d-warp {W}x{H}, as specified: {:.3} ms; ratio {:.2} to a plain fill",
-                t.graph,
-                t.graph / t.fill
+                "acrylic d2d-warp {W}x{H}, one recomputation until done: as specified {:.3} ms (ratio {:.2} to a plain fill); tuned {:.3} ms (ratio {:.2})",
+                t.graph.total,
+                t.graph.total / t.fill.total,
+                t.tuned.total,
+                t.tuned.total / t.fill.total
             );
             println!(
-                "acrylic d2d-warp {W}x{H}, tuned: {:.3} ms; ratio {:.2}; back to back {:.3} ms each (upload included)",
-                t.tuned,
-                t.tuned / t.fill,
-                t.tuned_batched
+                "acrylic d2d-warp {W}x{H}, back to back: tuned {:.3} ms each, upload included; plain fill {:.3} ms each; ratio {:.2}",
+                t.tuned_batched,
+                t.fill_batched,
+                t.tuned_batched / t.fill_batched
             );
             println!(
-                "acrylic d2d-warp {W}x{H}: plain fill {:.3} ms; empty draw {:.3} ms (the wait, in every figure); upload {:.3} ms; rounds {rounds}",
-                t.fill, t.floor, t.upload
+                "acrylic d2d-warp diagnostics, cpu/total ms: empty draw {}; plain fill {}; as specified {}; tuned {}; tuned, input unchanged {}; tuned, 1 ms timer {}; upload {}; rounds {rounds}",
+                f(t.floor),
+                f(t.fill),
+                f(t.graph),
+                f(t.tuned),
+                f(t.tuned_same),
+                t.tuned_timer.map_or_else(|| "n/a".into(), f),
+                f(t.upload)
             );
         }
         Err(e) => println!("acrylic d2d-warp: unavailable ({e})"),
