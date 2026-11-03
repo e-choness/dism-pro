@@ -323,28 +323,37 @@ if (-not $Target) {
     Test-Step 'packages remove (irreversible)' {
         $installed = @((Get-Doc (Invoke-Cli 'packages', 'list') 'packages.v1').packages | Where-Object state -EQ 'installed')
         $kinds = ($installed | Group-Object release_type | ForEach-Object { "$($_.Name) x$($_.Count)" }) -join ', '
-        $candidates = @(foreach ($t in 14, 8, 2) { $installed | Where-Object release_type -EQ $t }) | Select-Object -First 4
+        $candidates = @(foreach ($t in 14, 8, 2) { $installed | Where-Object release_type -EQ $t }) | Select-Object -First 6
         if (-not $candidates) { throw "no candidate among $($installed.Count) installed packages (release types: $kinds)" }
         $plan = Get-Doc (Invoke-Cli 'packages', 'remove', $candidates[0].identity, '--yes' -Expect 3) 'plan.v1'
         if ($plan.summary.irreversible -ne 1) { throw "without --allow-irreversible: $($plan.summary | ConvertTo-Json -Compress)" }
+        # Each attempt that didn't remove anything, in order. DISM can refuse a package, or accept
+        # the removal and leave it installed (run 41728952696: Containers-Edition-ServerCore-Package,
+        # which other packages presumably keep installed).
         $tried = [Collections.Generic.List[string]]::new()
         foreach ($p in $candidates) {
+            $label = "$($p.identity) (type $($p.release_type))"
             $docs = Invoke-Cli 'packages', 'remove', $p.identity, '--yes', '--allow-irreversible' -Expect 0, 1
             $job = Get-Doc $docs 'job.v1'
-            if ($script:lastExit -eq 0 -and @($job.applied).Count -eq 1) {
-                $script:pkgJob = $job
-                $script:pkgId = $p.identity
-                $script:pkgType = $p.release_type
-                break
+            if ($script:lastExit -ne 0 -or @($job.applied).Count -ne 1) {
+                $tried.Add("${label}: exit $script:lastExit, failed [$(@($job.failed | ForEach-Object code) -join ', ')]")
+                continue
             }
-            $tried.Add("$($p.identity) (type $($p.release_type)): exit $script:lastExit, failed [$(@($job.failed | ForEach-Object code) -join ', ')]")
+            $after = Get-Package $p.identity
+            $state = if ($after) { $after.state } else { 'gone' }
+            if ($state -eq 'installed') {
+                $tried.Add("${label}: job $($job.job) applied, still installed, reboot_required=$($job.reboot_required)")
+                continue
+            }
+            $script:pkgJob = $job
+            $script:pkgId = $p.identity
+            $script:pkgType = $p.release_type
+            $script:pkgState = $state
+            break
         }
-        if (-not $script:pkgJob) { throw "DISM removed none of them: $($tried -join '; ') (release types: $kinds)" }
-        $after = Get-Package $pkgId
-        $state = if ($after) { $after.state } else { 'gone' }
-        if ($state -eq 'installed') { throw "job $($pkgJob.job) applied, yet $pkgId is still installed" }
-        $refused = if ($tried.Count) { "; refused first: $($tried -join '; ')" } else { '' }
-        "exit 3 without --allow-irreversible; removed $pkgId (type $pkgType) in job $($pkgJob.job), now $state, reboot_required=$($pkgJob.reboot_required)$refused; release types: $kinds"
+        if (-not $script:pkgJob) { throw "no removal took effect: $($tried -join '; ') (release types: $kinds)" }
+        $before = if ($tried.Count) { "; before it: $($tried -join '; ')" } else { '' }
+        "exit 3 without --allow-irreversible; removed $pkgId (type $pkgType) in job $($pkgJob.job), now $pkgState, reboot_required=$($pkgJob.reboot_required)$before; release types: $kinds"
     }
     if ($script:pkgJob) {
         Test-Step 'packages remove has no undo' {
@@ -353,9 +362,10 @@ if (-not $Target) {
             $undo = $docs | Where-Object schema -EQ 'job.v1' | Select-Object -First 1
             if ($undo -and @($undo.applied).Count) { throw "the undo applied $(@($undo.applied).Count) change(s)" }
             $after = Get-Package $pkgId
-            if ($after -and $after.state -eq 'installed') { throw "$pkgId is installed again" }
+            $now = if ($after) { $after.state } else { 'gone' }
+            if ($now -ne $pkgState) { throw "$pkgId went from $pkgState to $now" }
             $said = if ($plan) { "$(@($plan.changes).Count) change(s) planned" } else { (Get-Doc $docs 'error.v1').message }
-            "exit $script:lastExit, $said; $pkgId stays $(if ($after) { $after.state } else { 'gone' })"
+            "exit $script:lastExit, $said; $pkgId stays $now"
         }
     }
 }
