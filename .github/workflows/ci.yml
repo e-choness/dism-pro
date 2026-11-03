@@ -116,6 +116,27 @@ jobs:
             Write-Host "::$kind title=$($run.Title) (real Windows, exit $code)::$text"
           }
           exit $failed
+      - name: T3 WIMGAPI (wim_t3 probe)
+        # Wine has no wimgapi.dll: WimFile against WIMs and an ESD that dism.exe captures (roadmap 2.3).
+        if: ${{ !cancelled() }}
+        timeout-minutes: 10
+        shell: pwsh
+        run: |
+          $out = & dist-t3/wim_t3.exe 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          Write-Host $out
+          $kind = if ($code) { 'error' } else { 'notice' }
+          $text = $out.Trim().Replace('%', '%25').Replace("`r", '').Replace("`n", '%0A')
+          Write-Host "::$kind title=WIMGAPI probe (real Windows, exit $code)::$text"
+          exit $code
+      - name: Servicing stamps (TD-0013 §7.1 package-list cache, advisory)
+        # Which stamps move on a feature change and its undo, and which stay put on reads and idle
+        # time. A measurement for the cache design, not a gate.
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        timeout-minutes: 15
+        shell: pwsh
+        run: ./.github/scripts/servicing-stamps.ps1 -Cli dist/x86_64-pc-windows-msvc/dismpro-cli.exe
       - name: T3 offline image (servercore base layer)
         # On the VM, not in a container: S-02 found DISM can't service images inside one.
         shell: pwsh
