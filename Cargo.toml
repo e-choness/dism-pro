@@ -50,6 +50,11 @@ serde_json = "1.0.154"
 # Dev/bench only.
 criterion = "0.8.2"
 proptest = "1.12.0"
+# Dev only: the reference MCP client for conformance tests (TD-0013 §12), both protocol eras.
+# Apache-2.0; never linked into a shipped binary.
+rmcp = { version = "3.8.0", default-features = false, features = ["client", "transport-async-rw"] }
+# Dev only: the runtime rmcp's client needs. MIT.
+tokio = { version = "1.54.1", features = ["rt", "macros", "io-util"] }
 
 # Coding standards §1. CI runs clippy with -D warnings, so "warn" lints also block merges.
 [workspace.lints.rust]

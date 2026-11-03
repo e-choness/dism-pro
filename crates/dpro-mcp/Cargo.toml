@@ -16,6 +16,8 @@ thiserror.workspace = true
 [dev-dependencies]
 criterion.workspace = true
 proptest.workspace = true
+rmcp.workspace = true
+tokio.workspace = true
 
 [[bench]]
 name = "shape_lists"
