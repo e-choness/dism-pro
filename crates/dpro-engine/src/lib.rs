@@ -19,3 +19,4 @@ pub mod paths;
 pub mod purge;
 pub mod regf;
 pub mod registry;
+pub mod servicing;

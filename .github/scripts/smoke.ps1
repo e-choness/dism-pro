@@ -80,6 +80,33 @@ function Test-Step([string] $Name, [scriptblock] $Body) {
 
 function Format-Annotation([string] $Text) { $Text.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A') }
 
+function Get-Median([double[]] $Values) {
+    $s = @($Values | Sort-Object)
+    $mid = [int][Math]::Floor($s.Count / 2)
+    if ($s.Count % 2) { $s[$mid] } else { ($s[$mid - 1] + $s[$mid]) / 2 }
+}
+
+# A G1 ratio gate (doc 04 §3): one warm-up each, then 5 interleaved runs; the ratio of the medians
+# must stay within $Gate. Returns the line the step reports.
+function Measure-Ratio([scriptblock] $Ours, [scriptblock] $Theirs, [double] $Gate = 1.3) {
+    & $Ours
+    & $Theirs
+    $a = [Collections.Generic.List[double]]::new()
+    $b = [Collections.Generic.List[double]]::new()
+    for ($i = 0; $i -lt 5; $i++) {
+        $a.Add((Measure-Command $Ours).TotalMilliseconds)
+        $b.Add((Measure-Command $Theirs).TotalMilliseconds)
+    }
+    $ma = Get-Median $a
+    $mb = Get-Median $b
+    $text = 'ratio {0:N2} (median {1:N0} ms vs {2:N0} ms)' -f ($ma / $mb), $ma, $mb
+    if ($ma / $mb -gt $Gate) { throw "over the $Gate gate: $text" }
+    $text
+}
+
+$dismExe = Join-Path $env:SystemRoot 'System32\dism.exe'
+$dismTarget = if ($Target) { @("/Image:$((Resolve-Path $Target).Path)") } else { @('/Online') }
+
 Test-Step 'targets list' {
     $d = Get-Doc (Invoke-Cli 'targets', 'list') 'targets.v1'
     if (-not ($d.targets | Where-Object kind -EQ 'online')) { throw 'no online target' }
@@ -93,6 +120,17 @@ Test-Step 'packages list' {
     $d = Get-Doc (Invoke-Cli 'packages', 'list') 'packages.v1'
     if (-not @($d.packages).Count) { throw 'no packages' }
     "$(@($d.packages).Count) packages"
+}
+# The DISM read the broker makes on a cache miss (TD-0013 §7.1): the broker's own ratio test only
+# sees warm hits now, so the read path is gated here, process for process.
+Test-Step 'packages list vs dism.exe /Get-Packages (gate 1.3x)' {
+    Measure-Ratio {
+        $null = & $Cli 'packages' 'list' @targetArgs '--json' 2> $null
+        if ($LASTEXITCODE) { throw "dismpro-cli packages list exited $LASTEXITCODE" }
+    } {
+        $null = & $dismExe @dismTarget '/Get-Packages' '/English'
+        if ($LASTEXITCODE) { throw "dism.exe /Get-Packages exited $LASTEXITCODE" }
+    }
 }
 Test-Step 'features list' {
     $d = Get-Doc (Invoke-Cli 'features', 'list') 'features.v1'
