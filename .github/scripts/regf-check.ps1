@@ -53,7 +53,7 @@ public static class Off {
             if (status == 234) { data = new byte[cb + 16]; cch = Name.Capacity; cb = data.Length; status = OREnumValue(key, i, Name, ref cch, out type, data, ref cb); }
             Check(status, "OREnumValue " + path);
             string name = Name.ToString(0, cch);
-            lines.Add(new KeyValuePair<string, string>(name, "V\t" + name + "\t" + type + "\t" + cb + "\t" + Fnv(data, cb).ToString("x16") + "\n"));
+            lines.Add(new KeyValuePair<string, string>(name, "V\t" + name + "\t" + unchecked((uint)type) + "\t" + cb + "\t" + Fnv(data, cb).ToString("x16") + "\n"));
         }
         lines.Sort((a, b) => string.CompareOrdinal(a.Key, b.Key));
         foreach (var l in lines) w.Write(l.Value);
