@@ -216,18 +216,23 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("dpro-crash-{name}-{}", std::process::id()));
         // ignore: left over from an earlier run, or nothing there.
         let _ = fs::remove_dir_all(&dir);
-        let status = Command::new(std::env::current_exe().unwrap())
+        // Captured: the child's deliberate crash stays out of the test log unless a check fails.
+        let child = Command::new(std::env::current_exe().unwrap())
             .args(["--ignored", "--exact", "crash::tests::crash_child"])
             .env(DIR, &dir)
             .env(MODE, mode)
-            .status()
+            .output()
             .unwrap();
-        assert!(!status.success(), "the child must not survive");
+        let log = format!(
+            "child stdout:\n{}\nchild stderr:\n{}",
+            String::from_utf8_lossy(&child.stdout),
+            String::from_utf8_lossy(&child.stderr)
+        );
+        assert!(!child.status.success(), "the child must not survive\n{log}");
         let dumps: Vec<PathBuf> = fs::read_dir(dir.join("crash"))
-            .unwrap()
-            .map(|e| e.unwrap().path())
-            .collect();
-        assert_eq!(dumps.len(), 1, "{dumps:?}");
+            .map(|d| d.map(|e| e.unwrap().path()).collect())
+            .unwrap_or_default();
+        assert_eq!(dumps.len(), 1, "{dumps:?}\n{log}");
         let noticed = fs::read_to_string(dir.join("notice.txt")).unwrap();
         assert_eq!(noticed, dumps[0].display().to_string());
         let dump = fs::read(&dumps[0]).unwrap();
