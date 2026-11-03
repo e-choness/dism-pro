@@ -51,11 +51,11 @@ mod probe {
                 ConvertStringSecurityDescriptorToSecurityDescriptorW, ConvertStringSidToSidW,
                 SDDL_REVISION_1,
             },
-            DuplicateTokenEx, GetLengthSid, GetSidSubAuthority, GetSidSubAuthorityCount,
-            GetTokenInformation, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES,
-            SID_AND_ATTRIBUTES, SecurityImpersonation, SetTokenInformation, TOKEN_ADJUST_DEFAULT,
+            CreateRestrictedToken, DISABLE_MAX_PRIVILEGE, GetLengthSid, GetSidSubAuthority,
+            GetSidSubAuthorityCount, GetTokenInformation, PSECURITY_DESCRIPTOR, PSID,
+            SECURITY_ATTRIBUTES, SID_AND_ATTRIBUTES, SetTokenInformation, TOKEN_ADJUST_DEFAULT,
             TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
-            TokenIntegrityLevel, TokenPrimary,
+            TokenIntegrityLevel,
         },
         Storage::FileSystem::PIPE_ACCESS_DUPLEX,
         System::{
@@ -72,7 +72,9 @@ mod probe {
 
     type R<T> = Result<T, String>;
 
-    const USAGE: &str = "usage: pipe_t3 | pipe_t3 echo <name> <server pid> | pipe_t3 open <name>";
+    const USAGE: &str = "usage: pipe_t3 | pipe_t3 echo <name> <server pid> | pipe_t3 open <name> \
+                         | pipe_t3 instance <name>";
+    const ADMINISTRATORS: &str = "S-1-5-32-544";
     const MEDIUM: &str = "S-1-16-8192";
     const LOW: &str = "S-1-16-4096";
     const MEDIUM_RID: u32 = 0x2000;
@@ -103,6 +105,7 @@ mod probe {
             [] => run_all(),
             ["echo", name, pid] => echo(name, pid),
             ["open", name] => open(name),
+            ["instance", name] => instance(name),
             _ => {
                 say!("{USAGE}");
                 ExitCode::from(2)
@@ -147,18 +150,26 @@ mod probe {
         if level > MEDIUM_RID {
             report.check(
                 "medium-integrity client allowed",
-                labelled_open(&sid, MEDIUM).and_then(|code| match code {
+                labelled_child(&sid, MEDIUM, "open").and_then(|code| match code {
                     0 => Ok("opened the elevated server's pipe".to_owned()),
                     code => Err(format!("refused with {code}")),
                 }),
             );
             say!("INFO label needed: {}", unlabelled_control(&sid));
+            report.check(
+                "medium-integrity process can't add an instance",
+                labelled_child(&sid, MEDIUM, "instance").and_then(|code| match code {
+                    ACCESS_DENIED => Ok("access denied".to_owned()),
+                    0 => Err("created an instance of the broker's pipe".to_owned()),
+                    code => Err(format!("failed with {code:#x}, not access denied")),
+                }),
+            );
         } else {
             say!("INFO medium-integrity client: skipped, this process isn't above medium");
         }
         report.check(
             "low-integrity client refused",
-            labelled_open(&sid, LOW).and_then(|code| match code {
+            labelled_child(&sid, LOW, "open").and_then(|code| match code {
                 ACCESS_DENIED => Ok("access denied".to_owned()),
                 0 => Err("opened the pipe".to_owned()),
                 code => Err(format!("failed with {code:#x}, not access denied")),
@@ -271,25 +282,28 @@ mod probe {
     /// create must fail rather than join them.
     fn squatter(sid: &str) -> R<String> {
         let name = unique("squat");
-        let _theirs = raw_pipe(&name, None, false)?;
+        let _theirs = raw_pipe(&name, None, false).map_err(err)?;
         match Pipe::create(&name, sid) {
             Ok(_) => Err("created an instance under the squatter's name".to_owned()),
             Err(e) => Ok(format!("refused: {e}")),
         }
     }
 
-    /// The production pipe opened by a child at `level`; the child's exit code.
-    fn labelled_open(sid: &str, level: &str) -> R<u32> {
-        let name = unique("label");
+    /// A child at `level` runs `mode` (`open` or `instance`) on the production pipe; its exit
+    /// code.
+    fn labelled_child(sid: &str, level: &str, mode: &str) -> R<u32> {
+        let name = unique(&format!("label-{mode}"));
         let _server = Pipe::create(&name, sid).map_err(err)?;
-        spawn_at(level, &["open", &name])
+        spawn_at(level, &[mode, &name])
     }
 
-    /// The same DACL without the label, opened at medium: shows whether the label is what lets
-    /// the unelevated front in.
+    /// The same user ACE without the label, opened at medium: shows whether the label is what
+    /// lets the unelevated front in.
     fn unlabelled_control(sid: &str) -> String {
         let name = unique("nolabel");
-        let result = raw_pipe(&name, Some(&format!("D:P(A;;GRGW;;;{sid})")), true)
+        let ace = format!("D:P(A;;{:#x};;;{sid})", pipe::CLIENT_ACCESS);
+        let result = raw_pipe(&name, Some(&ace), true)
+            .map_err(err)
             .and_then(|_server| spawn_at(MEDIUM, &["open", &name]));
         match result {
             Ok(ACCESS_DENIED) => "without it a medium client is denied (label required)".to_owned(),
@@ -309,7 +323,8 @@ mod probe {
             &control,
             Some(&format!("D:P(A;;GRGW;;;{sid})S:(ML;;NW;;;ME)")),
             false,
-        )?;
+        )
+        .map_err(err)?;
         let via = |name: &str| {
             OpenOptions::new()
                 .read(true)
@@ -355,6 +370,18 @@ mod probe {
         }
     }
 
+    /// Child: try to add an instance of someone else's pipe. Exit 0, or the Win32 error code.
+    fn instance(name: &str) -> ExitCode {
+        match raw_pipe(name, None, true) {
+            Ok(_) => ExitCode::SUCCESS,
+            Err(e) => ExitCode::from(
+                e.raw_os_error()
+                    .and_then(|c| u8::try_from(c).ok())
+                    .unwrap_or(u8::MAX),
+            ),
+        }
+    }
+
     /// This process's mandatory integrity RID (0x2000 medium, 0x3000 high).
     fn integrity() -> R<u32> {
         let token = own_token(TOKEN_QUERY)?;
@@ -386,37 +413,40 @@ mod probe {
         Ok(unsafe { *GetSidSubAuthority(sid, last_index) })
     }
 
-    /// Runs this exe with `args` under a copy of this process's token lowered to `level` (an
-    /// integrity SID); returns its exit code. The copy keeps every group (an elevated runner's
-    /// Administrators too): only the label differs, which is what the pipe's checks see.
+    /// Runs this exe with `args` under this process's token filtered the way UAC filters an
+    /// administrator's standard session (Administrators deny-only, privileges removed) and
+    /// labelled `level` (an integrity SID); returns its exit code.
     fn spawn_at(level: &str, args: &[&str]) -> R<u32> {
         let token =
             own_token(TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ADJUST_DEFAULT | TOKEN_ASSIGN_PRIMARY)?;
+        let admins = string_sid(ADMINISTRATORS)?;
+        let deny_only = SID_AND_ATTRIBUTES {
+            Sid: admins.0,
+            Attributes: 0,
+        };
         let mut primary: HANDLE = ptr::null_mut();
-        // SAFETY: valid token handle; access 0 means the same access; no attributes; `primary`
+        // SAFETY: valid primary token handle; one SID to disable, which outlives the call; no
+        // privileges listed (DISABLE_MAX_PRIVILEGE removes them) or restricting SIDs; `primary`
         // is a valid out pointer.
         let ok = unsafe {
-            DuplicateTokenEx(
+            CreateRestrictedToken(
                 token.as_raw_handle(),
+                DISABLE_MAX_PRIVILEGE,
+                1,
+                &raw const deny_only,
                 0,
                 ptr::null(),
-                SecurityImpersonation,
-                TokenPrimary,
+                0,
+                ptr::null(),
                 &raw mut primary,
             )
         };
         if ok == 0 {
-            return Err(last("DuplicateTokenEx"));
+            return Err(last("CreateRestrictedToken"));
         }
-        // SAFETY: DuplicateTokenEx returned a handle nothing else owns.
+        // SAFETY: CreateRestrictedToken returned a handle nothing else owns.
         let primary = unsafe { OwnedHandle::from_raw_handle(primary) };
-        let level = wide(level);
-        let mut sid: PSID = ptr::null_mut();
-        // SAFETY: `level` is NUL-terminated; `sid` is a valid out pointer.
-        if unsafe { ConvertStringSidToSidW(level.as_ptr(), &raw mut sid) } == 0 {
-            return Err(last("ConvertStringSidToSidW"));
-        }
-        let sid = Local(sid);
+        let sid = string_sid(level)?;
         let label = TOKEN_MANDATORY_LABEL {
             Label: SID_AND_ATTRIBUTES {
                 Sid: sid.0,
@@ -426,7 +456,8 @@ mod probe {
         // SAFETY: `sid.0` is a valid SID.
         let sid_len = unsafe { GetLengthSid(sid.0) };
         let len = u32::try_from(size_of::<TOKEN_MANDATORY_LABEL>()).unwrap_or(0) + sid_len;
-        // SAFETY: the duplicate has TOKEN_ADJUST_DEFAULT; `label` and its SID outlive the call.
+        // SAFETY: the new token has the source's access, TOKEN_ADJUST_DEFAULT included; `label`
+        // and its SID outlive the call.
         let ok = unsafe {
             SetTokenInformation(
                 primary.as_raw_handle(),
@@ -492,6 +523,16 @@ mod probe {
         Ok(code)
     }
 
+    fn string_sid(text: &str) -> R<Local> {
+        let text = wide(text);
+        let mut sid: PSID = ptr::null_mut();
+        // SAFETY: `text` is NUL-terminated; `sid` is a valid out pointer.
+        if unsafe { ConvertStringSidToSidW(text.as_ptr(), &raw mut sid) } == 0 {
+            return Err(last("ConvertStringSidToSidW"));
+        }
+        Ok(Local(sid))
+    }
+
     fn own_token(access: u32) -> R<OwnedHandle> {
         let mut token: HANDLE = ptr::null_mut();
         // SAFETY: GetCurrentProcess returns a pseudo handle; `token` is a valid out pointer.
@@ -503,7 +544,7 @@ mod probe {
     }
 
     /// A message-mode pipe with any security: `None` is the default descriptor.
-    fn raw_pipe(name: &str, sddl: Option<&str>, reject_remote: bool) -> R<OwnedHandle> {
+    fn raw_pipe(name: &str, sddl: Option<&str>, reject_remote: bool) -> io::Result<OwnedHandle> {
         let path = wide(format!(r"\\.\pipe\{name}"));
         let mut sd: PSECURITY_DESCRIPTOR = ptr::null_mut();
         if let Some(sddl) = sddl {
@@ -518,7 +559,7 @@ mod probe {
                 )
             };
             if ok == 0 {
-                return Err(last("ConvertStringSecurityDescriptorToSecurityDescriptorW"));
+                return Err(io::Error::last_os_error());
             }
         }
         let sd = Local(sd);
@@ -550,7 +591,7 @@ mod probe {
             )
         };
         if handle == INVALID_HANDLE_VALUE {
-            return Err(last("CreateNamedPipeW"));
+            return Err(io::Error::last_os_error());
         }
         // SAFETY: CreateNamedPipeW returned a handle nothing else owns.
         Ok(unsafe { OwnedHandle::from_raw_handle(handle) })

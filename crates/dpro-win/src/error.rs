@@ -28,6 +28,9 @@ pub enum Error {
     /// A pipe message above the size limit.
     #[error("message of {0} bytes is too large")]
     MessageTooLarge(usize),
+    /// A server-only pipe call on a client end.
+    #[error("only the server end of a pipe can do that")]
+    ClientEnd,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

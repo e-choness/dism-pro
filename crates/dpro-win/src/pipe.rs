@@ -1,10 +1,15 @@
 //! The named pipe between the unelevated MCP front and the elevated agent broker (ADR-0006,
 //! TD-0013 §5.1, §15).
 //!
-//! - Message mode, one instance (`FILE_FLAG_FIRST_PIPE_INSTANCE`, so a squatter's earlier pipe
-//!   makes [`Pipe::create`] fail instead of sharing the name), local clients only.
-//! - The DACL lets in exactly one user SID, and the explicit Medium mandatory label lets that
-//!   user's *unelevated* front open a pipe that an elevated broker created.
+//! - Message mode, local clients only. The first instance is created with
+//!   `FILE_FLAG_FIRST_PIPE_INSTANCE`, so a squatter's earlier pipe makes [`Pipe::create`] fail
+//!   instead of sharing the name. The broker adds instances ([`Pipe::next_instance`]) to serve
+//!   several fronts.
+//! - The DACL gives one user SID exactly what a client end needs ([`CLIENT_ACCESS`]), and
+//!   Administrators full access. The explicit Medium mandatory label lets that user's
+//!   *unelevated* front open a pipe that an elevated broker created. The user doesn't get
+//!   `FILE_CREATE_PIPE_INSTANCE`, so a process of the same user can't add an instance of its own
+//!   and catch a front's connection.
 //! - The client end allows only identification-level impersonation, so a server that isn't the
 //!   broker can't act as the front.
 //! - Peers check each other with [`Pipe::peer_pid`], [`process_image`] and [`sha256_file`].
@@ -21,8 +26,8 @@ use std::{
 
 use windows_sys::Win32::{
     Foundation::{
-        ERROR_MORE_DATA, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, GENERIC_READ, GENERIC_WRITE,
-        GetLastError, HANDLE, INVALID_HANDLE_VALUE,
+        ERROR_MORE_DATA, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, GetLastError, HANDLE,
+        INVALID_HANDLE_VALUE,
     },
     Security::{
         Authorization::ConvertSidToStringSidW,
@@ -30,8 +35,9 @@ use windows_sys::Win32::{
         GetTokenInformation, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser,
     },
     Storage::FileSystem::{
-        CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, OPEN_EXISTING, PIPE_ACCESS_DUPLEX, ReadFile,
-        SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT, WriteFile,
+        CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_READ_ATTRIBUTES, FILE_READ_DATA,
+        FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, OPEN_EXISTING, PIPE_ACCESS_DUPLEX, ReadFile,
+        SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT, SYNCHRONIZE, WriteFile,
     },
     System::{
         Pipes::{
@@ -61,41 +67,73 @@ pub const MAX_MESSAGE: usize = 1 << 20;
 const BUFFER: u32 = 64 * 1024;
 /// Read chunk for message-mode reads.
 const CHUNK: usize = 64 * 1024;
+/// Fronts one broker serves at once; a further front waits for a free instance.
+pub const MAX_INSTANCES: u32 = 8;
+/// What a client end needs and no more: read and write data, read attributes (the server's
+/// pid), write attributes (message read mode), wait. Not `FILE_CREATE_PIPE_INSTANCE`.
+pub const CLIENT_ACCESS: u32 =
+    FILE_READ_DATA | FILE_WRITE_DATA | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES | SYNCHRONIZE;
 
 /// One end of the broker pipe.
 #[derive(Debug)]
 pub struct Pipe {
     handle: OwnedHandle,
-    server: bool,
+    /// Server ends keep what [`Pipe::next_instance`] needs.
+    server: Option<Instance>,
+}
+
+#[derive(Debug, Clone)]
+struct Instance {
+    path: WideCString,
+    sddl: String,
 }
 
 impl Pipe {
-    /// Server end: creates `\\.\pipe\<name>` as its first and only instance, open to the user
-    /// `sid` (`S-1-…`) at medium integrity and to no one else.
+    /// Server end: creates `\\.\pipe\<name>` as its first instance, open to the user `sid`
+    /// (`S-1-…`) at medium integrity with [`CLIENT_ACCESS`], to Administrators, and to no one
+    /// else.
     ///
     /// # Errors
     /// A name or SID that isn't plain ([`Error::InvalidName`]); `ERROR_ACCESS_DENIED` when the
     /// name is already taken, which callers must treat as possible squatting.
     pub fn create(name: &str, sid: &str) -> Result<Self> {
-        let path = pipe_path(name)?;
         if !is_sid(sid) {
             return Err(Error::InvalidName(sid.to_owned()));
         }
-        // GRGW for that user only; label: medium, no write up (TD-0013 §15).
-        let sd = descriptor(&format!("D:P(A;;GRGW;;;{sid})S:(ML;;NW;;;ME)"))?;
+        let instance = Instance {
+            path: pipe_path(name)?,
+            // TD-0013 §15; the label is medium, no write up.
+            sddl: format!("D:P(A;;GA;;;BA)(A;;{CLIENT_ACCESS:#x};;;{sid})S:(ML;;NW;;;ME)"),
+        };
+        Self::listen(instance, FILE_FLAG_FIRST_PIPE_INSTANCE)
+    }
+
+    /// Server end: one more instance of this pipe, for the next front, while this one serves
+    /// its client. Needs the right to create instances, which only Administrators have.
+    ///
+    /// # Errors
+    /// [`Error::ClientEnd`] on a client end; `ERROR_PIPE_BUSY` past [`MAX_INSTANCES`]; other
+    /// OS errors.
+    pub fn next_instance(&self) -> Result<Self> {
+        let instance = self.server.clone().ok_or(Error::ClientEnd)?;
+        Self::listen(instance, 0)
+    }
+
+    fn listen(instance: Instance, first: u32) -> Result<Self> {
+        let sd = descriptor(&instance.sddl)?;
         let attributes = SECURITY_ATTRIBUTES {
             nLength: u32::try_from(size_of::<SECURITY_ATTRIBUTES>()).unwrap_or(u32::MAX),
             lpSecurityDescriptor: sd.0,
             bInheritHandle: 0,
         };
-        // SAFETY: `path` is NUL-terminated; `attributes` and the descriptor it points to live
+        // SAFETY: the path is NUL-terminated; `attributes` and the descriptor it points to live
         // until after the call.
         let handle = unsafe {
             CreateNamedPipeW(
-                path.as_ptr(),
-                PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
+                instance.path.as_ptr(),
+                PIPE_ACCESS_DUPLEX | first,
                 PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
-                1,
+                MAX_INSTANCES,
                 BUFFER,
                 BUFFER,
                 0,
@@ -104,7 +142,7 @@ impl Pipe {
         };
         Ok(Self {
             handle: owned(handle, "CreateNamedPipeW")?,
-            server: true,
+            server: Some(instance),
         })
     }
 
@@ -139,7 +177,7 @@ impl Pipe {
             let handle = unsafe {
                 CreateFileW(
                     path.as_ptr(),
-                    GENERIC_READ | GENERIC_WRITE,
+                    CLIENT_ACCESS,
                     0,
                     ptr::null(),
                     OPEN_EXISTING,
@@ -150,7 +188,7 @@ impl Pipe {
             if handle != INVALID_HANDLE_VALUE {
                 let pipe = Self {
                     handle: owned(handle, "CreateFileW")?,
-                    server: false,
+                    server: None,
                 };
                 let mode = PIPE_READMODE_MESSAGE;
                 // SAFETY: valid pipe handle; `mode` outlives the call; the other two are optional.
@@ -180,7 +218,7 @@ impl Pipe {
         let mut pid = 0_u32;
         // SAFETY: valid pipe handle; `pid` is a valid out pointer.
         let ok = unsafe {
-            if self.server {
+            if self.server.is_some() {
                 GetNamedPipeClientProcessId(self.raw(), &raw mut pid)
             } else {
                 GetNamedPipeServerProcessId(self.raw(), &raw mut pid)
@@ -408,6 +446,8 @@ fn hresult(code: u32) -> i32 {
 }
 
 #[cfg(test)]
+// What Wine doesn't implement (first-instance squatting, integrity labels, ACL checks, remote
+// refusal) is checked on real Windows by examples/pipe_t3.rs in the T3 job.
 mod tests {
     use std::thread;
 
@@ -442,11 +482,37 @@ mod tests {
     }
 
     #[test]
-    fn a_name_can_be_created_once() {
-        let name = unique("first");
-        let sid = current_user_sid().unwrap();
-        let _first = Pipe::create(&name, &sid).unwrap();
-        assert!(Pipe::create(&name, &sid).is_err());
+    fn two_fronts_on_two_instances() {
+        let name = unique("two");
+        let first = Pipe::create(&name, &current_user_sid().unwrap()).unwrap();
+        let second = first.next_instance().unwrap();
+        let fronts: Vec<_> = [b"one".as_slice(), b"two".as_slice()]
+            .into_iter()
+            .map(|text| {
+                let name = name.clone();
+                thread::spawn(move || {
+                    let c = Pipe::connect(&name, 2_000).unwrap();
+                    c.send(text).unwrap();
+                    let mut buf = Vec::new();
+                    c.recv(&mut buf).unwrap();
+                    assert_eq!(buf, text);
+                    assert!(matches!(c.next_instance(), Err(Error::ClientEnd)));
+                })
+            })
+            .collect();
+        let mut seen = Vec::new();
+        for server in [&first, &second] {
+            server.accept().unwrap();
+            let mut buf = Vec::new();
+            server.recv(&mut buf).unwrap();
+            server.send(&buf).unwrap();
+            seen.push(buf);
+        }
+        for front in fronts {
+            front.join().unwrap();
+        }
+        seen.sort();
+        assert_eq!(seen, [b"one".to_vec(), b"two".to_vec()]);
     }
 
     #[test]
