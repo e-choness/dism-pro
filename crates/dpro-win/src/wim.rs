@@ -1,5 +1,5 @@
-//! WIM/ESD files via WIMGAPI (doc 02 §5) over the S-03 bindings. **Unverified** until
-//! `cargo xtask ffi-check` passes (CAVEATS.md §5).
+//! WIM/ESD files via WIMGAPI (doc 02 §5) over the S-03 bindings. Wine has no wimgapi.dll, so
+//! T3 covers this module on real Windows with `examples/wim_t3.rs`.
 
 use std::path::Path;
 
