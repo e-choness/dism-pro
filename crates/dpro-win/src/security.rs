@@ -369,11 +369,12 @@ mod tests {
         assert!(matches!(read, Ok(None)), "{read:?}");
     }
 
-    /// The temp folder belongs to the user running the tests, so even a missing file in it is
-    /// refused: the folder is checked first.
+    /// A folder owned by a user is refused, so even a missing file in it is: the folder is
+    /// checked first.
     #[test]
     fn a_file_in_a_user_folder_is_refused() {
         let base = scratch("user");
+        give_to_current_user(&base);
         let file = base.join("policy.toml");
         let missing = read_admin_only_file(&file, 1024);
         std::fs::write(&file, "schema = 1\n").unwrap();
@@ -382,6 +383,31 @@ mod tests {
         for read in [missing, present] {
             assert!(matches!(read, Err(Error::UntrustedDir(_))), "{read:?}");
         }
+    }
+
+    /// Makes the running user own `dir`, as a user owns a folder in their profile. An elevated
+    /// administrator's new folders belong to Administrators on Windows Server (the "default
+    /// owner" policy; T3 run 41677219726), which the folder check rightly trusts.
+    fn give_to_current_user(dir: &Path) {
+        let owned_by_admins = |dir: &Path| {
+            let folder = open_no_follow(dir, READ_CONTROL).unwrap();
+            Security::of(&folder).unwrap().owned_by_admins()
+        };
+        if !owned_by_admins(dir) {
+            return;
+        }
+        let sid = crate::pipe::current_user_sid().unwrap();
+        let status = std::process::Command::new("icacls")
+            .arg(dir)
+            .args(["/setowner", &format!("*{sid}"), "/Q"])
+            .status()
+            .unwrap();
+        assert!(status.success(), "icacls /setowner: {status}");
+        assert!(
+            !owned_by_admins(dir),
+            "the user should own {}",
+            dir.display()
+        );
     }
 
     /// Needs elevation to make an admin-only folder: runs on T3 (the runner's tests run elevated)
