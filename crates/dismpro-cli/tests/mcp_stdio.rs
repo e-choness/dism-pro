@@ -303,3 +303,73 @@ fn front_and_broker_end_to_end() {
     second.finish();
     mcp.finish();
 }
+
+/// TD-0013 §7 front budgets, printed for T3 (advisory on a shared runner): `initialize` answered
+/// within 100 ms of spawning, `tools/list` within 5 ms, and an idle front under 15 MiB.
+#[test]
+fn front_start_up_listing_and_idle_memory() {
+    const RUNS: usize = 7;
+    let mut init_ms = Vec::with_capacity(RUNS);
+    let mut list_ms = Vec::with_capacity(RUNS);
+    let mut memory = None;
+    for run in 0..RUNS {
+        let spawned = Instant::now();
+        let Some(mut mcp) = Mcp::start(&[]) else {
+            return;
+        };
+        mcp.send(
+            &json!({ "jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": { "name": "mcp-init", "version": "1" },
+            }}),
+        );
+        assert_eq!(mcp.read()["result"]["protocolVersion"], "2025-11-25");
+        init_ms.push(ms(spawned));
+        let listed = Instant::now();
+        let list = mcp.ask("tools/list", json!({}));
+        list_ms.push(ms(listed));
+        assert!(names(&list).contains(&"targets_list"));
+        if run == RUNS - 1 {
+            thread::sleep(std::time::Duration::from_secs(1)); // idle, as a client leaves it
+            memory = Some(working_set(mcp.child.id()));
+        }
+        mcp.finish();
+    }
+    eprintln!(
+        "mcp-init: initialize after spawn median {:.1} ms (min {:.1}, max {:.1}; budget 100); \
+         tools/list median {:.2} ms (max {:.2}; budget 5); {RUNS} runs",
+        median(&mut init_ms),
+        init_ms[0],
+        init_ms[RUNS - 1],
+        median(&mut list_ms),
+        list_ms[RUNS - 1],
+    );
+    eprintln!(
+        "mcp-init: idle front {} (budget 15 MiB working set)",
+        memory.unwrap_or_default()
+    );
+}
+
+fn ms(since: Instant) -> f64 {
+    since.elapsed().as_secs_f64() * 1000.0
+}
+
+/// Sorts `v` and returns its median.
+fn median(v: &mut [f64]) -> f64 {
+    v.sort_by(f64::total_cmp);
+    v[v.len() / 2]
+}
+
+/// A process's working set and private bytes, as Windows reports them, in MiB.
+fn working_set(pid: u32) -> String {
+    let script = format!(
+        "$p = Get-Process -Id {pid}; '{{0:N1}} MiB working set, {{1:N1}} MiB private' -f \
+         ($p.WorkingSet64 / 1MB), ($p.PrivateMemorySize64 / 1MB)"
+    );
+    let out = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).trim().to_owned()
+}
