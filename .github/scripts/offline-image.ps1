@@ -47,6 +47,27 @@ function Invoke-Step([string] $Name, [scriptblock] $Body) {
     Write-Host "${Name}: $([math]::Round($sw.Elapsed.TotalSeconds)) s"
 }
 
+# The runner image installs Docker, but a job has found its engine not running (run 41637221034:
+# "open //./pipe/docker_engine: The system cannot find the file specified"). Start it and wait for
+# it to answer instead of failing the job on the runner's state.
+function Start-DockerEngine {
+    $service = Get-Service docker -ErrorAction SilentlyContinue
+    if (-not $service) { throw 'this runner has no docker service' }
+    if ($service.Status -ne 'Running') {
+        Write-Host "docker service is $($service.Status); starting it"
+        Start-Service docker
+    }
+    $deadline = [DateTime]::UtcNow.AddMinutes(2)
+    while ($true) {
+        docker version --format '{{.Server.Version}}' *> $null
+        if (-not $LASTEXITCODE) { return }
+        if ([DateTime]::UtcNow -gt $deadline) {
+            throw 'the Docker engine did not answer within 2 minutes of starting'
+        }
+        Start-Sleep -Seconds 2
+    }
+}
+
 if (Test-Path (Join-Path $Out $hive)) {
     Write-Host "offline image already at $Out"
     exit 0
@@ -56,6 +77,7 @@ $null = New-Item -ItemType Directory -Force $work
 $saveTar = Join-Path $work 'save.tar'
 $saved = Join-Path $work 'saved'
 $layer = Join-Path $work 'layer'
+Start-DockerEngine
 Invoke-Step "docker pull $Image" { docker pull -q $Image }
 # Which image this run tested: the tag moves with every servicing update.
 Write-Host "::notice title=T3 offline image::$Image, $(docker image inspect --format '{{.Id}} created {{.Created}}' $Image)"
