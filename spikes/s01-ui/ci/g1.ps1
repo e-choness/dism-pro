@@ -41,6 +41,13 @@ function Publish([string] $Title, [string[]] $Lines) {
     Write-Host "::notice title=$Title::$(Format-Annotation $text)"
 }
 
+# A harness error becomes an annotation (where and what): the job log needs a token to read.
+trap {
+    $at = $_.InvocationInfo
+    Write-Host "::error title=S-01 G1 harness::$(Format-Annotation "line $($at.ScriptLineNumber): $("$($at.Line)".Trim())`n$($_.Exception.Message)")"
+    exit 1
+}
+
 Add-Type -AssemblyName System.Drawing, System.Windows.Forms, UIAutomationClient, UIAutomationTypes
 Add-Type -TypeDefinition @'
 using System;
@@ -48,7 +55,8 @@ using System.Runtime.InteropServices;
 public static class W {
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
     [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindowW(string cls, string title);
+    // The class as a pointer: PowerShell passes $null for a string parameter as "", which no class matches.
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindowW(IntPtr cls, string title);
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
     [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr h, ref POINT p);
     [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
@@ -134,9 +142,13 @@ function Start-Window([string] $Path, [string[]] $Arguments, [string] $Title) {
     $sw = [Diagnostics.Stopwatch]::StartNew()
     do {
         Start-Sleep -Milliseconds 100
-        $h = [W]::FindWindowW($null, $Title)
+        $h = [W]::FindWindowW([IntPtr]::Zero, $Title)
     } while ($h -eq [IntPtr]::Zero -and -not $p.HasExited -and $sw.ElapsedMilliseconds -lt 30000)
-    if ($h -eq [IntPtr]::Zero) { throw "no window '$Title' (process exited: $($p.HasExited))" }
+    if ($h -eq [IntPtr]::Zero) {
+        $exited = $p.HasExited
+        if (-not $exited) { $p.Kill() }
+        throw "no window '$Title' in 30 s ($(if ($exited) { "exited, code $($p.ExitCode)" } else { 'killed' }))"
+    }
     [void][W]::SetForegroundWindow($h)
     Start-Sleep -Milliseconds 1500 # first frames, and DWM's backdrop
     [pscustomobject]@{ Process = $p; Hwnd = $h }
@@ -153,8 +165,9 @@ $ua = [Windows.Automation.AutomationElement]
 $types = [Windows.Automation.ControlType]
 $lines = @()
 foreach ($o in 'a', 'b') {
-    $w = Start-Window $exe[$o] @('--screen', 'drawer', '--size', '1000x700') $title[$o]
+    $w = $null
     try {
+        $w = Start-Window $exe[$o] @('--screen', 'drawer', '--size', '1000x700') $title[$o]
         $root = $ua::FromHandle($w.Hwnd)
         $all = @($root.FindAll([Windows.Automation.TreeScope]::Descendants, [Windows.Automation.Condition]::TrueCondition))
         # Rows: the named list items of the list that has the most of them.
@@ -188,7 +201,7 @@ foreach ($o in 'a', 'b') {
     } catch {
         $lines += "${o}: UI Automation FAILED: $($_.Exception.Message)"
     } finally {
-        Stop-Window $w
+        if ($w) { Stop-Window $w }
     }
 }
 Publish 'S-01 G1 UI Automation' $lines
@@ -271,8 +284,9 @@ function Test-Glass([string] $O, [string] $Theme, [string[]] $Extra, [bool] $Pal
     Set-Transparency 1
     $arguments = @('--screen', 'drawer', '--theme', $Theme, '--size', '1000x700') + $Extra
     if ($Palette) { $arguments += @('--palette', '--palette-at', "$($paletteAt.X),$($paletteAt.Y)") }
-    $w = Start-Window $exe[$O] $arguments $title[$O]
+    $w = $null
     try {
+        $w = Start-Window $exe[$O] $arguments $title[$O]
         Move-Client $w
         $probes = Get-Probes $w $Palette
         $phases = [ordered]@{}
@@ -308,7 +322,7 @@ function Test-Glass([string] $O, [string] $Theme, [string[]] $Extra, [bool] $Pal
     } catch {
         $res += "  FAILED: $($_.Exception.Message)"
     } finally {
-        Stop-Window $w
+        if ($w) { Stop-Window $w }
         Set-Transparency 1
     }
     $res

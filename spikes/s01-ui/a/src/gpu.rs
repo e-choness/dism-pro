@@ -10,25 +10,30 @@ use windows::{
         Foundation::{HMODULE, HWND},
         Graphics::{
             Direct2D::{
-                CLSID_D2D1GaussianBlur, CLSID_D2D1Scale,
+                CLSID_D2D1ColorMatrix, CLSID_D2D1GaussianBlur, CLSID_D2D1Scale,
                 Common::{
-                    D2D_RECT_F, D2D_SIZE_U, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F,
+                    D2D_RECT_F, D2D_SIZE_U, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_BORDER_MODE_HARD,
+                    D2D1_COLOR_F, D2D1_COLORMATRIX_ALPHA_MODE_PREMULTIPLIED,
                     D2D1_COMPOSITE_MODE_SOURCE_COPY, D2D1_PIXEL_FORMAT,
                 },
                 D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1,
+                D2D1_COLORMATRIX_PROP_ALPHA_MODE, D2D1_COLORMATRIX_PROP_COLOR_MATRIX,
                 D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_FACTORY_OPTIONS, D2D1_FACTORY_TYPE,
-                D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION,
-                D2D1_INTERPOLATION_MODE_LINEAR, D2D1_PROPERTY_TYPE_FLOAT,
-                D2D1_PROPERTY_TYPE_VECTOR2, D2D1_SCALE_PROP_SCALE, ID2D1DeviceContext,
-                ID2D1Factory1,
+                D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_GAUSSIANBLUR_OPTIMIZATION,
+                D2D1_GAUSSIANBLUR_OPTIMIZATION_BALANCED, D2D1_GAUSSIANBLUR_OPTIMIZATION_SPEED,
+                D2D1_GAUSSIANBLUR_PROP_BORDER_MODE, D2D1_GAUSSIANBLUR_PROP_OPTIMIZATION,
+                D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION, D2D1_INTERPOLATION_MODE_LINEAR,
+                D2D1_PROPERTY_TYPE_ENUM, D2D1_PROPERTY_TYPE_FLOAT, D2D1_PROPERTY_TYPE_MATRIX_5X4,
+                D2D1_PROPERTY_TYPE_VECTOR2, D2D1_SCALE_PROP_BORDER_MODE, D2D1_SCALE_PROP_SCALE,
+                ID2D1DeviceContext, ID2D1Effect, ID2D1Factory1, ID2D1Image,
             },
             Direct3D::{
                 D3D_DRIVER_TYPE, D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP, D3D_FEATURE_LEVEL,
             },
             Direct3D11::{
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_FLAG, D3D11_QUERY_DESC,
-                D3D11_QUERY_EVENT, D3D11_SDK_VERSION, ID3D11Device, ID3D11DeviceContext,
-                ID3D11Query, ID3D11Texture2D,
+                D3D11_ASYNC_GETDATA_DONOTFLUSH, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                D3D11_CREATE_DEVICE_FLAG, D3D11_QUERY_DESC, D3D11_QUERY_EVENT, D3D11_SDK_VERSION,
+                ID3D11Device, ID3D11DeviceContext, ID3D11Query, ID3D11Texture2D,
             },
             DirectComposition::{IDCompositionDevice, IDCompositionTarget, IDCompositionVisual},
             Dxgi::{
@@ -163,12 +168,24 @@ impl Gpu {
         // SAFETY: valid descriptor, out-pointer to a local.
         unsafe { self.device.CreateQuery(&raw const desc, Some(&raw mut q))? };
         let q = q.ok_or_else(|| missing("query"))?;
-        // SAFETY: a live query; GetData writes a BOOL once the event has passed (and flushes).
+        // One flush, then polls that don't flush again: a flush per poll would compete with WARP's
+        // worker threads for the queue it is draining.
+        // SAFETY: a live query; GetData writes a BOOL (4 bytes) into `done` once the event has passed.
         unsafe {
             self.ctx.End(&q);
+            self.ctx.Flush();
             let mut done = BOOL(0);
-            while done.0 == 0 {
-                self.ctx.GetData(&q, Some((&raw mut done).cast()), 4, 0)?;
+            loop {
+                self.ctx.GetData(
+                    &q,
+                    Some((&raw mut done).cast()),
+                    4,
+                    D3D11_ASYNC_GETDATA_DONOTFLUSH.0 as u32,
+                )?;
+                if done.0 != 0 {
+                    break;
+                }
+                std::thread::yield_now();
             }
         }
         Ok(())
@@ -256,13 +273,22 @@ impl Surface {
 }
 
 /// The ADR-0002 acrylic gate: one recomputation of the in-app acrylic of a `w × h` drawer region
-/// (¼ downsample → Gaussian blur σ 10 at ¼ → upsample → tint) with Direct2D on WARP, against a plain
-/// Direct2D fill of the same region. Medians of `rounds` interleaved runs, in ms, plus the upload
-/// of the software frame that option A would do first.
+/// with Direct2D on WARP, against a plain Direct2D fill of the same region. Medians of `rounds`, in
+/// ms. Every figure but `tuned_batched` ends when WARP has finished the work (an event query), so
+/// `floor` is part of each.
 pub struct AcrylicTimes {
-    pub blur: f64,
+    /// An empty draw and the wait.
+    pub floor: f64,
+    /// A plain fill of the region: the gate's denominator.
     pub fill: f64,
+    /// As specified: ¼ downsample → Gaussian blur σ 10 at ¼ → ×4 upsample → tint at full size.
+    pub graph: f64,
+    /// The tint at ¼ and the blur's speed mode: one full-size pass.
+    pub tuned: f64,
+    /// Uploading the software frame beneath (option A draws in software first).
     pub upload: f64,
+    /// `tuned` with its upload, `rounds` times back to back and one wait: per recomputation.
+    pub tuned_batched: f64,
 }
 
 pub fn acrylic_bench(pixels: &[u8], w: u32, h: u32, rounds: usize) -> Result<AcrylicTimes> {
@@ -315,34 +341,91 @@ pub fn acrylic_bench(pixels: &[u8], w: u32, h: u32, rounds: usize) -> Result<Acr
         dc.SetTarget(&target);
 
         let vec2 = |v: f32| [v.to_le_bytes(), v.to_le_bytes()].concat();
-        let down = dc.CreateEffect(&CLSID_D2D1Scale)?;
-        down.SetInput(0, &source, true);
-        down.SetValue(
-            D2D1_SCALE_PROP_SCALE.0 as u32,
-            D2D1_PROPERTY_TYPE_VECTOR2,
-            &vec2(0.25),
-        )?;
-        let blur = dc.CreateEffect(&CLSID_D2D1GaussianBlur)?;
-        blur.SetInput(0, &down.GetOutput()?, true);
-        blur.SetValue(
-            D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION.0 as u32,
-            D2D1_PROPERTY_TYPE_FLOAT,
-            &10.0_f32.to_le_bytes(),
-        )?;
-        let up = dc.CreateEffect(&CLSID_D2D1Scale)?;
-        up.SetInput(0, &blur.GetOutput()?, true);
-        up.SetValue(
-            D2D1_SCALE_PROP_SCALE.0 as u32,
-            D2D1_PROPERTY_TYPE_VECTOR2,
-            &vec2(4.0),
-        )?;
-        let output = up.GetOutput()?;
+        let choice = |v: i32| v.cast_unsigned().to_le_bytes();
+        // Edges clamp instead of fading to transparent: the region is a crop of a larger frame.
+        let hard = choice(D2D1_BORDER_MODE_HARD.0);
+        let scale = |input: &ID2D1Image, by: f32| -> Result<ID2D1Effect> {
+            let e = dc.CreateEffect(&CLSID_D2D1Scale)?;
+            e.SetInput(0, input, true);
+            e.SetValue(
+                D2D1_SCALE_PROP_SCALE.0 as u32,
+                D2D1_PROPERTY_TYPE_VECTOR2,
+                &vec2(by),
+            )?;
+            e.SetValue(
+                D2D1_SCALE_PROP_BORDER_MODE.0 as u32,
+                D2D1_PROPERTY_TYPE_ENUM,
+                &hard,
+            )?;
+            Ok(e)
+        };
+        let blur =
+            |input: &ID2D1Image, mode: D2D1_GAUSSIANBLUR_OPTIMIZATION| -> Result<ID2D1Effect> {
+                let e = dc.CreateEffect(&CLSID_D2D1GaussianBlur)?;
+                e.SetInput(0, input, true);
+                e.SetValue(
+                    D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION.0 as u32,
+                    D2D1_PROPERTY_TYPE_FLOAT,
+                    &10.0_f32.to_le_bytes(),
+                )?;
+                e.SetValue(
+                    D2D1_GAUSSIANBLUR_PROP_OPTIMIZATION.0 as u32,
+                    D2D1_PROPERTY_TYPE_ENUM,
+                    &choice(mode.0),
+                )?;
+                e.SetValue(
+                    D2D1_GAUSSIANBLUR_PROP_BORDER_MODE.0 as u32,
+                    D2D1_PROPERTY_TYPE_ENUM,
+                    &hard,
+                )?;
+                Ok(e)
+            };
         // The drawer's light tint (F9FAFD at 189/255), as in the software path.
+        let unit = |v: u8| f32::from(v) / 255.0;
+        let (tr, tg, tb, ta) = (unit(0xF9), unit(0xFA), unit(0xFD), unit(189));
+
+        // Every effect stays bound: the graph lives as long as its nodes do.
+        let down = scale(&source.cast()?, 0.25)?;
+        let quarter = down.GetOutput()?;
+        // As specified: ¼ downsample → blur σ 10 at ¼ (balanced) → ×4 upsample, then the tint drawn
+        // over it at full size.
+        let spec_blur = blur(&quarter, D2D1_GAUSSIANBLUR_OPTIMIZATION_BALANCED)?;
+        let spec_up = scale(&spec_blur.GetOutput()?, 4.0)?;
+        let spec = spec_up.GetOutput()?;
+        // Tuned: the tint applied at ¼ (source-over in premultiplied space is linear, so it commutes
+        // with the bilinear upsample) and the blur's speed mode: one full-size pass instead of two.
+        let fast_blur = blur(&quarter, D2D1_GAUSSIANBLUR_OPTIMIZATION_SPEED)?;
+        let tinted = dc.CreateEffect(&CLSID_D2D1ColorMatrix)?;
+        tinted.SetInput(0, &fast_blur.GetOutput()?, true);
+        let k = 1.0 - ta;
+        // Rows are the inputs (r, g, b, a, 1), columns the outputs (r, g, b, a).
+        #[rustfmt::skip]
+        let matrix: [f32; 20] = [
+            k,       0.0,     0.0,     0.0,
+            0.0,     k,       0.0,     0.0,
+            0.0,     0.0,     k,       0.0,
+            0.0,     0.0,     0.0,     k,
+            tr * ta, tg * ta, tb * ta, ta,
+        ];
+        let matrix: Vec<u8> = matrix.iter().flat_map(|v| v.to_le_bytes()).collect();
+        tinted.SetValue(
+            D2D1_COLORMATRIX_PROP_COLOR_MATRIX.0 as u32,
+            D2D1_PROPERTY_TYPE_MATRIX_5X4,
+            &matrix,
+        )?;
+        tinted.SetValue(
+            D2D1_COLORMATRIX_PROP_ALPHA_MODE.0 as u32,
+            D2D1_PROPERTY_TYPE_ENUM,
+            &choice(D2D1_COLORMATRIX_ALPHA_MODE_PREMULTIPLIED.0),
+        )?;
+        let tuned_up = scale(&tinted.GetOutput()?, 4.0)?;
+        let tuned = tuned_up.GetOutput()?;
+
         let tint_color = D2D1_COLOR_F {
-            r: 0.976,
-            g: 0.98,
-            b: 0.992,
-            a: 0.741,
+            r: tr,
+            g: tg,
+            b: tb,
+            a: ta,
         };
         let solid_color = D2D1_COLOR_F {
             r: 1.0,
@@ -359,45 +442,73 @@ pub fn acrylic_bench(pixels: &[u8], w: u32, h: u32, rounds: usize) -> Result<Acr
             bottom: h as f32,
         };
 
-        let time = |f: &dyn Fn() -> Result<()>| -> Result<f64> {
-            let t = Instant::now();
-            f()?;
-            gpu.finish()?;
-            Ok(t.elapsed().as_secs_f64() * 1e3)
-        };
-        let acrylic = || -> Result<()> {
+        let draw = |f: &dyn Fn()| -> Result<()> {
             dc.BeginDraw();
+            f();
+            dc.EndDraw(None, None)
+        };
+        let copy = |image: &ID2D1Image| {
             dc.DrawImage(
-                &output,
+                image,
                 None,
                 None,
                 D2D1_INTERPOLATION_MODE_LINEAR,
                 D2D1_COMPOSITE_MODE_SOURCE_COPY,
             );
-            dc.FillRectangle(&raw const rect, &tint);
-            dc.EndDraw(None, None)
         };
-        let fill = || -> Result<()> {
-            dc.BeginDraw();
-            dc.FillRectangle(&raw const rect, &solid);
-            dc.EndDraw(None, None)
+        let draw_empty = || draw(&|| {});
+        let draw_fill = || draw(&|| dc.FillRectangle(&raw const rect, &solid));
+        let draw_spec = || {
+            draw(&|| {
+                copy(&spec);
+                dc.FillRectangle(&raw const rect, &tint);
+            })
         };
+        let draw_tuned = || draw(&|| copy(&tuned));
         let upload = || source.CopyFromMemory(None, pixels.as_ptr().cast(), w * 4);
-        for _ in 0..3 {
-            time(&acrylic)?;
-            time(&fill)?;
-        }
-        let (mut a, mut f, mut u) = (Vec::new(), Vec::new(), Vec::new());
+        let timed = |f: &dyn Fn() -> Result<()>| -> Result<f64> {
+            let t = Instant::now();
+            f()?;
+            gpu.finish()?;
+            Ok(t.elapsed().as_secs_f64() * 1e3)
+        };
+        // Each kind in a block of its own after 3 warm-ups, so that none waits out another's work.
+        // An acrylic round starts from a fresh upload (untimed): its input has changed, as when the
+        // content beneath scrolls.
+        let block = |f: &dyn Fn() -> Result<()>, fresh: bool| -> Result<f64> {
+            let mut v = Vec::with_capacity(rounds);
+            for i in 0..rounds + 3 {
+                if fresh {
+                    upload()?;
+                    gpu.finish()?;
+                }
+                let t = timed(f)?;
+                if i >= 3 {
+                    v.push(t);
+                }
+            }
+            Ok(scene::stats::median(&mut v).unwrap_or(f64::NAN))
+        };
+        let floor = block(&draw_empty, false)?;
+        let fill = block(&draw_fill, false)?;
+        let graph = block(&draw_spec, true)?;
+        let tuned_ms = block(&draw_tuned, true)?;
+        let upload_ms = block(&upload, false)?;
+        // Throughput: `rounds` recomputations back to back, each after its upload, then one wait.
+        let t = Instant::now();
         for _ in 0..rounds {
-            a.push(time(&acrylic)?);
-            f.push(time(&fill)?);
-            u.push(time(&upload)?);
+            upload()?;
+            draw_tuned()?;
         }
-        let med = |v: &mut Vec<f64>| scene::stats::median(v).unwrap_or(f64::NAN);
+        gpu.finish()?;
+        let batched = t.elapsed().as_secs_f64() * 1e3 / rounds as f64;
         Ok(AcrylicTimes {
-            blur: med(&mut a),
-            fill: med(&mut f),
-            upload: med(&mut u),
+            floor,
+            fill,
+            graph,
+            tuned: tuned_ms,
+            upload: upload_ms,
+            tuned_batched: batched,
         })
     }
 }

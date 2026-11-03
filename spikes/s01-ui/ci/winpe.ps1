@@ -133,10 +133,12 @@ try {
 
     $fonts = @(Get-ChildItem (Join-Path $mount 'Windows\Fonts') -File | ForEach-Object { $_.Name.ToLowerInvariant() } | Sort-Object)
     $wanted = [ordered]@{
-        'Segoe UI' = 'segoeui.ttf'; 'Tahoma' = 'tahoma.ttf'; 'Arial' = 'arial.ttf'
+        'Segoe UI Regular' = 'segoeui.ttf'; 'Tahoma' = 'tahoma.ttf'; 'Arial' = 'arial.ttf'
         'Cascadia Mono' = 'cascadiamono.ttf'; 'Consolas' = 'consola.ttf'; 'Courier New' = 'cour.ttf'
     }
     $lines += "fonts ($($fonts.Count) files): $(($wanted.Keys | ForEach-Object { "$_ $(if ($fonts -contains $wanted[$_]) { 'yes' } else { 'no' })" }) -join ', ')"
+    # The family's other faces: DirectWrite matches a missing weight to the nearest one it has.
+    $lines += "  Segoe UI faces: $((@($fonts | Where-Object { $_ -match '^seg(oeui|ui)' }) -join ', '))"
     $lines += "  all: $($fonts -join ', ')"
 } finally {
     dism /English /Unmount-Image "/MountDir:$mount" /Discard | Out-Host

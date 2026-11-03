@@ -164,13 +164,23 @@ pub fn acrylic_bench(rounds: usize) -> Result<()> {
     let mut bgra = vec![0; (W * H * 4) as usize];
     region.to_bgra(&mut bgra);
     match crate::gpu::acrylic_bench(&bgra, W, H, rounds) {
-        Ok(t) => println!(
-            "acrylic d2d-warp {W}x{H}: {:.3} ms; plain fill {:.3} ms; ratio {:.2}; upload {:.3} ms; rounds {rounds}",
-            t.blur,
-            t.fill,
-            t.blur / t.fill,
-            t.upload
-        ),
+        Ok(t) => {
+            println!(
+                "acrylic d2d-warp {W}x{H}, as specified: {:.3} ms; ratio {:.2} to a plain fill",
+                t.graph,
+                t.graph / t.fill
+            );
+            println!(
+                "acrylic d2d-warp {W}x{H}, tuned: {:.3} ms; ratio {:.2}; back to back {:.3} ms each (upload included)",
+                t.tuned,
+                t.tuned / t.fill,
+                t.tuned_batched
+            );
+            println!(
+                "acrylic d2d-warp {W}x{H}: plain fill {:.3} ms; empty draw {:.3} ms (the wait, in every figure); upload {:.3} ms; rounds {rounds}",
+                t.fill, t.floor, t.upload
+            );
+        }
         Err(e) => println!("acrylic d2d-warp: unavailable ({e})"),
     }
     Ok(())
