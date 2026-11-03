@@ -1,0 +1,38 @@
+# Throwaway first pass of spike S-01 (roadmap 1.6, ADR-0002): which UI DLLs base WinPE ships, and
+# whether the hosted runner has a desktop for the G1 gates. Lives on diag/s01* only.
+name: s01-facts
+
+on:
+  push:
+    branches: ["diag/s01*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  facts:
+    runs-on: windows-2025
+    timeout-minutes: 60
+    env:
+      # The same ADK as ci.yml's adk-headers job, whose cache this reads.
+      ADK_VERSION: 10.1.26100.9457
+      ADK_URL: https://go.microsoft.com/fwlink/?linkid=2289980
+      WINPE_URL: https://go.microsoft.com/fwlink/?linkid=2289981
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: winpe
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: winpe-files
+          key: winpe-files-${{ env.ADK_VERSION }}
+      - name: WinPE file lists (cache miss only)
+        if: steps.winpe.outputs.cache-hit != 'true'
+        run: ./.github/scripts/adk.ps1 -WinPE winpe-files
+      - name: facts
+        run: ./.github/scripts/s01-facts.ps1 -WinPE winpe-files
