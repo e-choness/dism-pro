@@ -382,6 +382,8 @@ pub struct UsnRecord {
     pub frn: u64,
     pub parent: u64,
     pub usn: i64,
+    /// System time (FILETIME) of the change.
+    pub time: u64,
     pub reason: u32,
     pub name: String,
 }
@@ -420,6 +422,7 @@ pub fn parse_usn(buf: &[u8]) -> (i64, Vec<UsnRecord>) {
                 frn: u64_at(rec, 8).unwrap_or(0),
                 parent: u64_at(rec, 16).unwrap_or(0),
                 usn: u64_at(rec, 24).unwrap_or(0) as i64,
+                time: u64_at(rec, 32).unwrap_or(0),
                 reason: u32_at(rec, 40).unwrap_or(0),
                 name: String::from_utf16_lossy(&units),
             });
@@ -436,6 +439,8 @@ pub struct UsnFile {
     pub parent: u64,
     pub name: String,
     pub reasons: u32,
+    /// System time (FILETIME) of its first record in the delta.
+    pub first: u64,
 }
 
 pub fn merge_usn(records: &[UsnRecord]) -> Vec<UsnFile> {
@@ -446,7 +451,9 @@ pub fn merge_usn(records: &[UsnRecord]) -> Vec<UsnFile> {
             parent: r.parent,
             name: r.name.clone(),
             reasons: 0,
+            first: r.time,
         });
+        f.first = f.first.min(r.time);
         f.parent = r.parent;
         f.name.clone_from(&r.name);
         f.reasons |= r.reason;
@@ -641,6 +648,7 @@ mod tests {
         r[8..16].copy_from_slice(&frn.to_le_bytes());
         r[16..24].copy_from_slice(&parent.to_le_bytes());
         r[24..32].copy_from_slice(&usn.to_le_bytes());
+        r[32..40].copy_from_slice(&(usn * 10).to_le_bytes());
         r[40..44].copy_from_slice(&reason.to_le_bytes());
         r[56..58].copy_from_slice(&(name.len() as u16).to_le_bytes());
         r[58..60].copy_from_slice(&60u16.to_le_bytes());
@@ -663,6 +671,7 @@ mod tests {
                 frn: 1,
                 parent: 6,
                 usn: 200,
+                time: 2000,
                 reason: 0x2000,
                 name: "a.bin".into()
             }
@@ -670,8 +679,13 @@ mod tests {
         let files = merge_usn(&recs);
         assert_eq!(files.len(), 2);
         assert_eq!(
-            (files[0].parent, files[0].name.as_str(), files[0].reasons),
-            (6, "a.bin", 0x2100)
+            (
+                files[0].parent,
+                files[0].name.as_str(),
+                files[0].reasons,
+                files[0].first
+            ),
+            (6, "a.bin", 0x2100, 1000)
         );
         // A truncated buffer stops cleanly.
         assert_eq!(parse_usn(&buf[..buf.len() - 4]).1.len(), 2);

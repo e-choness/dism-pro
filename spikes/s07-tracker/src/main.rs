@@ -8,6 +8,7 @@
 //!   tracker bench fake|msi [--runs R] [--modes none,lean,full] [installer options]
 //!   tracker check fake|msi [--profile lean|full] [installer options]
 //!   tracker loss fake|msi [--profile lean|full] [--runs R] [installer options]
+//!   tracker anatomy msi [--runs R] [installer options]
 //!   tracker fake-install|fake-child|fake-uninstall [installer options]
 //!
 //! Installer options: `--files N --keys K` (what it writes), `--root DIR` (where; default
@@ -126,6 +127,7 @@ fn platform(a: &Args) -> Result<String> {
         max: a.max_buffers,
         flush: a.flush,
         etl: a.etl,
+        per_cpu: true,
     };
     let program_files =
         std::env::var("ProgramFiles").unwrap_or_else(|_| r"C:\Program Files".into());
@@ -181,6 +183,7 @@ fn platform(a: &Args) -> Result<String> {
             let profile = Profile::parse(&a.profile)?.ok_or("loss needs --profile lean|full")?;
             win::loss(&installer(&a.target)?, a.runs, profile)
         }
+        "anatomy" => win::anatomy(&installer(&a.target)?, a.runs),
         other => Err(format!("unknown command {other}")),
     }
 }

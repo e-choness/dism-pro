@@ -12,6 +12,8 @@ failure is reported.
                    writer running in another process
   -Step Msi        bench + check of the MSI (the Windows Installer service writes), same noise
   -Step Loss       the MSI under several session settings: when events go missing, what stops it
+  -Step Anatomy    the MSI's lost events placed in time (USN order, per-CPU timeline) under a launch
+                   delay, one buffer set, two sessions at once and a cold Windows Installer service
   -Step Container  tracker probe and a short fake bench inside a servercore container
 #>
 param([Parameter(Mandatory)] [string] $Step)
@@ -161,6 +163,16 @@ switch ($Step) {
             $common = @('loss', 'msi', '--msi', $msi, '--files', '1000', '--keys', '50', '--runs', '3')
             Publish-Tracker 'loss lean' ($common + @('--profile', 'lean'))
             Publish-Tracker 'loss full' ($common + @('--profile', 'full'))
+        } finally { Stop-Noise $noise }
+    }
+    'Anatomy' {
+        if (-not (Test-Path $msi)) {
+            Publish 'anatomy' "no MSI at $msi (see the setup step)" -Failed
+            break
+        }
+        $noise = Start-Noise
+        try {
+            Publish-Tracker 'anatomy' @('anatomy', 'msi', '--msi', $msi, '--files', '1000', '--keys', '50', '--runs', '2')
         } finally { Stop-Noise $noise }
     }
     'Container' {

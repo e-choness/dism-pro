@@ -49,6 +49,8 @@ jobs:
         shell: pwsh
     env:
       TRACKER: dist-s07/tracker.exe
+      # The steps this push runs (setup always runs). All: Probe,Fake,Msi,Loss,Anatomy,Container.
+      S07_STEPS: Anatomy
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -60,17 +62,20 @@ jobs:
       - name: setup (facts, test MSI)
         run: ./.github/scripts/spike-s07.ps1 -Step Setup
       - name: probe
-        if: always()
+        if: always() && contains(env.S07_STEPS, 'Probe')
         run: ./.github/scripts/spike-s07.ps1 -Step Probe
       - name: fake installer
-        if: always()
+        if: always() && contains(env.S07_STEPS, 'Fake')
         run: ./.github/scripts/spike-s07.ps1 -Step Fake
       - name: MSI
-        if: always()
+        if: always() && contains(env.S07_STEPS, 'Msi')
         run: ./.github/scripts/spike-s07.ps1 -Step Msi
       - name: event loss by session settings
-        if: always()
+        if: always() && contains(env.S07_STEPS, 'Loss')
         run: ./.github/scripts/spike-s07.ps1 -Step Loss
+      - name: where MSI events go missing
+        if: always() && contains(env.S07_STEPS, 'Anatomy')
+        run: ./.github/scripts/spike-s07.ps1 -Step Anatomy
       - name: servercore container
-        if: always()
+        if: always() && contains(env.S07_STEPS, 'Container')
         run: ./.github/scripts/spike-s07.ps1 -Step Container

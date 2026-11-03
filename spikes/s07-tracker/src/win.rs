@@ -44,12 +44,13 @@ use windows_sys::{
                     EVENT_PROPERTY_INFO, EVENT_RECORD, EVENT_TRACE_CONTROL_QUERY,
                     EVENT_TRACE_CONTROL_STOP, EVENT_TRACE_FILE_MODE_SEQUENTIAL,
                     EVENT_TRACE_LOGFILEW, EVENT_TRACE_LOGFILEW_0, EVENT_TRACE_LOGFILEW_1,
-                    EVENT_TRACE_PROPERTIES, EVENT_TRACE_REAL_TIME_MODE, EnableTraceEx2,
-                    EventKeywordInformation, OpenTraceW, PROCESS_TRACE_MODE_EVENT_RECORD,
-                    PROCESS_TRACE_MODE_RAW_TIMESTAMP, PROCESS_TRACE_MODE_REAL_TIME,
-                    PROVIDER_FIELD_INFO, PROVIDER_FIELD_INFOARRAY, ProcessTrace, StartTraceW,
-                    TRACE_EVENT_INFO, TRACE_LEVEL_VERBOSE, TdhEnumerateProviderFieldInformation,
-                    TdhGetEventInformation, WNODE_FLAG_TRACED_GUID,
+                    EVENT_TRACE_NO_PER_PROCESSOR_BUFFERING, EVENT_TRACE_PROPERTIES,
+                    EVENT_TRACE_REAL_TIME_MODE, EnableTraceEx2, EventKeywordInformation,
+                    OpenTraceW, PROCESS_TRACE_MODE_EVENT_RECORD, PROCESS_TRACE_MODE_RAW_TIMESTAMP,
+                    PROCESS_TRACE_MODE_REAL_TIME, PROVIDER_FIELD_INFO, PROVIDER_FIELD_INFOARRAY,
+                    ProcessTrace, StartTraceW, TRACE_EVENT_INFO, TRACE_LEVEL_VERBOSE,
+                    TdhEnumerateProviderFieldInformation, TdhGetEventInformation,
+                    WNODE_FLAG_TRACED_GUID,
                 },
                 ToolHelp::{
                     CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
@@ -73,6 +74,7 @@ use windows_sys::{
                 REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegDeleteValueW,
                 RegEnumKeyExW, RegOpenKeyExW, RegQueryInfoKeyW, RegSetValueExW,
             },
+            SystemInformation::GetSystemTimePreciseAsFileTime,
             SystemServices::{JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO, JOB_OBJECT_MSG_NEW_PROCESS},
             Threading::{
                 CREATE_NO_WINDOW, CREATE_SUSPENDED, CreateProcessW, GetCurrentProcess,
@@ -149,6 +151,14 @@ pub fn qpc() -> i64 {
     v
 }
 
+/// System time now (FILETIME: 100 ns since 1601), the clock USN records carry.
+fn system_time() -> u64 {
+    let mut ft = FILETIME::default();
+    // SAFETY: valid out pointer.
+    unsafe { GetSystemTimePreciseAsFileTime(&raw mut ft) };
+    filetime(ft)
+}
+
 /// QPC ticks → milliseconds.
 fn ms(ticks: i64) -> f64 {
     static FREQUENCY: OnceLock<i64> = OnceLock::new();
@@ -216,8 +226,11 @@ fn median(v: &mut [f64]) -> f64 {
 // ETW session and consumer
 
 const SESSION: &str = "dpro-s07";
+/// A second, identical session (`anatomy`): do two sessions lose the same events?
+const TWIN: &str = "dpro-s07-twin";
 const INVALID_PROCESSTRACE: u64 = u64::MAX;
 const MAX_OPS: usize = 2_000_000;
+const MAX_RAW: usize = 2_000_000;
 const SAMPLES: usize = 2;
 
 const fn guid(data1: u32, data2: u16, data3: u16, data4: [u8; 8]) -> GUID {
@@ -376,6 +389,24 @@ impl Decoder {
     }
 }
 
+/// One wanted event as it arrived (`anatomy`): when, from whom, on which CPU.
+#[derive(Clone, Copy, Debug)]
+pub struct Raw {
+    pub t: i64,
+    pub pid: u32,
+    pub cpu: u16,
+    pub source: Source,
+}
+
+/// Bits of [`Collector::names`]: which event kinds named a path.
+const NAMED_BY: [(u8, &str); 5] = [
+    (1, "NameCreate"),
+    (2, "Create"),
+    (4, "CreateNewFile"),
+    (8, "Write"),
+    (16, "delete/rename/link"),
+];
+
 /// Everything the consumer learned. Owned by the consumer thread while the trace runs.
 pub struct Collector {
     own_pid: u32,
@@ -397,10 +428,14 @@ pub struct Collector {
     pub unresolved_writes: HashMap<u32, u64>,
     pub procs: HashMap<u32, Proc>,
     pub tdh_failures: u64,
+    /// `anatomy` only: every wanted event, and per installer path (lowercase, `\S07…`) the
+    /// [`NAMED_BY`] bits of the events that named it.
+    pub raw: Option<Vec<Raw>>,
+    pub names: HashMap<String, u8>,
 }
 
 impl Collector {
-    fn new(ready: Arc<AtomicBool>, keep_samples: bool) -> Self {
+    fn new(ready: Arc<AtomicBool>, keep_samples: bool, raw: bool) -> Self {
         Self {
             // SAFETY: no preconditions.
             own_pid: unsafe { GetCurrentProcessId() },
@@ -420,6 +455,17 @@ impl Collector {
             unresolved_writes: HashMap::new(),
             procs: HashMap::new(),
             tdh_failures: 0,
+            raw: raw.then(Vec::new),
+            names: HashMap::new(),
+        }
+    }
+
+    fn mark(&mut self, path: &str, bit: u8) {
+        if self.raw.is_some() {
+            let path = path.to_lowercase();
+            if path.contains(r"\s07") {
+                *self.names.entry(path).or_default() |= bit;
+            }
         }
     }
 
@@ -443,6 +489,18 @@ impl Collector {
         // Process starts of our own children are logged in our context: keep those.
         if !wanted || (pid == self.own_pid && source != Source::Process) {
             return;
+        }
+        if let Some(raw) = &mut self.raw
+            && raw.len() < MAX_RAW
+        {
+            // SAFETY: both views of the union are plain integers; ProcessorIndex is the wide one.
+            let cpu = unsafe { r.BufferContext.Anonymous.ProcessorIndex };
+            raw.push(Raw {
+                t: h.TimeStamp,
+                pid,
+                cpu,
+                source,
+            });
         }
         let key = (source, id, h.EventDescriptor.Version);
         if !self.decoders.contains_key(&key) {
@@ -493,19 +551,22 @@ impl Collector {
         let int = |i: Option<usize>| i.and_then(|i| v.get(i)?.as_ref()?.int());
         match (source, id) {
             (Source::File, 10) => {
+                let path = self.dos(text(f.file_name));
+                self.mark(&path, 1);
                 if let Some(k) = int(f.file_key) {
-                    let path = self.dos(text(f.file_name));
                     self.file_keys.insert(k, path);
                 }
             }
             (Source::File, 12) => {
+                let path = self.dos(text(f.file_name));
+                self.mark(&path, 2);
                 if let Some(o) = int(f.file_object) {
-                    let path = self.dos(text(f.file_name));
                     self.file_objects.insert(o, path);
                 }
             }
             (Source::File, 30) => {
                 let path = self.dos(text(f.file_name));
+                self.mark(&path, 4);
                 if let Some(o) = int(f.file_object) {
                     self.file_objects.insert(o, path.clone());
                 }
@@ -517,7 +578,10 @@ impl Collector {
                     .or_else(|| int(f.file_key).and_then(|k| self.file_keys.get(&k)))
                     .cloned();
                 match path {
-                    Some(p) => self.op(pid, Kind::FileWrite, p, String::new(), t),
+                    Some(p) => {
+                        self.mark(&p, 8);
+                        self.op(pid, Kind::FileWrite, p, String::new(), t);
+                    }
                     None => *self.unresolved_writes.entry(pid).or_default() += 1,
                 }
             }
@@ -528,6 +592,7 @@ impl Collector {
                     _ => Kind::FileLink,
                 };
                 let path = self.dos(text(f.file_path));
+                self.mark(&path, 16);
                 self.op(pid, kind, path, String::new(), t);
             }
             (Source::Registry, 1 | 2) => {
@@ -746,8 +811,8 @@ fn properties() -> Box<Properties> {
     b
 }
 
-fn stop_by_name() {
-    let name = wide(SESSION);
+fn stop_by_name(session: &str) {
+    let name = wide(session);
     let mut props = properties();
     // SAFETY: stopping by name (null handle); `props` is a sized properties buffer. A missing
     // session is fine.
@@ -777,6 +842,8 @@ pub struct Tuning {
     pub flush: u32,
     /// Log to an ETL file and decode it after the install, instead of consuming in real time.
     pub etl: bool,
+    /// Per-CPU buffers (the default); false sets `EVENT_TRACE_NO_PER_PROCESSOR_BUFFERING`.
+    pub per_cpu: bool,
 }
 
 impl Tuning {
@@ -786,16 +853,18 @@ impl Tuning {
         max: 1024,
         flush: 1,
         etl: false,
+        per_cpu: true,
     };
 
     fn label(self) -> String {
         format!(
-            "{} {} KiB × {}..{}, flush {} s",
+            "{} {} KiB × {}..{}, flush {} s{}",
             if self.etl { "etl" } else { "real-time" },
             self.buffer_kb,
             self.min,
             self.max,
-            self.flush
+            self.flush,
+            if self.per_cpu { "" } else { ", one buffer set" }
         )
     }
 }
@@ -869,6 +938,7 @@ struct Consumed {
 }
 
 pub struct Session {
+    name: &'static str,
     handle: CONTROLTRACE_HANDLE,
     consumer: Option<JoinHandle<Result<Consumed>>>,
     sampler: Option<Sampler>,
@@ -877,9 +947,16 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn start(profile: Profile, samples: bool, tuning: Tuning) -> Result<Self> {
-        stop_by_name();
-        let name = wide(SESSION);
+    /// `raw`: keep every wanted event and the names of installer paths (`anatomy`).
+    pub fn start(
+        session: &'static str,
+        profile: Profile,
+        samples: bool,
+        raw: bool,
+        tuning: Tuning,
+    ) -> Result<Self> {
+        stop_by_name(session);
+        let name = wide(session);
         let mut props = properties();
         props.p.BufferSize = tuning.buffer_kb;
         props.p.MinimumBuffers = tuning.min;
@@ -888,7 +965,7 @@ impl Session {
         props.p.LogFileMode = EVENT_TRACE_REAL_TIME_MODE;
         let etl = tuning
             .etl
-            .then(|| std::env::temp_dir().join("dpro-s07.etl"));
+            .then(|| std::env::temp_dir().join(format!("{session}.etl")));
         if let Some(path) = &etl {
             let file = wide(&path.display().to_string());
             if file.len() > props.file.len() {
@@ -897,6 +974,9 @@ impl Session {
             props.file[..file.len()].copy_from_slice(&file);
             props.p.LogFileMode = EVENT_TRACE_FILE_MODE_SEQUENTIAL;
             props.p.LogFileNameOffset = offset_of!(Properties, file) as u32;
+        }
+        if !tuning.per_cpu {
+            props.p.LogFileMode |= EVENT_TRACE_NO_PER_PROCESSOR_BUFFERING;
         }
         let mut handle = CONTROLTRACE_HANDLE::default();
         // SAFETY: NUL-terminated name; `props` is sized and initialized as StartTraceW requires.
@@ -912,6 +992,7 @@ impl Session {
             ));
         }
         let mut session = Self {
+            name: session,
             handle,
             consumer: None,
             sampler: None,
@@ -936,11 +1017,12 @@ impl Session {
             }
         }
         let ready = Arc::new(AtomicBool::new(false));
-        let collector = Box::new(Collector::new(Arc::clone(&ready), samples));
+        let collector = Box::new(Collector::new(Arc::clone(&ready), samples, raw));
         if let Some(path) = etl {
             session.etl = Some((path, collector));
         } else {
-            session.consumer = Some(thread::spawn(move || consume(collector, None)));
+            let name = session.name;
+            session.consumer = Some(thread::spawn(move || consume(collector, None, name)));
             // System-wide providers are never quiet for long: the first event means we're
             // consuming.
             let t = Instant::now();
@@ -971,8 +1053,9 @@ impl Session {
             buffers_written: props.p.BuffersWritten,
         };
         let etl_path = self.etl.as_ref().map(|(path, _)| path.clone());
+        let name = self.name;
         let thread = match self.etl.take() {
-            Some((path, collector)) => thread::spawn(move || consume(collector, Some(&path))),
+            Some((path, collector)) => thread::spawn(move || consume(collector, Some(&path), name)),
             None => self.consumer.take().ok_or("no consumer thread")?,
         };
         let consumed = thread
@@ -1015,8 +1098,12 @@ impl Drop for Session {
 }
 
 /// Consumes the live session, or the ETL file when one is given.
-fn consume(mut collector: Box<Collector>, etl: Option<&Path>) -> Result<Consumed> {
-    let mut name = wide(SESSION);
+fn consume(
+    mut collector: Box<Collector>,
+    etl: Option<&Path>,
+    session: &'static str,
+) -> Result<Consumed> {
+    let mut name = wide(session);
     let mut file = etl.map(|p| wide(&p.display().to_string()));
     let mode = PROCESS_TRACE_MODE_EVENT_RECORD | PROCESS_TRACE_MODE_RAW_TIMESTAMP;
     let mut log = EVENT_TRACE_LOGFILEW {
@@ -1409,6 +1496,8 @@ struct UsnSource {
 pub struct UsnDelta {
     /// (path, merged reasons) per file or folder changed.
     pub files: Vec<(String, u32)>,
+    /// Lowercase path → system time (FILETIME) of its first record.
+    pub first: HashMap<String, u64>,
     pub records: usize,
     pub unresolved: usize,
     pub read_ms: f64,
@@ -1523,7 +1612,7 @@ impl UsnSource {
         let ((files, unresolved), resolve_ms) = timed(|| {
             let mut dirs: HashMap<u64, Option<String>> = HashMap::new();
             let mut unresolved = 0;
-            let files = merged
+            let files: Vec<(String, u32, u64)> = merged
                 .iter()
                 .map(|f| {
                     let dir = dirs
@@ -1535,13 +1624,18 @@ impl UsnSource {
                         unresolved += 1;
                         format!(r"<dir {:#x}>\{}", f.parent, f.name)
                     };
-                    (path, f.reasons)
+                    (path, f.reasons, f.first)
                 })
                 .collect();
             (files, unresolved)
         });
+        let first = files
+            .iter()
+            .map(|(path, _, t)| (path.to_lowercase(), *t))
+            .collect();
         Ok(UsnDelta {
-            files,
+            files: files.into_iter().map(|(p, r, _)| (p, r)).collect(),
+            first,
             records: records.len(),
             unresolved,
             read_ms,
@@ -1776,6 +1870,11 @@ pub struct RegChange {
 // ---------------------------------------------------------------------------------------------
 // Tracking one install
 
+#[derive(Clone, Copy, Debug)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent switches of a measurement"
+)]
 pub struct Options {
     pub profile: Option<Profile>,
     pub usn: bool,
@@ -1784,6 +1883,29 @@ pub struct Options {
     pub samples: bool,
     pub settle: Duration,
     pub tuning: Tuning,
+    /// Wait between the session being ready and the launch.
+    pub delay: Duration,
+    /// Run a second, identical session alongside (`anatomy`).
+    pub twin: bool,
+    /// Keep every wanted event (`anatomy`).
+    pub raw: bool,
+}
+
+impl Options {
+    /// No tracing at all: the untraced baseline and warm-up.
+    const fn plain(tuning: Tuning) -> Self {
+        Self {
+            profile: None,
+            usn: false,
+            registry: false,
+            samples: false,
+            settle: Duration::ZERO,
+            tuning,
+            delay: Duration::ZERO,
+            twin: false,
+            raw: false,
+        }
+    }
 }
 
 pub struct Etw {
@@ -1802,9 +1924,19 @@ pub struct Trace {
     pub reg: Option<RegChange>,
     /// msiexec processes already running at launch (the service), pid → process.
     pub msiexec_before: HashMap<u32, Proc>,
+    /// The twin session, when `Options::twin`.
+    pub twin: Option<Etw>,
+    /// One moment read on both clocks, QPC and system time: places USN times on the trace.
+    pub clock: (i64, u64),
 }
 
 impl Trace {
+    /// A system time (FILETIME) in ms from launch.
+    fn system_ms(&self, ft: u64) -> f64 {
+        let (q, s) = self.clock;
+        (ft as f64 - s as f64) / 10_000.0 + ms(q - self.launch.start)
+    }
+
     pub fn install_ms(&self) -> f64 {
         ms(self.launch.empty - self.launch.start)
     }
@@ -1849,31 +1981,39 @@ pub fn track(command: &str, opt: &Options) -> Result<Trace> {
         .into_iter()
         .filter(|(_, p)| model::is_msiexec(&p.image))
         .collect();
-    let session = match opt.profile {
-        Some(p) => {
-            let (s, start_ms) = timed(|| Session::start(p, opt.samples, opt.tuning));
-            Some((s?, start_ms))
-        }
-        None => None,
+    let start = |name| {
+        opt.profile
+            .map(|p| {
+                let (s, start_ms) =
+                    timed(|| Session::start(name, p, opt.samples, opt.raw, opt.tuning));
+                s.map(|s| (s, start_ms))
+            })
+            .transpose()
     };
+    let session = start(SESSION)?;
+    let twin = if opt.twin { start(TWIN)? } else { None };
+    thread::sleep(opt.delay);
     let watch = MutexWatch::start();
+    let clock = (qpc(), system_time());
     let launch = run_in_job(command, Duration::from_mins(15))?;
     // Windows Installer may still be finishing in its service after the client exits.
     wait_msi_idle(Duration::from_secs(120));
     thread::sleep(opt.settle);
-    let etw = match session {
-        Some((s, start_ms)) => {
-            let stopped = s.stop()?;
-            Some(Etw {
-                collector: stopped.collector,
-                stats: stopped.stats,
-                cpu_ms: stopped.cpu_ms,
-                start_ms,
-                timeline: stopped.timeline,
+    let finish = |session: Option<(Session, f64)>| -> Result<Option<Etw>> {
+        session
+            .map(|(s, start_ms)| {
+                s.stop().map(|stopped| Etw {
+                    collector: stopped.collector,
+                    stats: stopped.stats,
+                    cpu_ms: stopped.cpu_ms,
+                    start_ms,
+                    timeline: stopped.timeline,
+                })
             })
-        }
-        None => None,
+            .transpose()
     };
+    let etw = finish(session)?;
+    let twin = finish(twin)?;
     let mutex = watch.finish();
     let usn = usn.map(|u| u.delta()).transpose()?;
     let reg = reg_before.map(|((before, denied), before_ms)| {
@@ -1894,6 +2034,8 @@ pub fn track(command: &str, opt: &Options) -> Result<Trace> {
         usn,
         reg,
         msiexec_before,
+        twin,
+        clock,
     })
 }
 
@@ -2145,14 +2287,7 @@ pub fn bench(
     let _ = inst.uninstall();
     let command = inst.command()?;
     let truth = inst.truth();
-    let plain = Options {
-        profile: None,
-        usn: false,
-        registry: false,
-        samples: false,
-        settle: Duration::ZERO,
-        tuning,
-    };
+    let plain = Options::plain(tuning);
     // Warm-up, untraced: caches and the msiserver service start the same for every mode.
     let _ = track(&command, &plain)?;
     inst.uninstall()?;
@@ -2162,11 +2297,8 @@ pub fn bench(
             let mode = modes[(round + k) % modes.len()];
             let opt = Options {
                 profile: mode,
-                usn: false,
-                registry: false,
-                samples: false,
                 settle: Duration::from_secs(2),
-                tuning,
+                ..plain
             };
             let trace = track(&command, &opt)?;
             rows.push(row(mode, &trace, &truth));
@@ -2328,14 +2460,7 @@ pub fn loss(inst: &Installer, runs: usize, profile: Profile) -> Result<String> {
     let _ = inst.uninstall();
     let command = inst.command()?;
     let truth = inst.truth();
-    let mut opt = Options {
-        profile: None,
-        usn: false,
-        registry: false,
-        samples: false,
-        settle: Duration::ZERO,
-        tuning: Tuning::DEFAULT,
-    };
+    let mut opt = Options::plain(Tuning::DEFAULT);
     let _ = track(&command, &opt)?;
     inst.uninstall()?;
     opt.profile = Some(profile);
@@ -2397,6 +2522,248 @@ pub fn loss(inst: &Installer, runs: usize, profile: Profile) -> Result<String> {
     Ok(s)
 }
 
+/// Stops the Windows Installer service, so that the next install starts it cold.
+fn stop_msiserver() {
+    // ignore: a service that isn't running is the state we want.
+    let _ = std::process::Command::new("net.exe")
+        .args(["stop", "msiserver"])
+        .output();
+}
+
+/// Where the MSI's events go missing. One install per run under each variant; every truth file
+/// placed on the install's timeline by its USN time; the service's events per CPU over time.
+pub fn anatomy(inst: &Installer, runs: usize) -> Result<String> {
+    let _ = enable_privilege("SeBackupPrivilege");
+    let _ = inst.uninstall();
+    let command = inst.command()?;
+    let truth = inst.truth();
+    let plain = Options::plain(Tuning::DEFAULT);
+    // Warm-up: every variant but the cold one finds the service running.
+    let _ = track(&command, &plain)?;
+    inst.uninstall()?;
+    let traced = Options {
+        profile: Some(Profile::Lean),
+        usn: true,
+        settle: Duration::from_secs(2),
+        raw: true,
+        ..plain
+    };
+    let variants = [
+        ("default session", traced, false),
+        (
+            "launch 5 s after the session is ready",
+            Options {
+                delay: Duration::from_secs(5),
+                ..traced
+            },
+            false,
+        ),
+        (
+            "one buffer set (EVENT_TRACE_NO_PER_PROCESSOR_BUFFERING)",
+            Options {
+                tuning: Tuning {
+                    per_cpu: false,
+                    ..Tuning::DEFAULT
+                },
+                ..traced
+            },
+            false,
+        ),
+        (
+            "two identical sessions",
+            Options {
+                twin: true,
+                ..traced
+            },
+            false,
+        ),
+        (
+            "cold Windows Installer service (stopped before launch)",
+            traced,
+            true,
+        ),
+    ];
+    let mut s = String::new();
+    let _ = writeln!(
+        s,
+        "### Event loss anatomy: {} — profile lean, {runs} run(s) per variant\n",
+        inst.describe()
+    );
+    let _ = writeln!(
+        s,
+        "USN order: truth files sorted by their first USN record (ms from launch), in runs of seen/missed by ETW (any process). Timeline: the Windows Installer service's wanted events per 100 ms, one row per CPU, then everyone else's.\n"
+    );
+    for (label, opt, cold) in variants {
+        for run in 1..=runs {
+            if cold {
+                stop_msiserver();
+            }
+            let trace = track(&command, &opt)?;
+            anatomy_run(&mut s, label, run, &trace, &truth)?;
+            inst.uninstall()?;
+        }
+    }
+    Ok(s)
+}
+
+/// Lowercase truth paths ETW saw any file operation on, by any process.
+fn files_seen(etw: &Etw, truth: &HashSet<String>) -> HashSet<String> {
+    etw.collector
+        .ops
+        .keys()
+        .filter(|op| op.kind.is_file())
+        .map(|op| op.path.to_lowercase())
+        .filter(|p| truth.contains(p))
+        .collect()
+}
+
+fn anatomy_run(
+    s: &mut String,
+    label: &str,
+    run: usize,
+    trace: &Trace,
+    truth: &Truth,
+) -> Result<()> {
+    let etw = trace.etw.as_ref().ok_or("no trace")?;
+    let usn = trace.usn.as_ref().ok_or("no USN delta")?;
+    let all: HashSet<String> = truth.files.iter().map(|f| f.to_lowercase()).collect();
+    let seen = files_seen(etw, &all);
+    let _ = writeln!(
+        s,
+        "#### {label}, run {run}: install {:.0} ms, start {:.0} ms, {} events, lost {}, files seen {}/{}",
+        trace.install_ms(),
+        etw.start_ms,
+        etw.collector.events,
+        etw.stats.events_lost,
+        seen.len(),
+        all.len()
+    );
+    let mut order: Vec<(f64, bool)> = all
+        .iter()
+        .filter_map(|p| Some((trace.system_ms(*usn.first.get(p)?), seen.contains(p))))
+        .collect();
+    order.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut spans: Vec<(bool, usize, f64, f64)> = Vec::new();
+    for (t, hit) in order {
+        match spans.last_mut() {
+            Some(span) if span.0 == hit => {
+                span.1 += 1;
+                span.3 = t;
+            }
+            _ => spans.push((hit, 1, t, t)),
+        }
+    }
+    let shown: Vec<String> = spans
+        .iter()
+        .take(12)
+        .map(|(hit, n, a, b)| {
+            format!(
+                "{} {n} ({a:+.0}..{b:+.0})",
+                if *hit { "seen" } else { "MISSED" }
+            )
+        })
+        .collect();
+    let more = spans.len().saturating_sub(shown.len());
+    let _ = writeln!(
+        s,
+        "- USN order, {} span(s): {}{}",
+        spans.len(),
+        shown.join(" · "),
+        if more > 0 {
+            format!(" · … {more} more")
+        } else {
+            String::new()
+        }
+    );
+    let missed: Vec<&String> = all.iter().filter(|p| !seen.contains(*p)).collect();
+    let named: Vec<String> = NAMED_BY
+        .iter()
+        .map(|(bit, name)| {
+            let n = missed
+                .iter()
+                .filter(|p| etw.collector.names.get(**p).is_some_and(|b| b & bit != 0))
+                .count();
+            format!("{name} {n}")
+        })
+        .collect();
+    let _ = writeln!(
+        s,
+        "- events naming the {} missed files: {}",
+        missed.len(),
+        named.join(", ")
+    );
+    if let Some(twin) = &trace.twin {
+        let seen2 = files_seen(twin, &all);
+        let both = all
+            .iter()
+            .filter(|p| !seen.contains(*p) && !seen2.contains(*p))
+            .count();
+        let _ = writeln!(
+            s,
+            "- twin session: {} events, lost {}, files seen {}/{}; missed by both {both}, by the first only {}, by the twin only {}",
+            twin.collector.events,
+            twin.stats.events_lost,
+            seen2.len(),
+            all.len(),
+            seen2.difference(&seen).count(),
+            seen.difference(&seen2).count()
+        );
+    }
+    timeline(s, trace, etw);
+    let _ = writeln!(s);
+    Ok(())
+}
+
+/// Wanted events per 100 ms from launch: the service's file events, one row per CPU; the
+/// service's registry events; everyone else's.
+fn timeline(s: &mut String, trace: &Trace, etw: &Etw) {
+    let Some(raw) = &etw.collector.raw else {
+        return;
+    };
+    let job = &trace.launch.job_pids;
+    let mut service: Vec<u32> = trace
+        .processes()
+        .iter()
+        .filter(|(pid, p)| model::is_msiexec(&p.image) && !job.contains(pid))
+        .map(|(pid, _)| *pid)
+        .collect();
+    service.sort_unstable();
+    let buckets = (trace.install_ms().max(0.0) / 100.0).ceil() as usize + 1;
+    let cpus = raw
+        .iter()
+        .map(|r| usize::from(r.cpu) + 1)
+        .max()
+        .unwrap_or(1)
+        .min(64);
+    // Rows: file events of the service on each CPU, its registry events, everyone else's.
+    let mut rows = vec![vec![0u32; buckets]; cpus + 2];
+    for r in raw {
+        let t = rel_ms(trace, r.t);
+        if t < 0.0 || t >= buckets as f64 * 100.0 {
+            continue;
+        }
+        let row = match (service.contains(&r.pid), r.source) {
+            (true, Source::File) => usize::from(r.cpu).min(cpus - 1),
+            (true, _) => cpus,
+            (false, _) => cpus + 1,
+        };
+        rows[row][(t / 100.0) as usize] += 1;
+    }
+    let _ = writeln!(s, "- service pids {service:?}, 100 ms buckets from launch:");
+    for (i, row) in rows.iter().enumerate() {
+        let name = match i.cmp(&cpus) {
+            std::cmp::Ordering::Less => format!("cpu{i}"),
+            std::cmp::Ordering::Equal => "reg".into(),
+            std::cmp::Ordering::Greater => "others".into(),
+        };
+        let cells: Vec<String> = row
+            .iter()
+            .map(|n| if *n == 0 { ".".into() } else { n.to_string() })
+            .collect();
+        let _ = writeln!(s, "  `{name:>6}: {}`", cells.join(" "));
+    }
+}
+
 /// One install traced with ETW, the USN delta and the registry diff, compared item by item.
 pub fn check(inst: &Installer, profile: Profile, tuning: Tuning) -> Result<String> {
     enable_privilege("SeBackupPrivilege")?;
@@ -2407,7 +2774,7 @@ pub fn check(inst: &Installer, profile: Profile, tuning: Tuning) -> Result<Strin
         registry: true,
         samples: true,
         settle: Duration::from_secs(3),
-        tuning,
+        ..Options::plain(tuning)
     };
     let trace = track(&inst.command()?, &opt)?;
     let report = check_report(inst, profile, &trace, &inst.truth());
@@ -2793,7 +3160,7 @@ pub fn probe() -> String {
             }
         }
     }
-    match Session::start(Profile::Full, false, Tuning::DEFAULT) {
+    match Session::start(SESSION, Profile::Full, false, false, Tuning::DEFAULT) {
         Ok(session) => {
             thread::sleep(Duration::from_secs(2));
             match session.stop() {
