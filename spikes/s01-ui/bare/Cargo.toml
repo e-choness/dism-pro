@@ -1,0 +1,17 @@
+[package]
+name = "bare"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Spike S-01 baseline: a bare Win32 window with one solid fill (startup and size reference)."
+
+[lints]
+workspace = true
+
+[dependencies]
+probe.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true

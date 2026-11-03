@@ -1,0 +1,59 @@
+# Spike S-01 (roadmap 1.6, ADR-0002): the same three screens (target switcher + nav, a 100k-row
+# virtualized list, the preview drawer) built twice, as option A (a custom toolkit on tiny-skia, with
+# Direct2D + DirectComposition loaded at run time) and option B (Slint, software renderer), plus a
+# bare Win32 window as the startup and size baseline. Never shipped.
+#
+# Standalone workspace: its dependencies never reach the product's Cargo.lock or cargo-deny.
+[workspace]
+resolver = "3"
+members = ["scene", "probe", "bare", "a", "b"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.99"
+license = "Apache-2.0"
+publish = false
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+undocumented_unsafe_blocks = "deny"
+unwrap_used = "deny"
+# Pixel math: coordinates, sizes and colors fit their types by construction. A spike, not product code.
+cast_possible_truncation = "allow"
+cast_precision_loss = "allow"
+cast_possible_wrap = "allow"
+cast_sign_loss = "allow"
+cast_lossless = "allow"
+many_single_char_names = "allow"
+too_many_lines = "allow"
+missing_panics_doc = "allow"
+missing_errors_doc = "allow"
+module_name_repetitions = "allow"
+unreadable_literal = "allow"
+
+# The product's release profile (root Cargo.toml), so size deltas compare like with like. The static
+# CRT comes from the repository's .cargo/config.toml, which applies here too.
+[profile.release]
+panic = "abort"
+
+[workspace.dependencies]
+scene = { path = "scene" }
+probe = { path = "probe" }
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_UI_Controls",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }

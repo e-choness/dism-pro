@@ -1,0 +1,50 @@
+[package]
+name = "a"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Spike S-01 option A: a custom toolkit. tiny-skia + DirectWrite (both in base WinPE) on every path; DirectComposition, Direct3D 11 and Direct2D loaded at run time for glass. UI Automation through AccessKit."
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "s01-a"
+path = "src/main.rs"
+
+[dependencies]
+scene.workspace = true
+probe.workspace = true
+# BSD-3-Clause. Shapes only: no PNG codec (scene writes the snapshots), so no `png-format`.
+tiny-skia = { version = "=0.12.0", default-features = false, features = ["std", "simd"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
+# MIT OR Apache-2.0. The same `windows` release AccessKit uses, so there's one copy. COM interfaces
+# only for d2d1/d3d11/dxgi/dcomp: their factory functions are resolved with GetProcAddress, so the
+# exe never imports a DLL that base WinPE lacks.
+windows = { version = "=0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct2D",
+    "Win32_Graphics_Direct2D_Common",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_DirectComposition",
+    "Win32_Graphics_DirectWrite",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
+    "Win32_UI_Controls",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
+windows-core = "=0.62.2"
+# MIT OR Apache-2.0. UI Automation provider (uiautomationcore.dll is in base WinPE).
+accesskit = "=0.25.2"
+accesskit_windows = "=0.35.2"

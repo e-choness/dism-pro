@@ -1,0 +1,2 @@
+# Product names in docs aren't code ("..": keep clippy's defaults).
+doc-valid-idents = ["DirectComposition", "DirectWrite", "WinPE", "AccessKit", "DirectX", "DXGI", ".."]

@@ -1,0 +1,35 @@
+[package]
+name = "b"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Spike S-01 option B: the three screens in Slint (software renderer; winit + AccessKit on Windows)."
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "s01-b"
+path = "src/main.rs"
+
+[dependencies]
+scene.workspace = true
+probe.workspace = true
+# Slint is GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
+# (ADR-0002 licensing note). Software renderer only: OpenGL, D3D and Vulkan aren't in base WinPE
+# (S-01 facts, run 41589907500).
+slint = { version = "=1.18.1", default-features = false, features = ["std", "compat-1-2", "renderer-software", "software-renderer-systemfonts"] }
+
+[target.'cfg(windows)'.dependencies]
+slint = { version = "=1.18.1", default-features = false, features = ["backend-winit", "accessibility", "raw-window-handle-06"] }
+raw-window-handle = "0.6"
+windows-sys.workspace = true
+
+[build-dependencies]
+slint-build = "=1.18.1"
+
+# C1 (Linux container) has no fontconfig headers: load libfontconfig at run time instead. Headless only.
+[target.'cfg(target_os = "linux")'.dependencies]
+i-slint-common = { version = "=1.18.1", features = ["fontconfig-dlopen"] }

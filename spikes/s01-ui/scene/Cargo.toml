@@ -1,0 +1,11 @@
+[package]
+name = "scene"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Spike S-01: what both prototypes draw (layout, tokens, 100k rows), the scroll script they replay, and the checks and statistics. No OS dependencies."
+
+[lints]
+workspace = true

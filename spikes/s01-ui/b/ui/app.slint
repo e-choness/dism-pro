@@ -1,0 +1,487 @@
+// Spike S-01 option B: the three screens in Slint, at the coordinates of scene::layout (Rust passes
+// the computed rectangles in, so the pixel checks judge both prototypes the same way).
+
+import { ListView } from "std-widgets.slint";
+
+export struct Area { x: length, y: length, w: length, h: length }
+export struct NavEntry { kind: int, label: string, r: Area }
+export struct Row { name: string, publisher: string, version: string, size: string, installed: string, badge: int, badge-label: string }
+export struct Item { label: string, detail: string, badge: string, permanent: bool, r: Area }
+export struct Column { title: string, x: length, w: length, right: bool }
+
+export global Palette {
+    in property <color> bg-app;
+    in property <color> bg-surface;
+    in property <color> bg-subtle;
+    in property <color> border;
+    in property <color> text-primary;
+    in property <color> text-secondary;
+    in property <color> accent;
+    in property <color> on-accent;
+    in property <color> selected;
+    in property <color> new-fill;
+    in property <color> new-ink;
+    in property <color> changed-fill;
+    in property <color> changed-ink;
+    in property <color> orphan-fill;
+    in property <color> orphan-ink;
+    in property <color> undo-fill;
+    in property <color> undo-ink;
+    in property <color> permanent-fill;
+    in property <color> permanent-ink;
+    // Glass mode: the window base is left to DWM (Mica) where it isn't covered.
+    in property <color> window-base;
+}
+
+component Label inherits Text {
+    vertical-alignment: center;
+    overflow: elide;
+    color: Palette.text-primary;
+    font-size: 13px;
+}
+
+component Pill inherits Rectangle {
+    in property <string> label;
+    in property <color> fill;
+    in property <color> ink;
+    height: 20px;
+    border-radius: 10px;
+    background: fill;
+    Label {
+        x: 8px;
+        width: parent.width - 16px;
+        text: label;
+        color: ink;
+        font-size: 11px;
+        horizontal-alignment: center;
+    }
+}
+
+component Button inherits Rectangle {
+    in property <string> label;
+    in property <bool> primary;
+    callback clicked;
+    border-radius: 6px;
+    background: primary ? Palette.accent : Palette.bg-surface;
+    border-width: primary ? 0px : 1px;
+    border-color: Palette.border;
+    accessible-role: button;
+    accessible-label: label;
+    accessible-action-default => { clicked(); }
+    Label {
+        text: label;
+        color: primary ? Palette.on-accent : Palette.text-primary;
+        horizontal-alignment: center;
+        font-weight: 600;
+    }
+    TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+export component App inherits Window {
+    in property <int> screen; // 0 shell, 1 list, 2 drawer
+    in-out property <int> nav-selected;
+    in-out property <int> selected-row: -1;
+    in-out property <length> list-viewport-y;
+    in property <[NavEntry]> nav;
+    in property <[Row]> rows;
+    in property <[Item]> cards;
+    in property <[Item]> recent;
+    in property <[Item]> changes;
+    in property <[Column]> columns;
+    in property <string> app-name;
+    in property <string> target;
+    in property <string> search;
+    in property <string> activity;
+    in property <string> overview-title;
+    in property <string> apps-title;
+    in property <string> recent-title;
+    in property <string> drawer-title;
+    in property <string> drawer-summary;
+    in property <string> drawer-cli;
+    in property <string> drawer-cancel;
+    in property <string> drawer-apply;
+    in property <Area> pill;
+    in property <Area> search-box;
+    in property <Area> activity-box;
+    in property <Area> page-title;
+    in property <Area> table;
+    in property <Area> recent-box;
+    in property <Area> drawer;
+    in property <Area> cli-box;
+    in property <Area> cancel-box;
+    in property <Area> apply-box;
+    in property <length> header-h;
+    in property <length> row-h;
+    in property <length> name-clip;
+    in property <length> badge-x;
+    callback nav-clicked(int);
+    callback row-clicked(int);
+    callback drawer-closed();
+
+    title: "S-01 option B (Slint)";
+    preferred-width: 1280px;
+    preferred-height: 800px;
+    background: Palette.window-base;
+    default-font-family: "Segoe UI";
+    default-font-size: 13px;
+
+    // Title bar.
+    Label {
+        x: 16px;
+        y: 0px;
+        width: 112px;
+        height: 48px;
+        text: root.app-name;
+        font-size: 15px;
+        font-weight: 600;
+    }
+    Rectangle {
+        x: root.pill.x;
+        y: root.pill.y;
+        width: root.pill.w;
+        height: root.pill.h;
+        border-radius: self.height / 2;
+        background: Palette.accent;
+        accessible-role: button;
+        accessible-label: root.target;
+        Label {
+            x: 12px;
+            width: parent.width - 24px;
+            text: root.target;
+            color: Palette.on-accent;
+            font-weight: 600;
+        }
+    }
+    Rectangle {
+        x: root.search-box.x;
+        y: root.search-box.y;
+        width: root.search-box.w;
+        height: root.search-box.h;
+        border-radius: 6px;
+        background: Palette.bg-surface;
+        border-width: 1px;
+        border-color: Palette.border;
+        accessible-role: text-input;
+        accessible-label: root.search;
+        Label {
+            x: 12px;
+            width: parent.width - 24px;
+            text: root.search;
+            color: Palette.text-secondary;
+        }
+    }
+    Button {
+        x: root.activity-box.x;
+        y: root.activity-box.y;
+        width: root.activity-box.w;
+        height: root.activity-box.h;
+        label: root.activity;
+    }
+
+    // Nav rail.
+    for e[i] in root.nav: Rectangle {
+        x: e.r.x;
+        y: e.r.y;
+        width: e.r.w;
+        height: e.r.h;
+        if e.kind == 0: Rectangle {
+            border-radius: 6px;
+            background: i == root.nav-selected ? Palette.selected : transparent;
+            accessible-role: list-item;
+            accessible-label: e.label;
+            accessible-item-selectable: true;
+            accessible-item-selected: i == root.nav-selected;
+            Label {
+                x: 12px;
+                width: parent.width - 24px;
+                text: e.label;
+            }
+            TouchArea {
+                clicked => { root.nav-selected = i; root.nav-clicked(i); }
+            }
+        }
+        if e.kind == 1: Label {
+            x: 12px;
+            width: parent.width - 24px;
+            text: e.label;
+            font-size: 12px;
+            font-weight: 600;
+            color: Palette.text-secondary;
+        }
+        if e.kind == 2: Rectangle {
+            x: 12px;
+            y: parent.height / 2;
+            width: parent.width - 24px;
+            height: 1px;
+            background: Palette.border;
+        }
+    }
+
+    Label {
+        x: root.page-title.x;
+        y: root.page-title.y;
+        width: root.page-title.w;
+        height: root.page-title.h;
+        text: root.screen == 0 ? root.overview-title : root.apps-title;
+        font-size: 20px;
+        font-weight: 600;
+    }
+
+    // Overview.
+    if root.screen == 0: Rectangle {
+        for c in root.cards: Rectangle {
+            x: c.r.x;
+            y: c.r.y;
+            width: c.r.w;
+            height: c.r.h;
+            border-radius: 10px;
+            background: Palette.bg-surface;
+            border-width: 1px;
+            border-color: Palette.border;
+            accessible-role: groupbox;
+            accessible-label: c.label;
+            Label {
+                x: 16px;
+                y: 16px;
+                width: parent.width - 32px;
+                height: 20px;
+                text: c.label;
+                font-size: 12px;
+                color: Palette.text-secondary;
+            }
+            Label {
+                x: 16px;
+                y: 44px;
+                width: parent.width - 32px;
+                height: 36px;
+                text: c.detail;
+                font-size: 28px;
+                font-weight: 600;
+            }
+        }
+        Rectangle {
+            x: root.recent-box.x;
+            y: root.recent-box.y;
+            width: root.recent-box.w;
+            height: root.recent-box.h;
+            border-radius: 10px;
+            background: Palette.bg-surface;
+            border-width: 1px;
+            border-color: Palette.border;
+            Label {
+                x: 16px;
+                y: 12px;
+                width: parent.width - 32px;
+                height: 28px;
+                text: root.recent-title;
+                font-size: 15px;
+                font-weight: 600;
+            }
+        }
+        for r in root.recent: Rectangle {
+            x: r.r.x;
+            y: r.r.y;
+            width: r.r.w;
+            height: r.r.h;
+            accessible-role: list-item;
+            accessible-label: r.label;
+            Label {
+                x: 0px;
+                width: parent.width - 160px;
+                text: r.label;
+            }
+            Pill {
+                x: parent.width - 120px;
+                width: 120px;
+                y: (parent.height - self.height) / 2;
+                label: r.badge;
+                fill: r.permanent ? Palette.permanent-fill : Palette.undo-fill;
+                ink: r.permanent ? Palette.permanent-ink : Palette.undo-ink;
+            }
+        }
+    }
+
+    // Apps: the virtualized table.
+    if root.screen != 0: Rectangle {
+        x: root.table.x;
+        y: root.table.y;
+        width: root.table.w;
+        height: root.table.h;
+        border-radius: 10px;
+        background: Palette.bg-surface;
+        border-width: 1px;
+        border-color: Palette.border;
+        clip: true;
+        for c in root.columns: Label {
+            x: c.x;
+            y: 0px;
+            width: c.w;
+            height: root.header-h;
+            text: c.title;
+            font-size: 12px;
+            font-weight: 600;
+            color: Palette.text-secondary;
+            horizontal-alignment: c.right ? right : left;
+        }
+        Rectangle {
+            y: root.header-h - 1px;
+            height: 1px;
+            background: Palette.border;
+        }
+        ListView {
+            x: 0px;
+            y: root.header-h;
+            width: parent.width;
+            height: parent.height - root.header-h;
+            content-y <=> root.list-viewport-y;
+            accessible-role: list;
+            for row[i] in root.rows: Rectangle {
+                height: root.row-h;
+                background: i == root.selected-row ? Palette.selected : Palette.bg-surface;
+                accessible-role: list-item;
+                accessible-label: row.name;
+                accessible-item-selectable: true;
+                accessible-item-selected: i == root.selected-row;
+                accessible-item-index: i;
+                Label {
+                    x: root.columns[0].x;
+                    width: root.name-clip;
+                    text: row.name;
+                }
+                Pill {
+                    x: root.badge-x;
+                    y: (root.row-h - self.height) / 2;
+                    width: 60px;
+                    visible: row.badge != 0;
+                    label: row.badge-label;
+                    fill: row.badge == 1 ? Palette.new-fill : row.badge == 2 ? Palette.changed-fill : Palette.orphan-fill;
+                    ink: row.badge == 1 ? Palette.new-ink : row.badge == 2 ? Palette.changed-ink : Palette.orphan-ink;
+                }
+                Label {
+                    x: root.columns[1].x;
+                    width: root.columns[1].w;
+                    text: row.publisher;
+                    color: Palette.text-secondary;
+                }
+                Label {
+                    x: root.columns[2].x;
+                    width: root.columns[2].w;
+                    text: row.version;
+                    color: Palette.text-secondary;
+                }
+                Label {
+                    x: root.columns[3].x;
+                    width: root.columns[3].w;
+                    text: row.size;
+                    horizontal-alignment: right;
+                }
+                Label {
+                    x: root.columns[4].x;
+                    width: root.columns[4].w;
+                    text: row.installed;
+                    color: Palette.text-secondary;
+                }
+                TouchArea {
+                    clicked => { root.selected-row = i; root.row-clicked(i); }
+                }
+            }
+        }
+    }
+
+    // The preview drawer (solid fallback: the software path has no in-app acrylic).
+    if root.screen == 2: Rectangle {
+        x: root.drawer.x;
+        y: root.drawer.y;
+        width: root.drawer.w;
+        height: root.drawer.h;
+        background: Palette.bg-surface;
+        border-top-left-radius: 14px;
+        border-bottom-left-radius: 14px;
+        border-width: 1px;
+        border-color: Palette.border;
+        accessible-role: groupbox;
+        accessible-label: root.drawer-title;
+        Label {
+            x: 24px;
+            y: 20px;
+            width: parent.width - 48px;
+            height: 28px;
+            text: root.drawer-title;
+            font-size: 20px;
+            font-weight: 600;
+        }
+        Label {
+            x: 24px;
+            y: 50px;
+            width: parent.width - 48px;
+            height: 20px;
+            text: root.drawer-summary;
+            color: Palette.text-secondary;
+        }
+    }
+    if root.screen == 2: Rectangle {
+        for c in root.changes: Rectangle {
+            x: c.r.x;
+            y: c.r.y;
+            width: c.r.w;
+            height: c.r.h;
+            accessible-role: list-item;
+            accessible-label: c.label;
+            Label {
+                x: 0px;
+                width: parent.width - 220px;
+                text: c.label;
+            }
+            Label {
+                x: parent.width - 212px;
+                width: 76px;
+                text: c.detail;
+                color: Palette.text-secondary;
+                horizontal-alignment: right;
+            }
+            Pill {
+                x: parent.width - 124px;
+                width: 124px;
+                y: (parent.height - self.height) / 2;
+                label: c.badge;
+                fill: c.permanent ? Palette.permanent-fill : Palette.undo-fill;
+                ink: c.permanent ? Palette.permanent-ink : Palette.undo-ink;
+            }
+        }
+        Rectangle {
+            x: root.cli-box.x;
+            y: root.cli-box.y;
+            width: root.cli-box.w;
+            height: root.cli-box.h;
+            border-radius: 6px;
+            background: Palette.bg-subtle;
+            accessible-role: text;
+            accessible-label: root.drawer-cli;
+            Label {
+                x: 12px;
+                width: parent.width - 24px;
+                text: root.drawer-cli;
+                font-family: "Cascadia Mono";
+                font-size: 12px;
+            }
+        }
+        Button {
+            x: root.cancel-box.x;
+            y: root.cancel-box.y;
+            width: root.cancel-box.w;
+            height: root.cancel-box.h;
+            label: root.drawer-cancel;
+            clicked => { root.drawer-closed(); }
+        }
+        Button {
+            x: root.apply-box.x;
+            y: root.apply-box.y;
+            width: root.apply-box.w;
+            height: root.apply-box.h;
+            label: root.drawer-apply;
+            primary: true;
+        }
+    }
+}

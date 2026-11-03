@@ -1,0 +1,94 @@
+# Spike S-01 (roadmap 1.6, ADR-0002): option A (a custom toolkit) vs option B (Slint), the same
+# three screens, measured against the ADR's gates. Lives on spike/s01-ui only. Results go to
+# annotations and job summaries; raw output and screenshots to short-lived artifacts.
+name: spike-s01
+
+on:
+  push:
+    branches: ["spike/s01-ui"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: spike-s01-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  c1:
+    name: C1 build, size, headless (ubuntu)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/toolchain
+        with:
+          t2: "true"
+      - run: docker compose run --rm --entrypoint bash test-win spikes/s01-ui/ci/c1.sh
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: s01-c1
+          path: spikes/s01-ui/out/
+          if-no-files-found: error
+          retention-days: 14
+
+  winpe:
+    name: WinPE imports (windows-2025)
+    needs: c1
+    runs-on: windows-2025
+    timeout-minutes: 60
+    env:
+      # The same ADK as ci.yml's adk-headers job.
+      ADK_VERSION: 10.1.26100.9457
+      ADK_URL: https://go.microsoft.com/fwlink/?linkid=2289980
+      WINPE_URL: https://go.microsoft.com/fwlink/?linkid=2289981
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: s01-c1
+          path: spikes/s01-ui/out/
+      - name: ADK + WinPE add-on
+        run: ./.github/scripts/adk.ps1 -WinPE "$env:RUNNER_TEMP\winpe-files"
+      - name: Resolve every import against base WinPE
+        run: ./spikes/s01-ui/ci/winpe.ps1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: s01-winpe
+          path: spikes/s01-ui/out/winpe/
+          retention-days: 14
+
+  g1:
+    name: G1 startup, UIA, glass (windows-2025)
+    needs: c1
+    runs-on: windows-2025
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: s01-c1
+          path: spikes/s01-ui/out/
+      - name: Gates on the runner's desktop
+        run: ./spikes/s01-ui/ci/g1.ps1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: s01-g1
+          path: spikes/s01-ui/out/g1/
+          retention-days: 14
