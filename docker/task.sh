@@ -4,7 +4,7 @@
 # `docker compose run --rm <task> -- <args>` are appended; a leading `--` is dropped.
 set -euo pipefail
 
-task="${1:?usage: task.sh <fmt|lint|test|test-win|bench|deny|build|ffi-check|lock> [args…]}"
+task="${1:?usage: task.sh <fmt|lint|test|test-win|bench|deny|build|t3-tools|ffi-check|lock> [args…]}"
 shift
 if [[ "${1:-}" == "--" ]]; then shift; fi
 
@@ -42,6 +42,15 @@ case "${task}" in
     ;;
   deny)
     exec cargo deny --workspace --locked check "$@"
+    ;;
+  t3-tools)
+    # Dev tools the T3 job runs on the x64 runner VM, never shipped (dist/ stays release-only):
+    # regf_dump, the hive reader's side of .github/scripts/regf-check.ps1 (ADR-0008).
+    t=x86_64-pc-windows-msvc
+    cargo xwin build --locked --release -p dpro-engine --example regf_dump --target "${t}" "$@"
+    rm -rf dist-t3
+    mkdir -p dist-t3
+    cp "target/${t}/release/examples/regf_dump.exe" dist-t3/
     ;;
   build)
     # Ship binaries only: xtask is a host tool, and dist/ starts empty so no stale exe lingers.

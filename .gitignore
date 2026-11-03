@@ -1,5 +1,6 @@
 /target/
 /dist/
+/dist-t3/
 **/*.rs.bk
 *.pdb
 .env
