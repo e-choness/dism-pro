@@ -14,6 +14,7 @@ on:
 
 permissions:
   contents: read
+  packages: read # the pinned toolchain images (decision #29)
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -91,6 +92,52 @@ jobs:
           $text = $out.Trim().Replace('%', '%25').Replace("`r", '').Replace("`n", '%0A')
           Write-Host "::$kind title=dpro-win crash tests (real Windows, exit $code)::$text"
           exit $code
+      - name: T3 broker pipe (dpro-win + dpro-broker tests, probe, MCP end to end)
+        # Round-trip times against the budget, plus what Wine can't show: the integrity label,
+        # remote and squatter refusal, the admin-only policy file read elevated, and an MCP front
+        # starting the broker and calling every tool with the release CLI (roadmap 2.7).
+        # A hung accept must not eat the job.
+        if: ${{ !cancelled() }}
+        timeout-minutes: 10
+        shell: pwsh
+        run: |
+          $env:DISMPRO_CLI = (Resolve-Path dist/x86_64-pc-windows-msvc/dismpro-cli.exe).Path
+          $failed = 0
+          foreach ($run in @(
+              @{ Title = 'dpro-win pipe, security and elevation tests'; Exe = 'dist-t3/dpro-win-tests.exe'; Args = @('pipe::', 'security::', 'elevate::', 'system::', '--test-threads', '1') },
+              @{ Title = 'dpro-broker tests'; Exe = 'dist-t3/dpro-broker-tests.exe'; Args = @('--test-threads', '1') },
+              @{ Title = 'broker pipe probe'; Exe = 'dist-t3/pipe_t3.exe'; Args = @() },
+              @{ Title = 'dismpro-cli MCP front and broker'; Exe = 'dist-t3/dismpro-cli-mcp-tests.exe'; Args = @('--test-threads', '1', '--nocapture') })) {
+            $out = & $run.Exe @($run.Args) 2>&1 | Out-String
+            $code = $LASTEXITCODE
+            if ($code) { $failed++ }
+            Write-Host $out
+            $kind = if ($code) { 'error' } else { 'notice' }
+            $text = $out.Trim().Replace('%', '%25').Replace("`r", '').Replace("`n", '%0A')
+            Write-Host "::$kind title=$($run.Title) (real Windows, exit $code)::$text"
+          }
+          exit $failed
+      - name: T3 WIMGAPI (wim_t3 probe)
+        # Wine has no wimgapi.dll: WimFile against WIMs and an ESD that dism.exe captures (roadmap 2.3).
+        if: ${{ !cancelled() }}
+        timeout-minutes: 10
+        shell: pwsh
+        run: |
+          $out = & dist-t3/wim_t3.exe 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          Write-Host $out
+          $kind = if ($code) { 'error' } else { 'notice' }
+          $text = $out.Trim().Replace('%', '%25').Replace("`r", '').Replace("`n", '%0A')
+          Write-Host "::$kind title=WIMGAPI probe (real Windows, exit $code)::$text"
+          exit $code
+      - name: Servicing stamps (TD-0013 §7.1 package-list cache, advisory)
+        # Which stamps move on a feature change and its undo, and which stay put on reads and idle
+        # time. A measurement for the cache design, not a gate.
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        timeout-minutes: 15
+        shell: pwsh
+        run: ./.github/scripts/servicing-stamps.ps1 -Cli dist/x86_64-pc-windows-msvc/dismpro-cli.exe
       - name: T3 offline image (servercore base layer)
         # On the VM, not in a container: S-02 found DISM can't service images inside one.
         id: image

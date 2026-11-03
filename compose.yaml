@@ -1,9 +1,10 @@
 # The only entry point for build / lint / test / bench (ADR-0003).
 #   docker compose run --rm <fmt|lint|test|test-win|bench|deny|build> [-- args]
 #
-# Base images are pinned by digest in docker/build.Dockerfile. Until roadmap 1.3
-# publishes the toolchain images to GHCR, they're built locally on first use; 1.3
-# replaces the local tags below with ghcr.io/e-choness/dism-pro-build@sha256:… refs.
+# The toolchain images build from docker/build.Dockerfile (everything in it is pinned) on
+# first use. CI pulls the same images by digest from GHCR instead (.github/toolchain.lock) and
+# tags them as below; the package is private (decision #29). With access to it:
+#   docker login ghcr.io && bash .github/scripts/toolchain-images.sh pull t1 t2
 
 x-toolchain: &toolchain
   working_dir: /src

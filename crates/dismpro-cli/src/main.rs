@@ -9,6 +9,7 @@
 // Most commands are Windows-only; their helpers are unused when building for Linux (T1).
 #![cfg_attr(not(windows), allow(dead_code))]
 
+mod agent;
 mod args;
 mod error;
 mod json;

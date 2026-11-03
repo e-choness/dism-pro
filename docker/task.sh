@@ -45,18 +45,32 @@ case "${task}" in
     ;;
   t3-tools)
     # Dev tools the T3 job runs on the x64 runner VM, never shipped (dist/ stays release-only):
-    # regf_dump, the hive reader's side of .github/scripts/regf-check.ps1 (ADR-0008); drivers_t3,
-    # the DISM driver-call probe (roadmap 2.5); and the dpro-win test binary, whose crash-dump
-    # tests need real Windows (dbghelp.dll, WER).
+    # regf_dump, the hive reader's side of .github/scripts/regf-check.ps1 (ADR-0008); pipe_t3,
+    # the broker pipe probe (roadmap 2.7); wim_t3, the WIMGAPI probe (Wine has no wimgapi.dll,
+    # roadmap 2.3); drivers_t3, the DISM driver-call probe (roadmap 2.5); the dpro-win and
+    # dpro-broker test binaries, whose
+    # crash-dump, pipe and peer tests need real Windows (dbghelp.dll, WER, integrity labels); and
+    # dismpro-cli's MCP stdio test, which needs dismapi.dll and runs the release CLI (DISMPRO_CLI).
     t=x86_64-pc-windows-msvc
     cargo xwin build --locked --release -p dpro-engine --example regf_dump --target "${t}" "$@"
-    cargo xwin build --locked --release -p dpro-win --example drivers_t3 --target "${t}" "$@"
-    tests=$(cargo xwin test --color never --locked --no-run -p dpro-win --target "${t}" "$@" 2>&1 \
-      | tee /dev/stderr | sed -n 's/^ *Executable unittests src\/lib\.rs (\(.*\))$/\1/p')
+    cargo xwin build --locked --release -p dpro-win --example pipe_t3 --example wim_t3 \
+      --example drivers_t3 --target "${t}" "$@"
+    # The unit-test binary of package $1: cargo prints "Executable unittests src/lib.rs (<path>)".
+    test_exe() {
+      cargo xwin test --color never --locked --no-run -p "$1" --target "${t}" "${@:2}" 2>&1 \
+        | tee /dev/stderr | sed -n 's/^ *Executable unittests src\/lib\.rs (\(.*\))$/\1/p'
+    }
+    win_tests=$(test_exe dpro-win "$@")
+    broker_tests=$(test_exe dpro-broker "$@")
+    mcp_tests=$(cargo xwin test --color never --locked --no-run -p dismpro-cli --test mcp_stdio \
+      --target "${t}" "$@" 2>&1 \
+      | tee /dev/stderr | sed -n 's/^ *Executable tests\/mcp_stdio\.rs (\(.*\))$/\1/p')
     rm -rf dist-t3
     mkdir -p dist-t3
-    cp "target/${t}/release/examples/regf_dump.exe" "target/${t}/release/examples/drivers_t3.exe" dist-t3/
-    cp "${tests:?no dpro-win test binary}" dist-t3/dpro-win-tests.exe
+    cp "target/${t}/release/examples/"{regf_dump,pipe_t3,wim_t3,drivers_t3}.exe dist-t3/
+    cp "${win_tests:?no dpro-win test binary}" dist-t3/dpro-win-tests.exe
+    cp "${broker_tests:?no dpro-broker test binary}" dist-t3/dpro-broker-tests.exe
+    cp "${mcp_tests:?no dismpro-cli mcp test binary}" dist-t3/dismpro-cli-mcp-tests.exe
     ;;
   build)
     # Ship binaries only: xtask is a host tool, and dist/ starts empty so no stale exe lingers.
