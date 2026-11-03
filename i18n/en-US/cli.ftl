@@ -149,6 +149,7 @@ journal-none = No journaled jobs on this target.
 journal-already-undone = Job { $job } was already undone by job { $by }. To redo it, undo { $by }.
 journal-other-target = Job { $job } belongs to a different Windows installation than the target.
 journal-other-build = Job { $job } was made on build { $then }; the target is now build { $now }, so undo is disabled.
+journal-nothing-to-undo = Job { $job } has nothing to undo: it applied nothing, or every change it applied is permanent or past its undo window.
 
 # Drivers (TD-0002 §5.6)
 signature-signed = Signed

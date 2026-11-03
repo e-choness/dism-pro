@@ -356,16 +356,14 @@ if (-not $Target) {
         "exit 3 without --allow-irreversible; removed $pkgId (type $pkgType) in job $($pkgJob.job), now $pkgState, reboot_required=$($pkgJob.reboot_required)$before; release types: $kinds"
     }
     if ($script:pkgJob) {
+        # Refused with the reason (exit 1), not an empty plan that reads as "already reversed".
         Test-Step 'packages remove has no undo' {
-            $docs = Invoke-Cli 'journal', 'undo', $pkgJob.job, '--yes' -Expect 0, 1
-            $plan = $docs | Where-Object schema -EQ 'plan.v1' | Select-Object -First 1
-            $undo = $docs | Where-Object schema -EQ 'job.v1' | Select-Object -First 1
-            if ($undo -and @($undo.applied).Count) { throw "the undo applied $(@($undo.applied).Count) change(s)" }
+            $e = Get-Doc (Invoke-Cli 'journal', 'undo', $pkgJob.job, '--yes' -Expect 1) 'error.v1'
+            if ($e.message -notmatch 'nothing to undo') { throw "refusal: $($e.message)" }
             $after = Get-Package $pkgId
             $now = if ($after) { $after.state } else { 'gone' }
             if ($now -ne $pkgState) { throw "$pkgId went from $pkgState to $now" }
-            $said = if ($plan) { "$(@($plan.changes).Count) change(s) planned" } else { (Get-Doc $docs 'error.v1').message }
-            "exit $script:lastExit, $said; $pkgId stays $now"
+            "exit 1, $($e.message); $pkgId stays $now"
         }
     }
 }

@@ -898,6 +898,14 @@ pub(crate) fn undo_plan(
     // Inverses that probing found stand in for learned records lost in the crash.
     rec.records
         .extend(probed.learned.into_iter().map(journal::Record::Learned));
+    let changes = journal::undo_changes(&rec, &probed.applied, paths::now());
+    if changes.is_empty() {
+        // TD-0001 §9 offers no undo for these. An empty plan ("Nothing to do", exit 0) would
+        // read as if the job were already reversed, so say why instead.
+        return Err(CliError::Failed(
+            m.get("journal-nothing-to-undo", &[("job", &job)]),
+        ));
+    }
     let doc = PlanDoc {
         schema: PLAN_SCHEMA.to_owned(),
         target: target_id,
@@ -908,7 +916,7 @@ pub(crate) fn undo_plan(
             category: "journal".into(),
             cancellable: false,
         },
-        changes: journal::undo_changes(&rec, &probed.applied, paths::now()),
+        changes,
         summary: PlanSummary::default(),
     };
     Ok((Plan::from_doc(doc)?, job))
@@ -1053,5 +1061,121 @@ impl<B: Backend> Backend for Stepping<'_, '_, B> {
 
     fn learned_inverse(&mut self) -> Option<ChangeKind<String>> {
         self.inner.learned_inverse()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use dpro_core::{plan::Reversibility, units::UnixMillis};
+    use dpro_engine::journal::{Done, Intent, Outcome};
+
+    use super::*;
+
+    const BUILD: OsBuild = OsBuild {
+        major: 10,
+        minor: 0,
+        build: 26100,
+        revision: 1,
+    };
+
+    /// A target whose state lives under a fresh temp folder.
+    fn target(name: &str) -> Resolved {
+        let root = std::env::temp_dir().join(format!("dpro-undo-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(paths::journal_dir(&root)).unwrap();
+        Resolved {
+            windows_dir: root.join("Windows"),
+            image_root: Some(root.clone()),
+            volume_root: root,
+        }
+    }
+
+    /// Journals a completed job that applied `changes`, as `apply` would.
+    fn journal(t: &Resolved, changes: Vec<Change<String>>) -> PathBuf {
+        let job = JobId::from_parts(UnixMillis(1_700_000_000_000), 7);
+        let begin = Begin {
+            job,
+            target: UNKNOWN_TARGET,
+            os_build: BUILD,
+            created: UnixMillis(1_700_000_000_000),
+            op: "packages.remove".into(),
+            undoes: None,
+        };
+        let mut w = JournalWriter::create(Vec::new(), &begin).unwrap();
+        for (index, change) in (0..).zip(changes) {
+            w.intent(&Intent {
+                index,
+                change,
+                inverse: None,
+            })
+            .unwrap();
+            w.flush().unwrap();
+            w.done(Done {
+                index,
+                outcome: Outcome::Applied,
+            })
+            .unwrap();
+        }
+        let path = paths::journal_file(&t.volume_root, job);
+        fs::write(&path, w.commit(JobStatus::Completed).unwrap()).unwrap();
+        path
+    }
+
+    fn undo(t: &Resolved, path: &Path) -> Result<(Plan, JobId), CliError> {
+        let no_probe = |_: &Recovered, _: &[u32]| -> Result<Probed, CliError> {
+            unreachable!("a completed job has nothing in doubt")
+        };
+        undo_plan(
+            t,
+            (UNKNOWN_TARGET, BUILD),
+            path,
+            no_probe,
+            &Messages::en_us(),
+        )
+    }
+
+    #[test]
+    fn a_job_of_permanent_changes_has_no_undo() {
+        let t = target("permanent");
+        let path = journal(
+            &t,
+            vec![Change {
+                kind: ChangeKind::PackageRemove {
+                    identity: "Some-FoD-Package~31bf3856ad364e35~amd64~~10.0.26100.1".into(),
+                },
+                reversibility: Reversibility::Irreversible {
+                    reason: "irreversible-package-remove".into(),
+                },
+                reboot_required: false,
+            }],
+        );
+        let Err(CliError::Failed(message)) = undo(&t, &path) else {
+            panic!("an undo of permanent changes must be refused, not planned empty");
+        };
+        assert!(message.contains("nothing to undo"), "{message}");
+        let _ = fs::remove_dir_all(&t.volume_root);
+    }
+
+    #[test]
+    fn a_reversible_change_is_planned_back() {
+        let t = target("reversible");
+        let feature = |enable| ChangeKind::FeatureState {
+            name: "TelnetClient".to_owned(),
+            enable,
+            source: None,
+        };
+        let path = journal(
+            &t,
+            vec![Change {
+                kind: feature(true),
+                reversibility: Reversibility::ReversibleVia {
+                    inverse: Box::new(feature(false)),
+                },
+                reboot_required: false,
+            }],
+        );
+        let (plan, _) = undo(&t, &path).expect("a feature change has an undo");
+        assert_eq!(plan.summary().changes, 1);
+        let _ = fs::remove_dir_all(&t.volume_root);
     }
 }
