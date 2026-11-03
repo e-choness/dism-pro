@@ -1,5 +1,6 @@
 /target/
 /dist/
+/dist-t3/
 **/*.rs.bk
 *.pdb
 .env
@@ -9,5 +10,6 @@
 CLAUDE.md
 docs/
 .adk-include/
+.winpe-files/
 CAVEATS.md
 CLAUDE.zip

@@ -6,7 +6,8 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, labeled]
   push:
-    branches: [master]
+    # spike/** branches get every job, Windows included, without a PR (roadmap spikes).
+    branches: [master, "spike/**"]
   schedule:
     - cron: "17 3 * * *" # nightly
   workflow_dispatch:
@@ -45,6 +46,14 @@ jobs:
           path: dist/
           if-no-files-found: error
           retention-days: 7
+      # Dev tools for T3 (never shipped): see docker/task.sh.
+      - run: docker compose run --rm t3-tools
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: t3-tools
+          path: dist-t3/
+          if-no-files-found: error
+          retention-days: 7
 
   windows:
     name: T3 + G1 (windows-2025)
@@ -64,21 +73,110 @@ jobs:
         with:
           name: dist
           path: dist/
-      - name: T3 integration tests
-        if: hashFiles('compose.windows.yaml') != ''
-        run: docker compose -f compose.windows.yaml run --rm itest
-      - name: T3 not set up yet
-        if: hashFiles('compose.windows.yaml') == ''
-        run: echo "::notice::compose.windows.yaml lands with spike S-02 (roadmap 1.5); no T3 tests yet."
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: t3-tools
+          path: dist-t3/
       - name: CLI smoke (runner VM, online target)
         # Real DISM calls, a feature change and its undo on the throwaway runner VM.
         shell: pwsh
-        run: ./.github/scripts/smoke-online.ps1 -Cli dist/x86_64-pc-windows-msvc/dismpro-cli.exe
+        run: ./.github/scripts/smoke.ps1 -Cli dist/x86_64-pc-windows-msvc/dismpro-cli.exe
+      - name: T3 crash dumps (dpro-win tests on real Windows)
+        # T2 runs them under Wine; this is the real dbghelp.dll and exception dispatch.
+        shell: pwsh
+        run: |
+          $out = & dist-t3/dpro-win-tests.exe crash:: --test-threads 1 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          Write-Host $out
+          $kind = if ($code) { 'error' } else { 'notice' }
+          $text = $out.Trim().Replace('%', '%25').Replace("`r", '').Replace("`n", '%0A')
+          Write-Host "::$kind title=dpro-win crash tests (real Windows, exit $code)::$text"
+          exit $code
+      - name: T3 broker pipe (dpro-win + dpro-broker tests, probe, MCP end to end)
+        # Round-trip times against the budget, plus what Wine can't show: the integrity label,
+        # remote and squatter refusal, the admin-only policy file read elevated, and an MCP front
+        # starting the broker and calling every tool with the release CLI (roadmap 2.7).
+        # A hung accept must not eat the job.
+        if: ${{ !cancelled() }}
+        timeout-minutes: 10
+        shell: pwsh
+        run: |
+          $env:DISMPRO_CLI = (Resolve-Path dist/x86_64-pc-windows-msvc/dismpro-cli.exe).Path
+          $failed = 0
+          foreach ($run in @(
+              @{ Title = 'dpro-win pipe, security and elevation tests'; Exe = 'dist-t3/dpro-win-tests.exe'; Args = @('pipe::', 'security::', 'elevate::', 'system::', '--test-threads', '1') },
+              @{ Title = 'dpro-broker tests'; Exe = 'dist-t3/dpro-broker-tests.exe'; Args = @('--test-threads', '1') },
+              @{ Title = 'broker pipe probe'; Exe = 'dist-t3/pipe_t3.exe'; Args = @() },
+              @{ Title = 'dismpro-cli MCP front and broker'; Exe = 'dist-t3/dismpro-cli-mcp-tests.exe'; Args = @('--test-threads', '1', '--nocapture') })) {
+            $out = & $run.Exe @($run.Args) 2>&1 | Out-String
+            $code = $LASTEXITCODE
+            if ($code) { $failed++ }
+            Write-Host $out
+            $kind = if ($code) { 'error' } else { 'notice' }
+            $text = $out.Trim().Replace('%', '%25').Replace("`r", '').Replace("`n", '%0A')
+            Write-Host "::$kind title=$($run.Title) (real Windows, exit $code)::$text"
+          }
+          exit $failed
+      - name: T3 WIMGAPI (wim_t3 probe)
+        # Wine has no wimgapi.dll: WimFile against WIMs and an ESD that dism.exe captures (roadmap 2.3).
+        if: ${{ !cancelled() }}
+        timeout-minutes: 10
+        shell: pwsh
+        run: |
+          $out = & dist-t3/wim_t3.exe 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          Write-Host $out
+          $kind = if ($code) { 'error' } else { 'notice' }
+          $text = $out.Trim().Replace('%', '%25').Replace("`r", '').Replace("`n", '%0A')
+          Write-Host "::$kind title=WIMGAPI probe (real Windows, exit $code)::$text"
+          exit $code
+      - name: Servicing stamps (TD-0013 §7.1 package-list cache, advisory)
+        # Which stamps move on a feature change and its undo, and which stay put on reads and idle
+        # time. A measurement for the cache design, not a gate.
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        timeout-minutes: 15
+        shell: pwsh
+        run: ./.github/scripts/servicing-stamps.ps1 -Cli dist/x86_64-pc-windows-msvc/dismpro-cli.exe
+      - name: T3 offline image (servercore base layer)
+        # On the VM, not in a container: S-02 found DISM can't service images inside one.
+        shell: pwsh
+        run: ./.github/scripts/offline-image.ps1 -Out "$env:RUNNER_TEMP\t3-image"
+      - name: T3 hive reader vs offreg.dll (offline image)
+        # ADR-0008: every key and value of the untouched image's hives, read both ways.
+        shell: pwsh
+        run: ./.github/scripts/regf-check.ps1 -Dump dist-t3/regf_dump.exe -Image "$env:RUNNER_TEMP\t3-image"
+      - name: T3 CLI smoke (offline image)
+        shell: pwsh
+        run: ./.github/scripts/smoke.ps1 -Cli dist/x86_64-pc-windows-msvc/dismpro-cli.exe -Target "$env:RUNNER_TEMP\t3-image"
+
+  smoke-arm64:
+    name: CLI smoke (windows-11-arm)
+    needs: linux
+    # The ARM64 build on real ARM64 Windows; same triggers as the x64 Windows job.
+    if: >-
+      github.event_name == 'push' || github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.pull_request.labels.*.name, 'needs-windows')
+    runs-on: windows-11-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist/
+      - name: CLI smoke (runner VM, online target)
+        shell: pwsh
+        run: ./.github/scripts/smoke.ps1 -Cli dist/aarch64-pc-windows-msvc/dismpro-cli.exe
 
   adk-headers:
-    name: ADK DISM API headers (windows-2025)
-    # dismapi.h ships with the Windows ADK, not the SDK in the toolchain image (decision #22).
-    # Only the headers leave this job, as a short-lived private artifact; never committed.
+    name: ADK headers + WinPE file lists (windows-2025)
+    # dismapi.h ships with the Windows ADK, not the SDK in the toolchain image (decision #22); the
+    # WinPE add-on gives the DLL names behind the pe-compat allowlist. Only derived files leave this
+    # job, as short-lived artifacts; never committed.
     if: >-
       github.event_name == 'push' || github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch' ||
@@ -87,61 +185,49 @@ jobs:
     timeout-minutes: 60
     env:
       # https://learn.microsoft.com/windows-hardware/get-started/adk-install: "Download the Windows
-      # ADK 10.1.26100.9457 (September 2026)". Bump both together; the version keys the cache.
+      # ADK 10.1.26100.9457 (September 2026)" and its WinPE add-on. Bump all three together; the
+      # version keys the caches.
       ADK_VERSION: 10.1.26100.9457
       ADK_URL: https://go.microsoft.com/fwlink/?linkid=2289980
+      WINPE_URL: https://go.microsoft.com/fwlink/?linkid=2289981
+    defaults:
+      run:
+        shell: pwsh
     steps:
-      - id: cache
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: headers
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: adk-include
           key: adk-headers-${{ env.ADK_VERSION }}
-      - name: Find or install ADK Deployment Tools
-        if: steps.cache.outputs.cache-hit != 'true'
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $kits = "${env:ProgramFiles(x86)}\Windows Kits\10"
-          $adk = Join-Path $kits 'Assessment and Deployment Kit'
-          function Find-Header($dir, $name) {
-            Get-ChildItem -Path $dir -Recurse -Filter $name -ErrorAction SilentlyContinue |
-              Sort-Object FullName -Descending | Select-Object -First 1
-          }
-          $dism = Find-Header $adk dismapi.h
-          if (-not $dism) {
-            # Microsoft's own installer, checked for a valid Microsoft signature before it runs.
-            $setup = Join-Path $env:RUNNER_TEMP adksetup.exe
-            Invoke-WebRequest -Uri $env:ADK_URL -OutFile $setup
-            $sig = Get-AuthenticodeSignature $setup
-            if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notmatch '^CN=Microsoft Corporation,') {
-              throw "adksetup.exe signature: $($sig.Status), $($sig.SignerCertificate.Subject)"
-            }
-            $log = Join-Path $env:RUNNER_TEMP adksetup.log
-            $p = Start-Process -FilePath $setup -Wait -PassThru -ArgumentList `
-              '/quiet', '/norestart', '/ceip', 'off', '/features', 'OptionId.DeploymentTools', '/log', $log
-            Write-Host "adksetup.exe exit code: $($p.ExitCode)"
-            $dism = Find-Header $adk dismapi.h
-            if (-not $dism) {
-              Get-ChildItem "$env:RUNNER_TEMP\adksetup*.log" -ErrorAction SilentlyContinue |
-                ForEach-Object { Write-Host "--- $($_.Name)"; Get-Content $_ -Tail 60 }
-              throw "dismapi.h not found under $adk after installing the ADK"
-            }
-          }
-          # wimgapi.h ships with the Windows SDK (installed on the runner), not the ADK.
-          $wim = (Find-Header $adk wimgapi.h) ?? (Find-Header (Join-Path $kits Include) wimgapi.h)
-          if (-not $wim) { throw "wimgapi.h not found under $kits" }
-          New-Item -ItemType Directory -Force adk-include | Out-Null
-          Copy-Item (Join-Path $dism.DirectoryName '*.h'), $wim.FullName adk-include
-          Get-ChildItem adk-include | Format-Table Name, Length
+      - id: winpe
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: winpe-files
+          key: winpe-files-${{ env.ADK_VERSION }}
+      - name: DISM API headers
+        if: steps.headers.outputs.cache-hit != 'true'
+        run: ./.github/scripts/adk.ps1 -Headers adk-include
+      - name: WinPE file lists
+        if: steps.winpe.outputs.cache-hit != 'true'
+        run: ./.github/scripts/adk.ps1 -WinPE winpe-files
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: adk-include
           path: adk-include/
           if-no-files-found: error
           retention-days: 1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: winpe-files
+          path: winpe-files/
+          if-no-files-found: error
+          retention-days: 1
 
   ffi-check:
-    name: S-03 header cross-check (ubuntu)
+    name: S-03 headers + WinPE allowlist (ubuntu)
     needs: adk-headers
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -154,6 +240,13 @@ jobs:
         with:
           name: adk-include
           path: .adk-include/
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: winpe-files
+          path: .winpe-files/
       - run: docker compose run --rm ffi-check
         env:
           DPRO_FFI_INCLUDE: /src/.adk-include
+      - name: WinPE allowlist evidence
+        if: always()
+        run: docker compose run --rm --entrypoint cargo ffi-check xtask pe-compat --winpe-files /src/.winpe-files

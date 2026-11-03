@@ -1,4 +1,5 @@
-//! Registry access for online and offline hives (doc 02 §5: `RegLoadAppKey`).
+//! Registry access for the running OS (doc 02 §5). Offline hives are read from their files by
+//! `dpro_engine::regf` (ADR-0008).
 //!
 //! Mutating calls (`set`, `delete_value`) are only for `Backend::apply` implementations: services
 //! never write the registry directly (TD-0001, CLAUDE.md rule 5).
@@ -6,7 +7,6 @@
 use std::{
     ffi::{OsStr, OsString},
     os::windows::ffi::{OsStrExt, OsStringExt},
-    path::Path,
     ptr,
 };
 
@@ -14,14 +14,14 @@ use windows_sys::Win32::{
     Foundation::{ERROR_FILE_NOT_FOUND, ERROR_MORE_DATA},
     System::Registry::{
         HKEY, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WRITE, REG_BINARY, REG_DWORD, REG_EXPAND_SZ,
-        REG_MULTI_SZ, REG_QWORD, REG_SZ, RegCloseKey, RegDeleteValueW, RegLoadAppKeyW,
-        RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
+        REG_MULTI_SZ, REG_QWORD, REG_SZ, RegCloseKey, RegDeleteValueW, RegOpenKeyExW,
+        RegQueryValueExW, RegSetValueExW,
     },
 };
 
 use crate::{
     error::{Error, Result, win32},
-    wide::{WideCString, long_path},
+    wide::WideCString,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,7 +66,7 @@ pub struct RegKey {
 impl Drop for RegKey {
     fn drop(&mut self) {
         if self.owned {
-            // SAFETY: `hkey` came from RegOpenKeyExW/RegLoadAppKeyW and is closed exactly once.
+            // SAFETY: `hkey` came from RegOpenKeyExW and is closed exactly once.
             // ignore: nothing useful to do if closing fails during drop.
             let _ = unsafe { RegCloseKey(self.hkey) };
         }
@@ -81,21 +81,6 @@ impl RegKey {
             hkey: HKEY_LOCAL_MACHINE,
             owned: false,
         }
-    }
-
-    /// Loads an offline hive file (e.g. `<offline>\Windows\System32\config\SOFTWARE`) as a
-    /// private application hive. It is unloaded when the returned key (and every key opened
-    /// below it) is closed. Fails if the hive is in use.
-    ///
-    /// # Errors
-    /// The OS error from `RegLoadAppKeyW`.
-    pub fn load_app_hive(file: &Path, access: Access) -> Result<Self> {
-        let file = WideCString::new(long_path(file))?;
-        let mut hkey: HKEY = ptr::null_mut();
-        // SAFETY: `file` is NUL-terminated and outlives the call; `hkey` is a valid out pointer.
-        let status = unsafe { RegLoadAppKeyW(file.as_ptr(), &raw mut hkey, access.sam(), 0, 0) };
-        win32(status, "RegLoadAppKeyW")?;
-        Ok(Self { hkey, owned: true })
     }
 
     /// Opens `subkey` below this key.

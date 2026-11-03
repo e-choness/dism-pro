@@ -117,12 +117,22 @@ const PATTERNS: &[(&str, &str, Severity)] = &[(
     Severity::Warning,
 )];
 
+/// The diagnosis (a Fluent id that names the next step) and severity of a known HRESULT, as
+/// findings use them; `None` for a code the table doesn't know.
+#[must_use]
+pub fn diagnosis_for(code: u32) -> Option<(&'static str, Severity)> {
+    DECODE
+        .iter()
+        .find(|(k, ..)| *k == code)
+        .map(|(_, id, sev)| (*id, *sev))
+}
+
 fn classify(line: &LogLine<'_>) -> Option<(&'static str, Severity, Option<i32>)> {
     let code = hresult_in(line.text);
     if let Some(c) = code {
         let bits = u32::from_ne_bytes(c.to_ne_bytes());
-        if let Some((_, id, sev)) = DECODE.iter().find(|(k, ..)| *k == bits) {
-            return Some((*id, *sev, code));
+        if let Some((id, sev)) = diagnosis_for(bits) {
+            return Some((id, sev, code));
         }
         // An unknown failure code on an error line is still worth showing.
         let is_error = line.level.is_some_and(|l| l.eq_ignore_ascii_case("Error"));

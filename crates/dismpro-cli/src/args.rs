@@ -3,6 +3,7 @@
 use std::{ffi::OsString, path::PathBuf};
 
 use dpro_core::id::JobId;
+use dpro_mcp::catalog::Toolset;
 use lexopt::{Arg, Parser, ValueExt};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,14 +59,27 @@ pub(crate) enum Command {
     PackagesList,
     PackagesRemove(Vec<String>),
     FeaturesList,
-    FeaturesSet { enable: bool, names: Vec<String> },
-    Health { scan: bool },
+    FeaturesSet {
+        enable: bool,
+        names: Vec<String>,
+    },
+    Health {
+        scan: bool,
+    },
     HealthRestore,
     RebootReasons,
     JournalList,
     JournalShow(JournalRef),
     JournalUndo(JournalRef),
     Purge,
+    /// The MCP server on stdio (TD-0013), optionally narrowed to some toolsets.
+    Mcp {
+        toolsets: Option<Vec<Toolset>>,
+    },
+    /// The elevated agent broker for one user's fronts (internal; TD-0013 §15).
+    AgentBroker {
+        user_sid: String,
+    },
 }
 
 /// A journaled job: by id (looked up in the target's journal folder) or by file path.
@@ -107,6 +121,9 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli, Usa
     let mut version = false;
     let mut dry_run = false;
     let mut yes = false;
+    let mut toolsets: Option<String> = None;
+    let mut agent_broker = false;
+    let mut user_sid: Option<String> = None;
     while let Some(arg) = p.next()? {
         match arg {
             Arg::Short('h') | Arg::Long("help") => help = true,
@@ -118,6 +135,10 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli, Usa
             Arg::Long("limit-access") => g.limit_access = true,
             Arg::Long("source") => g.sources.push(PathBuf::from(p.value()?)),
             Arg::Long("target") => g.target = target(&p.value()?.string()?)?,
+            Arg::Long("toolsets") => toolsets = Some(p.value()?.string()?),
+            // Internal: how the MCP front starts its elevated broker (TD-0013 §15).
+            Arg::Long("agent-broker") => agent_broker = true,
+            Arg::Long("user-sid") => user_sid = Some(p.value()?.string()?),
             Arg::Value(v) => words.push(v.string()?),
             other => return Err(other.unexpected().into()),
         }
@@ -128,17 +149,54 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli, Usa
         (false, true) => ApplyMode::Yes,
         (false, false) => ApplyMode::Ask,
     };
-    let command = if help {
+    let mut command = if help {
         Command::Help
     } else if version {
         Command::Version
+    } else if agent_broker {
+        if !words.is_empty() {
+            return Err(UsageError("--agent-broker takes no command".into()));
+        }
+        let sid = user_sid
+            .take()
+            .ok_or_else(|| UsageError("--agent-broker needs --user-sid".into()))?;
+        Command::AgentBroker { user_sid: sid }
     } else {
         command(&words)?
     };
+    if user_sid.is_some() {
+        return Err(UsageError(
+            "--user-sid goes only with --agent-broker".into(),
+        ));
+    }
+    if let Some(list) = toolsets {
+        let Command::Mcp { toolsets } = &mut command else {
+            return Err(UsageError("--toolsets goes only with mcp".into()));
+        };
+        *toolsets = Some(parse_toolsets(&list)?);
+    }
     Ok(Cli { global: g, command })
 }
 
-fn target(s: &str) -> Result<TargetSel, UsageError> {
+/// `core,maintain`: the toolsets an MCP client's configuration asks for (TD-0013 §10).
+fn parse_toolsets(list: &str) -> Result<Vec<Toolset>, UsageError> {
+    let mut sets = Vec::new();
+    for name in list.split(',').map(str::trim) {
+        let set = Toolset::parse(name).ok_or_else(|| {
+            let known: Vec<&str> = Toolset::ALL.iter().map(|t| t.name()).collect();
+            UsageError(format!(
+                "unknown toolset {name:?} (known: {})",
+                known.join(", ")
+            ))
+        })?;
+        if !sets.contains(&set) {
+            sets.push(set);
+        }
+    }
+    Ok(sets)
+}
+
+pub(crate) fn target(s: &str) -> Result<TargetSel, UsageError> {
     if s.eq_ignore_ascii_case("online") {
         return Ok(TargetSel::Online);
     }
@@ -195,6 +253,7 @@ fn command(words: &[String]) -> Result<Command, UsageError> {
         ["journal", "show", job] => Command::JournalShow(JournalRef::parse(job)),
         ["journal", "undo", job] => Command::JournalUndo(JournalRef::parse(job)),
         ["purge"] => Command::Purge,
+        ["mcp"] => Command::Mcp { toolsets: None },
         _ => return Err(UsageError(format!("unknown command {:?}", words.join(" ")))),
     })
 }
@@ -249,6 +308,19 @@ mod tests {
                 )),
             ),
             ("purge", Command::Purge),
+            ("mcp", Command::Mcp { toolsets: None }),
+            (
+                "mcp --toolsets maintain,core,maintain",
+                Command::Mcp {
+                    toolsets: Some(vec![Toolset::Maintain, Toolset::Core]),
+                },
+            ),
+            (
+                "--agent-broker --user-sid S-1-5-21-1-2-3-1001",
+                Command::AgentBroker {
+                    user_sid: "S-1-5-21-1-2-3-1001".into(),
+                },
+            ),
         ];
         for (args, expected) in cases {
             assert_eq!(&p(args).unwrap().command, expected, "{args}");
@@ -286,6 +358,13 @@ mod tests {
             "--bogus targets",
             "--dry-run --yes features disable X",
             "journal show",
+            "mcp --toolsets",
+            "mcp --toolsets core,bogus",
+            "mcp --toolsets ,",
+            "targets --toolsets core",
+            "--agent-broker",
+            "--agent-broker mcp --user-sid S-1-5-18",
+            "mcp --user-sid S-1-5-18",
         ] {
             assert!(p(bad).is_err(), "{bad}");
         }

@@ -76,6 +76,12 @@ impl From<std::io::Error> for CliError {
     }
 }
 
+impl From<dpro_engine::regf::RegfError> for CliError {
+    fn from(e: dpro_engine::regf::RegfError) -> Self {
+        Self::Failed(e.to_string())
+    }
+}
+
 impl From<dpro_engine::journal::JournalError> for CliError {
     fn from(e: dpro_engine::journal::JournalError) -> Self {
         Self::Failed(e.to_string())

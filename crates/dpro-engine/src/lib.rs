@@ -17,4 +17,5 @@ pub mod journal;
 pub mod ops;
 pub mod paths;
 pub mod purge;
+pub mod regf;
 pub mod registry;

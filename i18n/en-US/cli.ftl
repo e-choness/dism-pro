@@ -17,6 +17,7 @@ cli-help =
       journal show <job-id|file>       Show what a job did
       journal undo <job-id|file>       Plan or apply the undo of a job
       purge                            Remove all DISM Pro data from the target volume
+      mcp [--toolsets core,maintain]   Serve AI agents (MCP over stdin/stdout)
     Options:
       --target <online|D:|path|image:dir>  Target to service (default: online)
       --json                           JSON Lines output, one document per line (schemas/*.v1.json)
@@ -35,6 +36,7 @@ cli-confirmation-required = Not applied: pass --yes to apply (and --allow-irreve
 cli-applied = Applied: { $applied } of { $count }.
 cli-job-partial = Failed: { $failed }.
 cli-job-failed-change = { $action } { $object }: { $code }
+cli-crash-dump = DISM Pro crashed. A crash dump was saved to { $path }.
 cli-cancelled = Cancelled. Changes applied before that stay journaled and can be undone.
 cli-reboot-required = Restart Windows to finish these changes.
 cli-journal-file = Journal: { $path }
@@ -151,6 +153,7 @@ health-finding-unknown-error = Servicing reported an error.
 health-next-source = Point the repair at a matching install image (install.wim) with --source.
 health-restore-wu-note = The repair may download files from Windows Update. Pass --limit-access to use only --source.
 reboot-none = No reboot is pending.
+reboot-dirty-hives = This installation wasn't shut down cleanly, so its latest registry changes can't be read.
 reboot-reason-cbs = Windows servicing finished installing or removing components and needs a restart.
 reboot-reason-cbs-packages = Windows servicing has package changes waiting for a restart.
 reboot-reason-pending-xml = Component changes are queued to finish at the next restart.

@@ -58,6 +58,8 @@ pub(crate) fn run(cli: &Cli, m: &Messages) -> Result<ExitCode, CliError> {
             let target = Resolved::new(&cli.global.target)?;
             crate::journal_show(cli, m, &paths::journal_file(&target.volume_root, *job))
         }
+        Command::Mcp { toolsets } => crate::agent::front::run(toolsets.as_deref()),
+        Command::AgentBroker { user_sid } => crate::agent::broker::run(user_sid),
         Command::Help | Command::Version | Command::JournalShow(JournalRef::File(_)) => {
             Ok(ExitCode::Ok)
         }
@@ -119,27 +121,7 @@ fn require_elevation() -> Result<(), CliError> {
 }
 
 fn targets(cli: &Cli, m: &Messages) -> Result<ExitCode, CliError> {
-    let found = discover::discover(&WindowsSystem);
-    let rows: Vec<TargetJson> = found
-        .iter()
-        .map(|t| match t {
-            dpro_core::target::Target::Online { windows_dir } => TargetJson {
-                kind: t.kind(),
-                selector: "online".into(),
-                windows_dir: windows_dir.display().to_string(),
-            },
-            dpro_core::target::Target::OfflineInstall { root, windows_dir } => TargetJson {
-                kind: t.kind(),
-                selector: root.display().to_string(),
-                windows_dir: root.join(windows_dir).display().to_string(),
-            },
-            dpro_core::target::Target::MountedImage { mount_dir, .. } => TargetJson {
-                kind: t.kind(),
-                selector: format!("image:{}", mount_dir.display()),
-                windows_dir: mount_dir.join("Windows").display().to_string(),
-            },
-        })
-        .collect();
+    let rows = target_rows();
     if cli.global.json {
         out::print_json(&TargetsDoc {
             schema: "targets.v1",
@@ -159,25 +141,41 @@ fn targets(cli: &Cli, m: &Messages) -> Result<ExitCode, CliError> {
     Ok(ExitCode::Ok)
 }
 
+/// Every target on this machine, as `targets list` and the agent's `targets_list` show them.
+pub(crate) fn target_rows() -> Vec<TargetJson> {
+    discover::discover(&WindowsSystem)
+        .iter()
+        .map(|t| match t {
+            dpro_core::target::Target::Online { windows_dir } => TargetJson {
+                kind: t.kind(),
+                selector: "online".into(),
+                windows_dir: windows_dir.display().to_string(),
+            },
+            dpro_core::target::Target::OfflineInstall { root, windows_dir } => TargetJson {
+                kind: t.kind(),
+                selector: root.display().to_string(),
+                windows_dir: root.join(windows_dir).display().to_string(),
+            },
+            dpro_core::target::Target::MountedImage { mount_dir, .. } => TargetJson {
+                kind: t.kind(),
+                selector: format!("image:{}", mount_dir.display()),
+                windows_dir: mount_dir.join("Windows").display().to_string(),
+            },
+        })
+        .collect()
+}
+
 /// `reboot-reasons` (TD-0006 F-16). Online needs no elevation; offline hives do.
 fn reboot_reasons(cli: &Cli, m: &Messages) -> Result<ExitCode, CliError> {
     let target = Resolved::new(&cli.global.target)?;
-    let reasons = if target.image_root.is_none() {
-        reboot_mod::reboot_reasons(&OnlineRegistry::open()?, &RealFiles, &target.windows_dir)
-    } else {
+    if target.image_root.is_some() {
         require_elevation()?;
-        let hives = OfflineRegistry::load(&target.windows_dir)?;
-        reboot_mod::reboot_reasons(&hives, &RealFiles, &target.windows_dir)
-    };
-    let messages: Vec<String> = reasons
-        .iter()
-        .map(|r| match r {
-            dpro_core::health::RebootReason::FileRename { count } => {
-                m.get(r.message_id(), &[("count", count)])
-            }
-            _ => m.text(r.message_id()),
-        })
-        .collect();
+    }
+    let (reasons, dirty) = target.reboot_reasons()?;
+    if dirty {
+        eprintln!("{}", m.text("reboot-dirty-hives"));
+    }
+    let messages = reboot_messages(&reasons, m);
     if cli.global.json {
         out::print_json(&RebootDoc {
             schema: "reboot-reasons.v1",
@@ -309,16 +307,23 @@ fn confirm(g: &crate::args::Global, plan: &Plan, m: &Messages) -> Option<ExitCod
 }
 
 /// A `--target` resolved to concrete paths.
-struct Resolved {
+pub(crate) struct Resolved {
     /// Where the journal lives (`<volume>\ProgramData\DismPro`).
-    volume_root: PathBuf,
+    pub(crate) volume_root: PathBuf,
     /// The image root DISM opens (`DISM_ONLINE_IMAGE` for the running OS).
-    image_root: Option<PathBuf>,
-    windows_dir: PathBuf,
+    pub(crate) image_root: Option<PathBuf>,
+    pub(crate) windows_dir: PathBuf,
+}
+
+/// What a target's registry says about it.
+pub(crate) struct Facts {
+    pub(crate) target_id: TargetId,
+    pub(crate) os_build: OsBuild,
+    pub(crate) edition: Option<String>,
 }
 
 impl Resolved {
-    fn new(sel: &TargetSel) -> Result<Self, CliError> {
+    pub(crate) fn new(sel: &TargetSel) -> Result<Self, CliError> {
         Ok(match sel {
             TargetSel::Online => {
                 let windows_dir = system::windows_directory()?;
@@ -351,26 +356,51 @@ impl Resolved {
     }
 
     /// `(TargetId, OsBuild)`; zeros when the registry can't be read (CAVEATS.md §9).
-    fn identity(&self) -> (TargetId, OsBuild) {
-        let unknown = OsBuild {
-            major: 0,
-            minor: 0,
-            build: 0,
-            revision: 0,
-        };
-        let pair = match &self.image_root {
-            None => OnlineRegistry::open()
-                .ok()
-                .map(|r| (identity::target_id(&r), identity::os_build(&r))),
-            Some(_) => OfflineRegistry::load(&self.windows_dir)
-                .ok()
-                .map(|r| (identity::target_id(&r), identity::os_build(&r))),
-        };
-        let (id, build) = pair.unwrap_or((None, None));
-        (id.unwrap_or(UNKNOWN_TARGET), build.unwrap_or(unknown))
+    pub(crate) fn identity(&self) -> (TargetId, OsBuild) {
+        let facts = self.facts();
+        (facts.target_id, facts.os_build)
     }
 
-    fn open<'api>(&self, api: &'api DismApi) -> Result<Session<'api>, CliError> {
+    /// Identity and edition from one read of the registry. Read it before DISM opens an
+    /// offline image: its hives can't be loaded twice.
+    pub(crate) fn facts(&self) -> Facts {
+        fn read(reg: &impl dpro_engine::registry::RegistryView) -> Facts {
+            Facts {
+                target_id: identity::target_id(reg).unwrap_or(UNKNOWN_TARGET),
+                os_build: identity::os_build(reg).unwrap_or(UNKNOWN_BUILD),
+                edition: identity::edition(reg),
+            }
+        }
+        let facts = match &self.image_root {
+            None => OnlineRegistry::open().ok().map(|r| read(&r)),
+            Some(_) => OfflineRegistry::load(&self.windows_dir)
+                .ok()
+                .map(|r| read(&r)),
+        };
+        facts.unwrap_or(Facts {
+            target_id: UNKNOWN_TARGET,
+            os_build: UNKNOWN_BUILD,
+            edition: None,
+        })
+    }
+
+    /// Why a restart is pending (TD-0006 F-16), and whether offline hives were dirty (their
+    /// last write didn't finish, so recent changes may be missing). Offline needs elevation.
+    pub(crate) fn reboot_reasons(
+        &self,
+    ) -> Result<(Vec<dpro_core::health::RebootReason>, bool), CliError> {
+        Ok(if self.image_root.is_none() {
+            let reasons =
+                reboot_mod::reboot_reasons(&OnlineRegistry::open()?, &RealFiles, &self.windows_dir);
+            (reasons, false)
+        } else {
+            let hives = OfflineRegistry::load(&self.windows_dir)?;
+            let reasons = reboot_mod::reboot_reasons(&hives, &RealFiles, &self.windows_dir);
+            (reasons, hives.is_dirty())
+        })
+    }
+
+    pub(crate) fn open<'api>(&self, api: &'api DismApi) -> Result<Session<'api>, CliError> {
         Ok(match &self.image_root {
             None => Session::open_online(api)?,
             Some(root) => Session::open_offline(api, root, None)?,
@@ -378,8 +408,30 @@ impl Resolved {
     }
 }
 
+/// The reasons in the user's words; a pending file rename says how many.
+pub(crate) fn reboot_messages(
+    reasons: &[dpro_core::health::RebootReason],
+    m: &Messages,
+) -> Vec<String> {
+    reasons
+        .iter()
+        .map(|r| match r {
+            dpro_core::health::RebootReason::FileRename { count } => {
+                m.get(r.message_id(), &[("count", count)])
+            }
+            _ => m.text(r.message_id()),
+        })
+        .collect()
+}
+
 /// The identity of a target whose registry couldn't be read.
-const UNKNOWN_TARGET: TargetId = TargetId([0; 16]);
+pub(crate) const UNKNOWN_TARGET: TargetId = TargetId([0; 16]);
+const UNKNOWN_BUILD: OsBuild = OsBuild {
+    major: 0,
+    minor: 0,
+    build: 0,
+    revision: 0,
+};
 
 struct Ctx<'a, 'api> {
     cli: &'a Cli,
@@ -396,27 +448,11 @@ struct Ctx<'a, 'api> {
 
 impl Ctx<'_, '_> {
     fn packages(&self) -> Result<ExitCode, CliError> {
-        let packages = self.session.packages()?;
         let m = self.m;
         if self.cli.global.json {
-            let rows = packages
-                .into_iter()
-                .map(|p| {
-                    let t = p.install_time;
-                    PackageJson {
-                        identity: p.name.to_string_lossy().into_owned(),
-                        state: state_name(p.state),
-                        release_type: p.release_type,
-                        installed: format!(
-                            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
-                            t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond
-                        ),
-                    }
-                })
-                .collect();
             out::print_json(&PackagesDoc {
                 schema: "packages.v1",
-                packages: rows,
+                packages: package_rows(&self.session)?,
             })?;
         } else {
             let mut t = table::Table::new(&[
@@ -424,7 +460,7 @@ impl Ctx<'_, '_> {
                 (m.text("col-state"), false),
                 (m.text("col-installed"), false),
             ]);
-            for p in packages {
+            for p in self.session.packages()? {
                 let i = p.install_time;
                 t.push(vec![
                     p.name.to_string_lossy().into_owned(),
@@ -449,15 +485,7 @@ impl Ctx<'_, '_> {
     }
 
     fn feature_entries(&self) -> Result<Vec<FeatureEntry>, CliError> {
-        Ok(self
-            .session
-            .features()?
-            .into_iter()
-            .map(|f| FeatureEntry {
-                name: f.name.to_string_lossy().into_owned(),
-                enabled: is_enabled(f.state),
-            })
-            .collect())
+        feature_entries(&self.session)
     }
 
     fn features(&self) -> Result<ExitCode, CliError> {
@@ -494,49 +522,20 @@ impl Ctx<'_, '_> {
     /// Findings come from the part of CBS.log written during the check.
     fn health(&self, scan: bool) -> Result<ExitCode, CliError> {
         let m = self.m;
-        let log = self
-            .target
-            .windows_dir
-            .join("Logs")
-            .join("CBS")
-            .join("CBS.log");
-        let start = fs::metadata(&log).map_or(0, |md| md.len());
         let progress = ProgressLine::new(self.cli.global.json, m);
         let sink = |p: Progress| progress.report(p);
         let call = Call {
             cancel: Some(self.cancel_event),
             progress: Some(&sink),
         };
-        let checked = self.session.check_health(scan, call);
+        let checked = check_health(&self.session, &self.target.windows_dir, scan, call, m);
         progress.finish();
-        let state = health::image_health(checked?);
-        let findings = match File::open(&log) {
-            Ok(mut f) => {
-                use std::io::{Seek, SeekFrom};
-                // A rotated log is shorter than `start`: read it from the beginning.
-                let len = f.metadata().map_or(0, |md| md.len());
-                f.seek(SeekFrom::Start(if len >= start { start } else { 0 }))?;
-                logs::scan(std::io::BufReader::new(f), dpro_core::health::LogFile::Cbs)?
-            }
-            Err(_) => Vec::new(),
-        };
+        let (state, rows) = checked?;
         let state_id = match state {
             dpro_core::health::ImageHealth::Healthy => "health-state-healthy",
             dpro_core::health::ImageHealth::Repairable => "health-state-repairable",
             dpro_core::health::ImageHealth::NonRepairable => "health-state-non-repairable",
         };
-        let rows: Vec<FindingJson> = findings
-            .iter()
-            .map(|f| FindingJson {
-                severity: f.severity,
-                diagnosis: f.diagnosis,
-                message: m.text(f.diagnosis),
-                code: f.code.map(|c| hresult(c.code)),
-                log: f.source.file,
-                first_line: f.source.first_line,
-                last_line: f.source.last_line,
-            })
-            .collect();
         if self.cli.global.json {
             out::print_json(&HealthDoc {
                 schema: "health.v1",
@@ -583,57 +582,18 @@ impl Ctx<'_, '_> {
     /// job that was already undone. For an interrupted job, feature changes without an
     /// outcome are probed against the image.
     fn undo(&mut self, job_ref: &JournalRef) -> Result<ExitCode, CliError> {
-        let m = self.m;
         let path = match job_ref {
             JournalRef::Id(job) => paths::journal_file(&self.target.volume_root, *job),
             JournalRef::File(path) => path.clone(),
         };
-        let bytes = fs::read(&path).map_err(|e| CliError::io_at(&path, &e))?;
-        let rec = journal::read(&bytes)?;
-        let job = rec.begin.job;
-        let known = |t: TargetId| t != UNKNOWN_TARGET;
-        if known(rec.begin.target) && known(self.target_id) && rec.begin.target != self.target_id {
-            return Err(CliError::Failed(
-                m.get("journal-other-target", &[("job", &job)]),
-            ));
-        }
-        if rec.begin.os_build.build != self.os_build.build {
-            return Err(CliError::Failed(m.get(
-                "journal-other-build",
-                &[
-                    ("job", &job),
-                    ("then", &rec.begin.os_build.build),
-                    ("now", &self.os_build.build),
-                ],
-            )));
-        }
-        let dir = paths::journal_dir(&self.target.volume_root);
-        let entries = journal::list(&dir).map_err(|e| CliError::io_at(&dir, &e))?;
-        if let Some(by) = journal::undone_by(&entries, job) {
-            return Err(CliError::Failed(
-                m.get("journal-already-undone", &[("job", &job), ("by", &by)]),
-            ));
-        }
-        let report = journal::analyze(&rec);
-        let probed = if report.status.is_none() && !report.without_outcome.is_empty() {
-            ops::probe_features(&rec, &report.without_outcome, &self.feature_entries()?)
-        } else {
-            Vec::new()
-        };
-        let doc = PlanDoc {
-            schema: PLAN_SCHEMA.to_owned(),
-            target: self.target_id,
-            os_build: self.os_build,
-            op: OpDescriptor {
-                id: "journal.undo".into(),
-                title_key: "op-journal-undo".into(),
-                category: "journal".into(),
-                cancellable: false,
-            },
-            changes: journal::undo_changes(&rec, &probed, paths::now()),
-            summary: PlanSummary::default(),
-        };
-        self.apply(&Plan::from_doc(doc)?, Some(job))
+        let (plan, job) = undo_plan(
+            self.target,
+            (self.target_id, self.os_build),
+            &path,
+            || self.feature_entries(),
+            self.m,
+        )?;
+        self.apply(&plan, Some(job))
     }
 
     /// Print the plan, confirm, apply with a journal, report (TD-0002 §4, §5.2).
@@ -717,6 +677,140 @@ impl Ctx<'_, '_> {
             summary.failed,
         ))
     }
+}
+
+/// The packages of an open session, as `packages list --json` and `updates_list` show them.
+pub(crate) fn package_rows(session: &Session<'_>) -> Result<Vec<PackageJson>, CliError> {
+    Ok(session
+        .packages()?
+        .into_iter()
+        .map(|p| {
+            let t = p.install_time;
+            PackageJson {
+                identity: p.name.to_string_lossy().into_owned(),
+                state: state_name(p.state),
+                release_type: p.release_type,
+                installed: format!(
+                    "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
+                    t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond
+                ),
+            }
+        })
+        .collect())
+}
+
+/// A health check or scan (TD-0006 §5.2) and its findings: the lines of the target's CBS.log
+/// written during the call.
+pub(crate) fn check_health(
+    session: &Session<'_>,
+    windows_dir: &Path,
+    scan: bool,
+    call: Call<'_>,
+    m: &Messages,
+) -> Result<(dpro_core::health::ImageHealth, Vec<FindingJson>), CliError> {
+    let log = windows_dir.join("Logs").join("CBS").join("CBS.log");
+    let start = fs::metadata(&log).map_or(0, |md| md.len());
+    let state = health::image_health(session.check_health(scan, call)?);
+    let findings = match File::open(&log) {
+        Ok(mut f) => {
+            use std::io::{Seek, SeekFrom};
+            // A rotated log is shorter than `start`: read it from the beginning.
+            let len = f.metadata().map_or(0, |md| md.len());
+            f.seek(SeekFrom::Start(if len >= start { start } else { 0 }))?;
+            logs::scan(std::io::BufReader::new(f), dpro_core::health::LogFile::Cbs)?
+        }
+        Err(_) => Vec::new(),
+    };
+    Ok((state, finding_rows(&findings, m)))
+}
+
+pub(crate) fn finding_rows(
+    findings: &[dpro_core::health::Finding],
+    m: &Messages,
+) -> Vec<FindingJson> {
+    findings
+        .iter()
+        .map(|f| FindingJson {
+            severity: f.severity,
+            diagnosis: f.diagnosis,
+            message: m.text(f.diagnosis),
+            code: f.code.map(|c| hresult(c.code)),
+            log: f.source.file,
+            first_line: f.source.first_line,
+            last_line: f.source.last_line,
+        })
+        .collect()
+}
+
+/// The plan that undoes a journaled job: its inverse changes, previewed and journaled like any
+/// other plan (TD-0001 §5.2). Refused for another installation, another build, or a job that
+/// was already undone. For an interrupted job, feature changes without an outcome are probed
+/// against the image, which is what `features` reads. Returns the plan and the job it undoes.
+pub(crate) fn undo_plan(
+    target: &Resolved,
+    (target_id, os_build): (TargetId, OsBuild),
+    journal_file: &Path,
+    features: impl FnOnce() -> Result<Vec<FeatureEntry>, CliError>,
+    m: &Messages,
+) -> Result<(Plan, JobId), CliError> {
+    let bytes = fs::read(journal_file).map_err(|e| CliError::io_at(journal_file, &e))?;
+    let rec = journal::read(&bytes)?;
+    let job = rec.begin.job;
+    let known = |t: TargetId| t != UNKNOWN_TARGET;
+    if known(rec.begin.target) && known(target_id) && rec.begin.target != target_id {
+        return Err(CliError::Failed(
+            m.get("journal-other-target", &[("job", &job)]),
+        ));
+    }
+    if rec.begin.os_build.build != os_build.build {
+        return Err(CliError::Failed(m.get(
+            "journal-other-build",
+            &[
+                ("job", &job),
+                ("then", &rec.begin.os_build.build),
+                ("now", &os_build.build),
+            ],
+        )));
+    }
+    let dir = paths::journal_dir(&target.volume_root);
+    let entries = journal::list(&dir).map_err(|e| CliError::io_at(&dir, &e))?;
+    if let Some(by) = journal::undone_by(&entries, job) {
+        return Err(CliError::Failed(
+            m.get("journal-already-undone", &[("job", &job), ("by", &by)]),
+        ));
+    }
+    let report = journal::analyze(&rec);
+    let probed = if report.status.is_none() && !report.without_outcome.is_empty() {
+        ops::probe_features(&rec, &report.without_outcome, &features()?)
+    } else {
+        Vec::new()
+    };
+    let doc = PlanDoc {
+        schema: PLAN_SCHEMA.to_owned(),
+        target: target_id,
+        os_build,
+        op: OpDescriptor {
+            id: "journal.undo".into(),
+            title_key: "op-journal-undo".into(),
+            category: "journal".into(),
+            cancellable: false,
+        },
+        changes: journal::undo_changes(&rec, &probed, paths::now()),
+        summary: PlanSummary::default(),
+    };
+    Ok((Plan::from_doc(doc)?, job))
+}
+
+/// The features of an open session, as the planners and the undo probe take them.
+pub(crate) fn feature_entries(session: &Session<'_>) -> Result<Vec<FeatureEntry>, CliError> {
+    Ok(session
+        .features()?
+        .into_iter()
+        .map(|f| FeatureEntry {
+            name: f.name.to_string_lossy().into_owned(),
+            enabled: is_enabled(f.state),
+        })
+        .collect())
 }
 
 /// Installed or install-pending counts as enabled (`DismStateInstalled`,

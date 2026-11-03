@@ -12,9 +12,12 @@
 #![cfg(windows)]
 
 pub mod console;
+pub mod crash;
 pub mod dism;
+pub mod elevate;
 pub mod error;
 pub mod event;
+pub mod pipe;
 pub mod privilege;
 pub mod reg;
 pub mod security;
