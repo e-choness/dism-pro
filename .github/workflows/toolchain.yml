@@ -1,28 +1,39 @@
-# Publishes the toolchain images to GHCR (ADR-0003). After a publish, a follow-up
-# `build(docker): …` PR pins compose.yaml to the digests printed in the job summary.
+# Publishes the toolchain images to GHCR as a private package (ADR-0003, decision #29). The `lock`
+# job prints .github/toolchain.lock for the new digests; a follow-up `build(docker): …` PR commits
+# it, and CI pulls those images instead of building them from then on.
 name: toolchain
 
 on:
   push:
     branches: [master]
-    paths: [docker/**]
+    # The images' only input (see .github/scripts/toolchain-images.sh).
+    paths: [docker/build.Dockerfile]
   workflow_dispatch:
 
 permissions:
   contents: read
-  packages: write
 
 jobs:
   publish:
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
     strategy:
       matrix:
         target: [t1, t2]
+    outputs:
+      # One output per leg; the lock job reads both.
+      t1: ${{ steps.ref.outputs.t1 }}
+      t2: ${{ steps.ref.outputs.t2 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Refuse a public package (decision #29)
+        # Pushing there would redistribute the MSVC CRT and Windows SDK files in the images.
+        run: bash .github/scripts/toolchain-images.sh check-private
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
@@ -42,9 +53,38 @@ jobs:
             type=gha,scope=t1
             type=gha,scope=${{ matrix.target }}
           cache-to: type=gha,scope=${{ matrix.target }},mode=max
-      - name: Digest for compose.yaml
+      - id: ref
         env:
           TARGET: ${{ matrix.target }}
-          REF: ghcr.io/e-choness/dism-pro-build@${{ steps.push.outputs.digest }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: echo "${TARGET}=ghcr.io/e-choness/dism-pro-build@${DIGEST}" >> "$GITHUB_OUTPUT"
+
+  lock:
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check the package is still private (decision #29)
+        # A package's first publish makes it private; this catches anything that changed that.
+        run: bash .github/scripts/toolchain-images.sh check-private
+      - name: Print .github/toolchain.lock
+        env:
+          T1: ${{ needs.publish.outputs.t1 }}
+          T2: ${{ needs.publish.outputs.t2 }}
         run: |
-          echo "${TARGET}: \`${REF}\`" >> "$GITHUB_STEP_SUMMARY"
+          set -euo pipefail
+          bash .github/scripts/toolchain-images.sh lock "$T1" "$T2" > "$RUNNER_TEMP/toolchain.lock"
+          {
+            echo "Commit this as \`.github/toolchain.lock\` (a \`build(docker): …\` PR):"
+            echo
+            echo '```'
+            cat "$RUNNER_TEMP/toolchain.lock"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          # Annotations, unlike the summary, can be read without signing in.
+          grep -v '^#' "$RUNNER_TEMP/toolchain.lock" | while IFS= read -r line; do
+            echo "::notice title=toolchain.lock::$line"
+          done
