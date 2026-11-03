@@ -4,3 +4,5 @@
 //! Allowed workspace dependencies: `dpro-core`, `dpro-rules`, `dpro-app`, `dpro-broker`.
 
 #![forbid(unsafe_code)]
+
+pub mod shape;

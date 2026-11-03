@@ -340,6 +340,12 @@ dependencies = [
 [[package]]
 name = "dpro-mcp"
 version = "0.1.0"
+dependencies = [
+ "criterion",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
 
 [[package]]
 name = "dpro-rules"
