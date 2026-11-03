@@ -51,7 +51,7 @@ pub fn ensure_admin_only_dir(dir: &Path) -> Result<()> {
     if let Some(parent) = dir.parent() {
         std::fs::create_dir_all(parent).map_err(|e| io_error(&e, "CreateDirectoryW"))?;
     }
-    let sd = LocalBox(admin_only_descriptor()?);
+    let sd = descriptor(ADMIN_ONLY)?;
     let attributes = SECURITY_ATTRIBUTES {
         nLength: u32::try_from(size_of::<SECURITY_ATTRIBUTES>()).unwrap_or(u32::MAX),
         lpSecurityDescriptor: sd.0,
@@ -113,8 +113,9 @@ pub fn ensure_admin_only_dir(dir: &Path) -> Result<()> {
     }
 }
 
-fn admin_only_descriptor() -> Result<PSECURITY_DESCRIPTOR> {
-    let sddl = WideCString::new(ADMIN_ONLY)?;
+/// A security descriptor from SDDL, freed on drop.
+pub(crate) fn descriptor(sddl: &str) -> Result<LocalBox> {
+    let sddl = WideCString::new(sddl)?;
     let mut sd: PSECURITY_DESCRIPTOR = ptr::null_mut();
     // SAFETY: `sddl` is NUL-terminated; `sd` is a valid out pointer; the size is optional.
     let ok = unsafe {
@@ -126,11 +127,11 @@ fn admin_only_descriptor() -> Result<PSECURITY_DESCRIPTOR> {
         )
     };
     last_error_if_false(ok, "ConvertStringSecurityDescriptorToSecurityDescriptorW")?;
-    Ok(sd)
+    Ok(LocalBox(sd))
 }
 
 /// A `LocalAlloc`ed buffer from a security API, freed with `LocalFree`.
-struct LocalBox(PSECURITY_DESCRIPTOR);
+pub(crate) struct LocalBox(pub(crate) PSECURITY_DESCRIPTOR);
 
 impl Drop for LocalBox {
     fn drop(&mut self) {
@@ -142,7 +143,7 @@ impl Drop for LocalBox {
     }
 }
 
-fn io_error(e: &std::io::Error, api: &'static str) -> Error {
+pub(crate) fn io_error(e: &std::io::Error, api: &'static str) -> Error {
     let code = e
         .raw_os_error()
         .and_then(|c| u32::try_from(c).ok())
@@ -156,7 +157,7 @@ mod tests {
 
     #[test]
     fn descriptor_parses() {
-        let sd = LocalBox(admin_only_descriptor().unwrap());
+        let sd = descriptor(ADMIN_ONLY).unwrap();
         assert!(!sd.0.is_null());
     }
 

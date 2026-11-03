@@ -22,6 +22,12 @@ pub enum Error {
     /// DISM Pro state must live in a folder only SYSTEM and Administrators control (TD-0001 §8).
     #[error("{} isn't a folder owned by SYSTEM or Administrators; inspect and delete it, then retry", .0.display())]
     UntrustedDir(std::path::PathBuf),
+    /// A pipe name or SID that isn't in the plain form the API accepts.
+    #[error("{0:?} isn't a plain name")]
+    InvalidName(String),
+    /// A pipe message above the size limit.
+    #[error("message of {0} bytes is too large")]
+    MessageTooLarge(usize),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
