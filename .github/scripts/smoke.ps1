@@ -132,8 +132,8 @@ if ($Health) {
     }
     if ($Target) {
         $script:repaired = $false
-        # A restore either repairs the store or, without a usable source, fails with
-        # CBS_E_SOURCE_MISSING (0x800f0915) as one failed change in a recorded job.
+        # A restore either repairs the store or, without a usable source, fails with 0x800f0915 ("The
+        # repair content could not be found anywhere") as one failed change in a recorded job.
         function Invoke-Restore([string[]] $Extra) {
             $sw = [Diagnostics.Stopwatch]::StartNew()
             $docs = Invoke-Cli (@('health', 'restore', '--limit-access', '--yes', '--allow-irreversible') + $Extra) -Expect 0, 1
