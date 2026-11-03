@@ -29,13 +29,15 @@ $failures = 0
 $targetArgs = if ($Target) { '--target', (Resolve-Path $Target).Path } else { @() }
 $targetName = if ($Target) { 'offline image' } else { 'online' }
 
-# Runs the CLI with --json and returns the parsed JSON Lines. Throws unless it exits with $Expect.
-function Invoke-Cli([string[]] $Arguments, [int] $Expect = 0) {
+# Runs the CLI with --json and returns the parsed JSON Lines. Throws unless it exits with one of
+# $Expect; the code is left in $script:lastExit.
+function Invoke-Cli([string[]] $Arguments, [int[]] $Expect = @(0)) {
     $lines = & $Cli @Arguments @targetArgs --json 2> $errFile
     $code = $LASTEXITCODE
-    if ($code -ne $Expect) {
+    $script:lastExit = $code
+    if ($code -notin $Expect) {
         $err = Get-Content $errFile -Raw -ErrorAction SilentlyContinue
-        throw "dismpro-cli $($Arguments -join ' ') exited $code, expected $Expect. stdout: $($lines -join ' ') stderr: $err"
+        throw "dismpro-cli $($Arguments -join ' ') exited $code, expected $($Expect -join ' or '). stdout: $($lines -join ' ') stderr: $err"
     }
     @($lines | Where-Object { $_ } | ForEach-Object { $_ | ConvertFrom-Json })
 }
@@ -110,6 +112,7 @@ if ($Health) {
     if (-not $Target) { $logs.Remove('target CBS.log') }
     function Get-LogSize([string] $Path) { if (Test-Path $Path) { (Get-Item $Path).Length } else { -1 } }
 
+    $script:scanState = $null
     Test-Step 'health scan' {
         $before = @{}; foreach ($k in $logs.Keys) { $before[$k] = Get-LogSize $logs[$k] }
         $sw = [Diagnostics.Stopwatch]::StartNew()
@@ -119,35 +122,55 @@ if ($Health) {
             $after = Get-LogSize $logs[$k]
             if ($after -lt 0) { "$k missing" } else { "$k +$($after - [math]::Max($before[$k], 0)) B" }
         }
-        # The runner's own store is reported, not judged; a fresh image must be healthy.
-        if ($Target -and $d.state -ne 'healthy') { throw "state $($d.state), findings $($d.findings | ConvertTo-Json -Compress)" }
-        "$($d.state), $(@($d.findings).Count) finding(s), $took; $($growth -join ', ')"
+        $script:scanState = $d.state
+        $kinds = @($d.findings | Group-Object diagnosis | ForEach-Object { "$($_.Name) x$($_.Count)" }) -join ', '
+        $summary = "$($d.state), $(@($d.findings).Count) finding(s) [$kinds], $took; $($growth -join ', ')"
+        # Any state is the store's business (a container base layer is trimmed, so it can be
+        # repairable); a damaged state that no finding explains is ours (TD-0006 §5.2).
+        if ($d.state -ne 'healthy' -and -not @($d.findings).Count) { throw "nothing explains it: $summary" }
+        $summary
     }
     if ($Target) {
+        $script:repaired = $false
+        # A restore either repairs the store or, without a usable source, fails with
+        # CBS_E_SOURCE_MISSING (0x800f0915) as one failed change in a recorded job.
+        function Invoke-Restore([string[]] $Extra) {
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            $docs = Invoke-Cli (@('health', 'restore', '--limit-access', '--yes', '--allow-irreversible') + $Extra) -Expect 0, 1
+            $took = Format-Duration $sw
+            $job = Get-Doc $docs 'job.v1'
+            $codes = @($job.failed | ForEach-Object code)
+            $shape = "job $($job.job) $($job.status), applied $(@($job.applied).Count), failed [$($codes -join ', ')], exit $script:lastExit, $took"
+            if ($job.status -ne 'completed') { throw $shape }
+            if ($script:lastExit -eq 0 -and @($job.applied).Count -eq 1 -and -not $codes.Count) {
+                $script:repaired = $true
+                return "repaired, reboot_required=$($job.reboot_required): $shape"
+            }
+            if ($script:lastExit -eq 1 -and $codes.Count -eq 1 -and $codes[0] -eq '0x800f0915') {
+                return "no usable repair source: $shape"
+            }
+            throw $shape
+        }
         Test-Step 'health restore needs --allow-irreversible' {
             $plan = Get-Doc (Invoke-Cli 'health', 'restore', '--limit-access', '--yes' -Expect 3) 'plan.v1'
             if ($plan.summary.irreversible -ne 1) { throw "summary $($plan.summary | ConvertTo-Json -Compress)" }
             "exit 3, $($plan.summary.changes) change(s) planned, $($plan.summary.irreversible) permanent"
         }
-        Test-Step 'health restore --limit-access' {
-            $sw = [Diagnostics.Stopwatch]::StartNew()
-            $docs = Invoke-Cli 'health', 'restore', '--limit-access', '--yes', '--allow-irreversible'
-            $took = Format-Duration $sw
-            $job = Get-Doc $docs 'job.v1'
-            if ($job.status -ne 'completed' -or @($job.failed).Count -or @($job.applied).Count -ne 1) {
-                throw "job $($job.job): $($job.status), applied $(@($job.applied).Count), failed $($job.failed | ConvertTo-Json -Compress)"
-            }
-            "job $($job.job) $($job.status), reboot_required=$($job.reboot_required), $took"
+        Test-Step 'health restore --limit-access' { Invoke-Restore @() }
+        if (-not $script:repaired) {
+            # The runner's own Windows as the source: it repairs only if its build matches the image's.
+            Test-Step 'health restore --source <runner Windows>' { Invoke-Restore @('--source', $env:SystemRoot) }
         }
         Test-Step 'journal list (restore)' {
             $last = @((Get-Doc (Invoke-Cli 'journal', 'list') 'journals.v1').jobs)[-1]
-            if ($last.status -ne 'completed') { throw ($last | ConvertTo-Json -Compress) }
+            if ($last.op -ne 'health.restore' -or $last.status -ne 'completed') { throw ($last | ConvertTo-Json -Compress) }
             "last job: $($last.op), $($last.status)"
         }
         Test-Step 'health check after restore' {
             $d = Get-Doc (Invoke-Cli 'health', 'check') 'health.v1'
-            if ($d.state -ne 'healthy') { throw "state $($d.state)" }
-            "$($d.state), $(@($d.findings).Count) finding(s)"
+            $want = if ($script:repaired) { 'healthy' } else { $script:scanState }
+            if ($want -and $d.state -ne $want) { throw "state $($d.state), expected $want" }
+            "$($d.state) (repaired=$script:repaired, scan said $script:scanState)"
         }
     }
     Complete-Run 'health'
