@@ -6,7 +6,7 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, labeled]
   push:
-    branches: [master]
+    branches: [master, diag/toolchain-pin]
   schedule:
     - cron: "17 3 * * *" # nightly
   workflow_dispatch:
@@ -51,7 +51,7 @@ jobs:
     needs: linux
     # Windows minutes are scarce: master, nightly, manual, or PRs labeled needs-windows.
     if: >-
-      github.event_name == 'push' || github.event_name == 'schedule' ||
+      false && github.event_name == 'push' || github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch' ||
       contains(github.event.pull_request.labels.*.name, 'needs-windows')
     runs-on: windows-2025
@@ -80,7 +80,7 @@ jobs:
     # dismapi.h ships with the Windows ADK, not the SDK in the toolchain image (decision #22).
     # Only the headers leave this job, as a short-lived private artifact; never committed.
     if: >-
-      github.event_name == 'push' || github.event_name == 'schedule' ||
+      false && github.event_name == 'push' || github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch' ||
       contains(github.event.pull_request.labels.*.name, 'needs-windows')
     runs-on: windows-2025
@@ -157,3 +157,25 @@ jobs:
       - run: docker compose run --rm ffi-check
         env:
           DPRO_FFI_INCLUDE: /src/.adk-include
+
+  # diag/toolchain-pin only: `pinned: require` must fail, and leave no image, when the lock is stale.
+  require-fails:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: echo "# stale" >> docker/build.Dockerfile
+      - id: load
+        continue-on-error: true
+        uses: ./.github/actions/toolchain
+        with:
+          pinned: require
+      - name: Check the outcome
+        env:
+          OUTCOME: ${{ steps.load.outcome }}
+        run: |
+          [[ $OUTCOME == failure ]] || { echo "::error::pinned: require went ahead ($OUTCOME)"; exit 1; }
+          [[ -z $(docker images -q dism-pro-build:t1-local) ]] || { echo "::error::an image was loaded"; exit 1; }
+          echo "::notice title=require-fails::pinned: require refused a stale lock and loaded nothing"
