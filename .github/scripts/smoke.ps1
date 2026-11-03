@@ -26,8 +26,8 @@ $targetArgs = if ($Target) { '--target', (Resolve-Path $Target).Path } else { @(
 $targetName = if ($Target) { 'offline image' } else { 'online' }
 
 # Runs the CLI with --json and returns the parsed JSON Lines. Throws unless it exits with one of
-# $Expect; $script:lastExit keeps the code.
-function Invoke-Cli([string[]] $Arguments, [int[]] $Expect = 0) {
+# $Expect; the code is left in $script:lastExit.
+function Invoke-Cli([string[]] $Arguments, [int[]] $Expect = @(0)) {
     $lines = & $Cli @Arguments @targetArgs --json 2> $errFile
     $code = $LASTEXITCODE
     $script:lastExit = $code
