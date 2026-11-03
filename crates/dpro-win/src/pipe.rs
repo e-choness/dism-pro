@@ -30,7 +30,6 @@ use windows_sys::Win32::{
         INVALID_HANDLE_VALUE,
     },
     Security::{
-        Authorization::ConvertSidToStringSidW,
         Cryptography::{BCRYPT_SHA256_ALG_HANDLE, BCryptHash},
         GetTokenInformation, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenSessionId,
         TokenUser,
@@ -57,8 +56,8 @@ use dpro_core::OsError;
 
 use crate::{
     error::{Error, Result, last_error_if_false, last_os_error},
-    security::{LocalBox, descriptor, io_error},
-    wide::{WideCString, from_wide_ptr},
+    security::{descriptor, io_error, sid_string},
+    wide::WideCString,
 };
 
 /// The largest message either side accepts. Tool results stay under 32 KiB (TD-0013 §5.6); the
@@ -406,14 +405,8 @@ fn token_user_sid(token: &OwnedHandle) -> Result<String> {
     last_error_if_false(ok, "GetTokenInformation")?;
     // SAFETY: on success the buffer starts with a TOKEN_USER; the buffer is 8-byte aligned.
     let sid = unsafe { (*buf.as_ptr().cast::<TOKEN_USER>()).User.Sid };
-    let mut text: *mut u16 = ptr::null_mut();
-    // SAFETY: `sid` points into `buf`, alive for the call; `text` is a valid out pointer.
-    let ok = unsafe { ConvertSidToStringSidW(sid, &raw mut text) };
-    last_error_if_false(ok, "ConvertSidToStringSidW")?;
-    let text = LocalBox(text.cast());
-    // SAFETY: ConvertSidToStringSidW returns a NUL-terminated string.
-    let s = unsafe { from_wide_ptr(text.0.cast::<u16>()) }?;
-    Ok(s.to_string_lossy().into_owned())
+    // SAFETY: `sid` points into `buf`, alive for the call.
+    unsafe { sid_string(sid) }
 }
 
 /// SHA-256 of a file's contents (`BCryptHash`; no hashing crate). Reads the whole file: meant for

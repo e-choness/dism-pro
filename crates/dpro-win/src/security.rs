@@ -1,10 +1,16 @@
-//! Admin-only folders for DISM Pro's own state (TD-0001 §8). The journal says what to undo
-//! and the elevated process replays it, so a standard user must not be able to read, plant or
-//! edit one. `ProgramData` lets any user create subfolders (which they then own), so an
-//! existing folder is trusted only if SYSTEM or Administrators own it.
+//! Files and folders only administrators control.
+//!
+//! - DISM Pro's state folder (TD-0001 §8). The journal says what to undo and the elevated process
+//!   replays it, so a standard user must not be able to read, plant or edit one.
+//! - The agent policy inside it (TD-0013 §15), which tells the elevated broker what agents may do.
+//!
+//! `ProgramData` lets any user create subfolders (which they then own), so an existing folder or
+//! file is trusted only if SYSTEM or Administrators own it.
 
 use std::{
-    fs::OpenOptions,
+    ffi::c_void,
+    fs::{File, OpenOptions},
+    io::{self, Read},
     os::windows::{
         fs::{MetadataExt, OpenOptionsExt},
         io::AsRawHandle,
@@ -14,18 +20,23 @@ use std::{
 };
 
 use windows_sys::Win32::{
-    Foundation::{ERROR_ALREADY_EXISTS, GetLastError, LocalFree},
+    Foundation::{
+        ERROR_ALREADY_EXISTS, GENERIC_ALL, GENERIC_READ, GENERIC_WRITE, GetLastError, LocalFree,
+    },
     Security::{
+        ACCESS_ALLOWED_ACE, ACE_HEADER, ACL,
         Authorization::{
-            ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo, SDDL_REVISION_1,
-            SE_FILE_OBJECT,
+            ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+            GetSecurityInfo, SDDL_REVISION_1, SE_FILE_OBJECT,
         },
-        IsWellKnownSid, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
-        SECURITY_ATTRIBUTES, WinBuiltinAdministratorsSid, WinLocalSystemSid,
+        DACL_SECURITY_INFORMATION, GetAce, IsWellKnownSid, OWNER_SECURITY_INFORMATION,
+        PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, WinBuiltinAdministratorsSid,
+        WinLocalSystemSid,
     },
     Storage::FileSystem::{
-        CreateDirectoryW, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
-        FILE_FLAG_OPEN_REPARSE_POINT, READ_CONTROL,
+        CreateDirectoryW, DELETE, FILE_APPEND_DATA, FILE_ATTRIBUTE_REPARSE_POINT,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_WRITE_DATA, FILE_WRITE_EA,
+        READ_CONTROL, WRITE_DAC, WRITE_OWNER,
     },
 };
 
@@ -33,12 +44,30 @@ use dpro_core::OsError;
 
 use crate::{
     error::{Error, Result, last_error_if_false, win32},
-    wide::{WideCString, long_path},
+    wide::{WideCString, from_wide_ptr, long_path},
 };
 
 /// Owner Administrators; protected DACL: full control for SYSTEM and Administrators, inherited
 /// by everything below. No other access.
 const ADMIN_ONLY: &str = "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)";
+
+/// Rights that let someone change a file: its data, its extended attributes, the file itself
+/// (delete), its permissions or its owner, and the generic rights that include them.
+const CHANGE_RIGHTS: u32 = FILE_WRITE_DATA
+    | FILE_APPEND_DATA
+    | FILE_WRITE_EA
+    | DELETE
+    | WRITE_DAC
+    | WRITE_OWNER
+    | GENERIC_WRITE
+    | GENERIC_ALL;
+
+// ACE types and flags (winnt.h); the DACL walk needs only these.
+const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
+/// `ACCESS_DENIED`, `ACCESS_DENIED_OBJECT`, `ACCESS_DENIED_CALLBACK`,
+/// `ACCESS_DENIED_CALLBACK_OBJECT`: they only take rights away.
+const DENY_ACE_TYPES: [u8; 4] = [1, 6, 10, 12];
+const INHERIT_ONLY_ACE: u8 = 0x08;
 
 /// Makes sure `dir` is an admin-only folder: creates it (parents normally, `dir` itself with
 /// the admin-only descriptor), or checks that an existing one is a real folder (not a link)
@@ -68,49 +97,195 @@ pub fn ensure_admin_only_dir(dir: &Path) -> Result<()> {
     if code != ERROR_ALREADY_EXISTS {
         return Err(OsError::from_win32(code, "CreateDirectoryW").into());
     }
+    let folder = open_no_follow(dir, READ_CONTROL).map_err(|e| io_error(&e, "CreateFileW"))?;
+    check_admin_folder(&folder, dir)
+}
 
-    // Open the folder itself, not what a planted junction points to, and check that handle.
-    let folder = OpenOptions::new()
-        .access_mode(READ_CONTROL)
+/// Reads a small file that only administrators can change, such as the agent policy (TD-0013
+/// §15), through the handle whose security it checked: no one can swap the file in between.
+///
+/// `Ok(None)`: the file or its folder doesn't exist. Doesn't need elevation, but an unelevated
+/// process can't open the admin-only folder (`Error::Os` with access denied).
+///
+/// # Errors
+/// - [`Error::UntrustedDir`]: the folder is a link or isn't owned by SYSTEM or Administrators.
+/// - [`Error::UntrustedFile`]: the file is a link or a folder, isn't owned by them, someone else
+///   may change it, or it's larger than `max_len`.
+/// - OS errors otherwise.
+pub fn read_admin_only_file(path: &Path, max_len: u64) -> Result<Option<Vec<u8>>> {
+    let untrusted = |why: String| Error::UntrustedFile {
+        path: path.to_path_buf(),
+        why,
+    };
+    let dir = path
+        .parent()
+        .ok_or_else(|| untrusted("has no folder".to_owned()))?;
+    let folder = match open_no_follow(dir, READ_CONTROL) {
+        Ok(f) => f,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(io_error(&e, "CreateFileW")),
+    };
+    check_admin_folder(&folder, dir)?;
+
+    // GENERIC_READ includes READ_CONTROL, which GetSecurityInfo needs.
+    let mut file = match open_no_follow(path, GENERIC_READ) {
+        Ok(f) => f,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(io_error(&e, "CreateFileW")),
+    };
+    let md = file
+        .metadata()
+        .map_err(|e| io_error(&e, "GetFileInformationByHandle"))?;
+    if md.is_dir() || md.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(untrusted("is a folder or a link".to_owned()));
+    }
+    let security = Security::of(&file)?;
+    if !security.owned_by_admins() {
+        return Err(untrusted(
+            "isn't owned by SYSTEM or Administrators".to_owned(),
+        ));
+    }
+    if let Some(who) = security.other_changer()? {
+        return Err(untrusted(format!("can be changed by {who}")));
+    }
+    if md.len() > max_len {
+        return Err(untrusted(format!(
+            "is {} bytes; the limit is {max_len}",
+            md.len()
+        )));
+    }
+    let mut bytes = Vec::new();
+    file.by_ref()
+        .take(max_len.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|e| io_error(&e, "ReadFile"))?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > max_len {
+        return Err(untrusted(format!("grew past {max_len} bytes while read")));
+    }
+    Ok(Some(bytes))
+}
+
+/// Opens `path` itself, not what a planted link points to; works for folders too.
+fn open_no_follow(path: &Path, access: u32) -> io::Result<File> {
+    OpenOptions::new()
+        .access_mode(access)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(dir)
-        .map_err(|e| io_error(&e, "CreateFileW"))?;
+        .open(path)
+}
+
+/// A real folder (not a link) owned by SYSTEM or Administrators.
+fn check_admin_folder(folder: &File, dir: &Path) -> Result<()> {
     let md = folder
         .metadata()
         .map_err(|e| io_error(&e, "GetFileInformationByHandle"))?;
     if !md.is_dir() || md.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
         return Err(Error::UntrustedDir(dir.to_path_buf()));
     }
-    let mut owner: PSID = ptr::null_mut();
-    let mut owner_sd: PSECURITY_DESCRIPTOR = ptr::null_mut();
-    // SAFETY: the handle is open with READ_CONTROL; the out pointers are valid; `owner` points
-    // into `owner_sd`, which is freed (LocalBox) after its last use.
-    let status = unsafe {
-        GetSecurityInfo(
-            folder.as_raw_handle(),
-            SE_FILE_OBJECT,
-            OWNER_SECURITY_INFORMATION,
-            &raw mut owner,
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-            &raw mut owner_sd,
-        )
-    };
-    win32(status, "GetSecurityInfo")?;
-    let _owner_sd = LocalBox(owner_sd);
-    // No owner (a file system without ACLs) can't be trusted either.
-    // SAFETY: a non-null `owner` is a valid SID inside `owner_sd`.
-    let trusted = !owner.is_null()
-        && unsafe {
-            IsWellKnownSid(owner, WinBuiltinAdministratorsSid) != 0
-                || IsWellKnownSid(owner, WinLocalSystemSid) != 0
-        };
-    if trusted {
+    if Security::of(folder)?.owned_by_admins() {
         Ok(())
     } else {
         Err(Error::UntrustedDir(dir.to_path_buf()))
     }
+}
+
+/// The owner and DACL of an open file, from one `GetSecurityInfo` call.
+struct Security {
+    owner: PSID,
+    dacl: *const ACL,
+    /// Owns the descriptor `owner` and `dacl` point into.
+    _sd: LocalBox,
+}
+
+impl Security {
+    fn of(file: &File) -> Result<Self> {
+        let mut owner: PSID = ptr::null_mut();
+        let mut dacl: *mut ACL = ptr::null_mut();
+        let mut sd: PSECURITY_DESCRIPTOR = ptr::null_mut();
+        // SAFETY: the handle is open with READ_CONTROL; the out pointers are valid; `owner` and
+        // `dacl` point into `sd`, which `_sd` frees after their last use.
+        let status = unsafe {
+            GetSecurityInfo(
+                file.as_raw_handle(),
+                SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                &raw mut owner,
+                ptr::null_mut(),
+                &raw mut dacl,
+                ptr::null_mut(),
+                &raw mut sd,
+            )
+        };
+        win32(status, "GetSecurityInfo")?;
+        Ok(Self {
+            owner,
+            dacl,
+            _sd: LocalBox(sd),
+        })
+    }
+
+    /// No owner (a file system without ACLs) can't be trusted either.
+    fn owned_by_admins(&self) -> bool {
+        // SAFETY: a non-null owner is a valid SID inside the descriptor this struct owns.
+        !self.owner.is_null() && unsafe { is_admin_sid(self.owner) }
+    }
+
+    /// The first SID other than SYSTEM or Administrators that the DACL lets change the file, as
+    /// text. A missing DACL lets everyone; an allow entry of a kind not inspected here counts.
+    fn other_changer(&self) -> Result<Option<String>> {
+        if self.dacl.is_null() {
+            return Ok(Some("everyone (the file has no access list)".to_owned()));
+        }
+        // SAFETY: a non-null DACL from GetSecurityInfo is a valid ACL in the owned descriptor.
+        let count = unsafe { (*self.dacl).AceCount };
+        for index in 0..u32::from(count) {
+            let mut ace: *mut c_void = ptr::null_mut();
+            // SAFETY: `index` < AceCount of a valid ACL; `ace` is a valid out pointer.
+            let ok = unsafe { GetAce(self.dacl, index, &raw mut ace) };
+            last_error_if_false(ok, "GetAce")?;
+            // SAFETY: every ACE starts with an ACE_HEADER.
+            let header = unsafe { *ace.cast::<ACE_HEADER>() };
+            if header.AceFlags & INHERIT_ONLY_ACE != 0 || DENY_ACE_TYPES.contains(&header.AceType) {
+                continue;
+            }
+            if header.AceType != ACCESS_ALLOWED_ACE_TYPE {
+                return Ok(Some(format!("an access entry of type {}", header.AceType)));
+            }
+            let allowed = ace.cast::<ACCESS_ALLOWED_ACE>();
+            // SAFETY: an ACCESS_ALLOWED_ACE: a mask, then the SID starting at SidStart.
+            let (mask, sid) = unsafe { ((*allowed).Mask, (&raw mut (*allowed).SidStart).cast()) };
+            // SAFETY: `sid` points to the ACE's SID, inside the owned descriptor.
+            if mask & CHANGE_RIGHTS != 0 && !unsafe { is_admin_sid(sid) } {
+                // SAFETY: as above.
+                return Ok(Some(unsafe { sid_string(sid) }?));
+            }
+        }
+        Ok(None)
+    }
+}
+
+/// # Safety
+/// `sid` must point to a valid SID.
+unsafe fn is_admin_sid(sid: PSID) -> bool {
+    // SAFETY: the caller guarantees a valid SID.
+    unsafe {
+        IsWellKnownSid(sid, WinBuiltinAdministratorsSid) != 0
+            || IsWellKnownSid(sid, WinLocalSystemSid) != 0
+    }
+}
+
+/// A SID as `S-1-…` text.
+///
+/// # Safety
+/// `sid` must point to a valid SID.
+pub(crate) unsafe fn sid_string(sid: PSID) -> Result<String> {
+    let mut text: *mut u16 = ptr::null_mut();
+    // SAFETY: the caller guarantees a valid SID; `text` is a valid out pointer.
+    let ok = unsafe { ConvertSidToStringSidW(sid, &raw mut text) };
+    last_error_if_false(ok, "ConvertSidToStringSidW")?;
+    let text = LocalBox(text.cast());
+    // SAFETY: ConvertSidToStringSidW returns a NUL-terminated string, freed by `text`.
+    let s = unsafe { from_wide_ptr(text.0.cast::<u16>()) }?;
+    Ok(s.to_string_lossy().into_owned())
 }
 
 /// A security descriptor from SDDL, freed on drop.
@@ -155,6 +330,13 @@ pub(crate) fn io_error(e: &std::io::Error, api: &'static str) -> Error {
 mod tests {
     use super::*;
 
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let base = std::env::temp_dir().join(format!("dpro-sec-{tag}-{}", std::process::id()));
+        std::fs::remove_dir_all(&base).ok();
+        std::fs::create_dir_all(&base).unwrap();
+        base
+    }
+
     #[test]
     fn descriptor_parses() {
         let sd = descriptor(ADMIN_ONLY).unwrap();
@@ -163,7 +345,7 @@ mod tests {
 
     #[test]
     fn refuses_links() {
-        let base = std::env::temp_dir().join(format!("dpro-sec-{}", std::process::id()));
+        let base = scratch("links");
         let target = base.join("target");
         let link = base.join("link");
         std::fs::create_dir_all(&target).unwrap();
@@ -177,5 +359,52 @@ mod tests {
             ));
         }
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn a_missing_folder_reads_as_none() {
+        let base = scratch("missing");
+        let read = read_admin_only_file(&base.join("no-dir").join("policy.toml"), 1024);
+        std::fs::remove_dir_all(&base).ok();
+        assert!(matches!(read, Ok(None)), "{read:?}");
+    }
+
+    /// The temp folder belongs to the user running the tests, so even a missing file in it is
+    /// refused: the folder is checked first.
+    #[test]
+    fn a_file_in_a_user_folder_is_refused() {
+        let base = scratch("user");
+        let file = base.join("policy.toml");
+        let missing = read_admin_only_file(&file, 1024);
+        std::fs::write(&file, "schema = 1\n").unwrap();
+        let present = read_admin_only_file(&file, 1024);
+        std::fs::remove_dir_all(&base).ok();
+        for read in [missing, present] {
+            assert!(matches!(read, Err(Error::UntrustedDir(_))), "{read:?}");
+        }
+    }
+
+    /// Needs elevation to make an admin-only folder: runs on T3 (the runner's tests run elevated)
+    /// and passes trivially elsewhere.
+    #[test]
+    fn an_admin_only_file_reads_back() {
+        if !crate::privilege::is_elevated().unwrap_or(false) {
+            return;
+        }
+        let base = scratch("admin");
+        let dir = base.join("DismPro");
+        ensure_admin_only_dir(&dir).unwrap();
+        let file = dir.join("agent-policy.toml");
+        let missing = read_admin_only_file(&file, 1024);
+        std::fs::write(&file, "schema = 1\n").unwrap();
+        let present = read_admin_only_file(&file, 1024);
+        let too_big = read_admin_only_file(&file, 4);
+        std::fs::remove_dir_all(&base).ok();
+        assert!(matches!(missing, Ok(None)), "{missing:?}");
+        assert_eq!(present.unwrap().as_deref(), Some(&b"schema = 1\n"[..]));
+        assert!(
+            matches!(&too_big, Err(Error::UntrustedFile { why, .. }) if why.contains("limit")),
+            "{too_big:?}"
+        );
     }
 }

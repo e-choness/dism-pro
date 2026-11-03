@@ -8,7 +8,8 @@ use std::{
 
 use windows_sys::Win32::{
     Storage::FileSystem::{
-        FILE_ATTRIBUTE_DIRECTORY, GetFileAttributesW, GetLogicalDrives, INVALID_FILE_ATTRIBUTES,
+        FILE_ATTRIBUTE_DIRECTORY, GetDiskFreeSpaceExW, GetFileAttributesW, GetLogicalDrives,
+        INVALID_FILE_ATTRIBUTES,
     },
     System::SystemInformation::GetSystemWindowsDirectoryW,
 };
@@ -65,8 +66,44 @@ pub fn probe(path: &Path) -> Option<PathKind> {
     }
 }
 
+/// Space on the volume holding `path`, in bytes: `(free to this caller, total)`. The free figure
+/// honours per-user quotas.
+///
+/// # Errors
+/// The OS error from `GetDiskFreeSpaceExW` (a path that doesn't exist, say).
+pub fn disk_space(path: &Path) -> Result<(u64, u64)> {
+    // Volume roots are short; GetDiskFreeSpaceExW wants a plain directory name.
+    let wide = WideCString::new(path)?;
+    let (mut free, mut total) = (0_u64, 0_u64);
+    // SAFETY: `wide` is NUL-terminated and outlives the call; the out pointers are valid and the
+    // third one is optional.
+    let ok = unsafe {
+        GetDiskFreeSpaceExW(
+            wide.as_ptr(),
+            &raw mut free,
+            &raw mut total,
+            std::ptr::null_mut(),
+        )
+    };
+    last_error_if_false(ok, "GetDiskFreeSpaceExW")?;
+    Ok((free, total))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PathKind {
     File,
     Dir,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_windows_volume_has_space() {
+        let windows = windows_directory().unwrap();
+        let (free, total) = disk_space(&windows).unwrap();
+        assert!(total > 0 && free <= total, "{free} of {total}");
+        assert!(disk_space(Path::new(r"Q:\does\not\exist\anywhere")).is_err());
+    }
 }
