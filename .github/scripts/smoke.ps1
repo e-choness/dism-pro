@@ -287,6 +287,53 @@ if (-not $Target) {
         $job = Invoke-Job 'journal', 'undo', $drvE.job
         Assert-OurDriver $false $job
     }
+
+    # Packages (TD-0002, roadmap 2.5): a removal is permanent, so it needs --allow-irreversible and
+    # has no undo. The image goes away with the VM, so the step removes the first package DISM
+    # accepts, Features on Demand first; CBS refuses permanent packages (DismReleaseType: 14
+    # OnDemandPack, 8 LanguagePack, 2 FeaturePack; 9 Foundation is never tried).
+    function Get-Package([string] $Identity) {
+        @((Get-Doc (Invoke-Cli 'packages', 'list') 'packages.v1').packages) | Where-Object identity -EQ $Identity
+    }
+    $script:pkgJob = $null
+    Test-Step 'packages remove (irreversible)' {
+        $installed = @((Get-Doc (Invoke-Cli 'packages', 'list') 'packages.v1').packages | Where-Object state -EQ 'installed')
+        $kinds = ($installed | Group-Object release_type | ForEach-Object { "$($_.Name) x$($_.Count)" }) -join ', '
+        $candidates = @(foreach ($t in 14, 8, 2) { $installed | Where-Object release_type -EQ $t }) | Select-Object -First 4
+        if (-not $candidates) { throw "no candidate among $($installed.Count) installed packages (release types: $kinds)" }
+        $plan = Get-Doc (Invoke-Cli 'packages', 'remove', $candidates[0].identity, '--yes' -Expect 3) 'plan.v1'
+        if ($plan.summary.irreversible -ne 1) { throw "without --allow-irreversible: $($plan.summary | ConvertTo-Json -Compress)" }
+        $tried = [Collections.Generic.List[string]]::new()
+        foreach ($p in $candidates) {
+            $docs = Invoke-Cli 'packages', 'remove', $p.identity, '--yes', '--allow-irreversible' -Expect 0, 1
+            $job = Get-Doc $docs 'job.v1'
+            if ($script:lastExit -eq 0 -and @($job.applied).Count -eq 1) {
+                $script:pkgJob = $job
+                $script:pkgId = $p.identity
+                $script:pkgType = $p.release_type
+                break
+            }
+            $tried.Add("$($p.identity) (type $($p.release_type)): exit $script:lastExit, failed [$(@($job.failed | ForEach-Object code) -join ', ')]")
+        }
+        if (-not $script:pkgJob) { throw "DISM removed none of them: $($tried -join '; ') (release types: $kinds)" }
+        $after = Get-Package $pkgId
+        $state = if ($after) { $after.state } else { 'gone' }
+        if ($state -eq 'installed') { throw "job $($pkgJob.job) applied, yet $pkgId is still installed" }
+        $refused = if ($tried.Count) { "; refused first: $($tried -join '; ')" } else { '' }
+        "exit 3 without --allow-irreversible; removed $pkgId (type $pkgType) in job $($pkgJob.job), now $state, reboot_required=$($pkgJob.reboot_required)$refused; release types: $kinds"
+    }
+    if ($script:pkgJob) {
+        Test-Step 'packages remove has no undo' {
+            $docs = Invoke-Cli 'journal', 'undo', $pkgJob.job, '--yes' -Expect 0, 1
+            $plan = $docs | Where-Object schema -EQ 'plan.v1' | Select-Object -First 1
+            $undo = $docs | Where-Object schema -EQ 'job.v1' | Select-Object -First 1
+            if ($undo -and @($undo.applied).Count) { throw "the undo applied $(@($undo.applied).Count) change(s)" }
+            $after = Get-Package $pkgId
+            if ($after -and $after.state -eq 'installed') { throw "$pkgId is installed again" }
+            $said = if ($plan) { "$(@($plan.changes).Count) change(s) planned" } else { (Get-Doc $docs 'error.v1').message }
+            "exit $script:lastExit, $said; $pkgId stays $(if ($after) { $after.state } else { 'gone' })"
+        }
+    }
 }
 Remove-Item -Recurse -Force $infDir -ErrorAction SilentlyContinue
 
