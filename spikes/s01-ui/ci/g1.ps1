@@ -8,6 +8,7 @@ run 41589907500: session 2, DWM on, transparency on, 1024x768 at 96 DPI).
   2. Startup: process start to the first painted frame (the probe crate, the same hook for every
      exe), bare vs A (solid and glass) vs B, in interleaved rounds after a warm-up; medians; gate
      <= 3x bare.
+     Then idle: working set and CPU time of each window left alone on the list (doc 04 budgets).
   3. UI Automation: names and roles for rows and buttons, and a click (Invoke) through UIA.
   4. Glass: Mica, the palette's system Acrylic and the in-app acrylic drawer, read off the screen over
      a magenta and then a green desktop (a backdrop must follow it), then with transparency switched
@@ -175,6 +176,36 @@ function Stop-Window($w) {
     if (-not $w.Process.WaitForExit(5000)) { $w.Process.Kill() }
     Start-Sleep -Milliseconds 300
 }
+
+# 2b. Idle (doc 04: working set <= 40 MiB by GetProcessMemoryInfo, which .NET's WorkingSet64 reads;
+# idle CPU 0 %). Each window on the 100k-row list, settled for 3 s, then 5 s untouched.
+$lines = @('idle, List screen at 1000x700: settled 3 s, then 5 s untouched (budgets: working set <= 40 MiB, CPU 0 %)')
+$idle = [ordered]@{
+    'bare'    = @($exe.bare, @('--size', '1000x700'), 'S-01 bare')
+    'A solid' = @($exe.a, @('--screen', 'list', '--size', '1000x700', '--solid'), $title.a)
+    'A glass' = @($exe.a, @('--screen', 'list', '--size', '1000x700'), $title.a)
+    'B'       = @($exe.b, @('--screen', 'list', '--size', '1000x700'), $title.b)
+}
+foreach ($n in $idle.Keys) {
+    $w = $null
+    try {
+        $w = Start-Window $idle[$n][0] $idle[$n][1] $idle[$n][2]
+        Start-Sleep -Milliseconds 1500 # Start-Window waited 1.5 s already
+        $w.Process.Refresh()
+        $cpu = $w.Process.TotalProcessorTime
+        Start-Sleep -Seconds 5
+        $w.Process.Refresh()
+        $busy = ($w.Process.TotalProcessorTime - $cpu).TotalMilliseconds
+        $mib = { param([long] $b) '{0,5:N1} MiB' -f ($b / 1MB) }
+        $ws = $w.Process.WorkingSet64
+        $lines += '{0,-8} working set {1} {2}; private {3}; peak working set {4}; CPU in 5 s idle {5:N0} ms' -f $n, (& $mib $ws), $(if ($ws -le 40MB) { 'PASS' } else { 'FAIL' }), (& $mib $w.Process.PrivateMemorySize64), (& $mib $w.Process.PeakWorkingSet64), $busy
+    } catch {
+        $lines += "${n}: FAILED: $($_.Exception.Message)"
+    } finally {
+        if ($w) { Stop-Window $w }
+    }
+}
+Publish 'S-01 G1 idle' $lines
 
 # 3. UI Automation ---------------------------------------------------------------------------------
 $ua = [Windows.Automation.AutomationElement]

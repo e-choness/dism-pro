@@ -1,4 +1,4 @@
-//! The 100k-list "        assert!(frames.iter().any(|f| f.scroll == max), "reaches the end");ling script" (ADR-0002 gate: p99 frame ≤ 16.6 ms on the software path): the
+//! The 100k-list "fling script" (ADR-0002 gate: p99 frame ≤ 16.6 ms on the software path): the
 //! list offset for each frame at 60 Hz, replayed identically by both prototypes.
 
 use crate::layout::{self, ROW_H};
