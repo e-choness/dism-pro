@@ -288,9 +288,11 @@ version = "0.1.0"
 name = "dismpro-cli"
 version = "0.1.0"
 dependencies = [
+ "dpro-broker",
  "dpro-cli-fmt",
  "dpro-core",
  "dpro-engine",
+ "dpro-mcp",
  "dpro-win",
  "lexopt",
  "serde",

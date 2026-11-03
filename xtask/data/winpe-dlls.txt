@@ -15,3 +15,5 @@ api-ms-win-core-synch-l1-2-0.dll    # std locks (WaitOnAddress); API set the loa
 # Added with the CLI (roadmap 2.5): registry/token APIs and the DISM API.
 advapi32.dll                        # registry + token APIs, windows-sys (base WinPE)
 dismapi.dll                         # DISM API (base WinPE)
+# Added with agent access (roadmap 2.7): SHA-256 for the broker's peer check and plan fingerprints.
+bcrypt.dll                          # CNG hashing, BCryptHash (base WinPE check: ffi-check job)

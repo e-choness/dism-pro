@@ -17,6 +17,7 @@ cli-help =
       journal show <job-id|file>       Show what a job did
       journal undo <job-id|file>       Plan or apply the undo of a job
       purge                            Remove all DISM Pro data from the target volume
+      mcp [--toolsets core,maintain]   Serve AI agents (MCP over stdin/stdout)
     Options:
       --target <online|D:|path|image:dir>  Target to service (default: online)
       --json                           JSON Lines output, one document per line (schemas/*.v1.json)
