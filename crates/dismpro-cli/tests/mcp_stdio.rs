@@ -4,6 +4,7 @@
 //!   and no UAC prompt.
 //! - Elevated only: the front starting the broker and every broker tool, end to end, with each
 //!   call's latency printed for TD-0013 §7. On a runner the elevation needs no prompt.
+//! - Elevated only: the read-tool ratio gate, `updates_list` against `dism.exe /Get-Packages`.
 //!
 //! The CLI imports `dismapi.dll`, which Wine doesn't have, so under T2 these tests skip; T3 runs
 //! them on Windows with `DISMPRO_CLI` naming the release binary.
@@ -33,9 +34,7 @@ struct Mcp {
 impl Mcp {
     /// `None` when this system can't run the CLI (no DISM, as under Wine).
     fn start(args: &[&str]) -> Option<Self> {
-        let root =
-            std::env::var_os("SystemRoot").map_or_else(|| "C:\\Windows".into(), PathBuf::from);
-        if !root.join("System32").join("dismapi.dll").exists() {
+        if !system32("dismapi.dll").exists() {
             eprintln!("skipped: no dismapi.dll on this system (Wine); T3 runs this test");
             return None;
         }
@@ -218,8 +217,7 @@ fn the_front_answers_pure_and_refused_calls_itself() {
 /// without a prompt); the broker it starts stays up for 15 minutes, which ends with the VM.
 #[test]
 fn front_and_broker_end_to_end() {
-    if !dpro_win::privilege::is_elevated().unwrap() {
-        eprintln!("skipped: needs an elevated session (T3 runners have one)");
+    if !elevated() {
         return;
     }
     let Some(mut mcp) = Mcp::start(&[]) else {
@@ -349,6 +347,74 @@ fn front_start_up_listing_and_idle_memory() {
         "mcp-init: idle front {} (budget 15 MiB working set)",
         memory.unwrap_or_default()
     );
+}
+
+/// TD-0013 §7 read-tool ratio gate (doc 04 §3, G1): `updates_list` through a warm broker against
+/// `dism.exe /Online /Get-Packages` on the same VM. Both read the whole package list from DISM.
+/// One warm-up each, then 5 interleaved runs; the medians' ratio must be ≤ 1.3.
+#[test]
+fn updates_list_against_dism_exe() {
+    const RUNS: usize = 5;
+    const GATE: f64 = 1.3;
+    if !elevated() {
+        return;
+    }
+    let Some(mut mcp) = Mcp::start(&[]) else {
+        return;
+    };
+    let ours = |mcp: &mut Mcp| {
+        let t = Instant::now();
+        let listed = mcp.call("updates_list", &json!({ "limit": 500 }));
+        let took = ms(t);
+        assert!(listed["matched"].as_u64().unwrap() > 0, "{listed}");
+        took
+    };
+    let dism = system32("dism.exe");
+    let theirs = || {
+        let t = Instant::now();
+        let status = Command::new(&dism)
+            .args(["/Online", "/Get-Packages", "/English"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        let took = ms(t);
+        assert!(status.success(), "dism.exe /Get-Packages: {status}");
+        took
+    };
+    ours(&mut mcp);
+    theirs();
+    let (mut a, mut b) = (Vec::with_capacity(RUNS), Vec::with_capacity(RUNS));
+    for _ in 0..RUNS {
+        a.push(ours(&mut mcp));
+        b.push(theirs());
+    }
+    mcp.finish();
+    let (a, b) = (median(&mut a), median(&mut b));
+    let ratio = a / b;
+    eprintln!(
+        "ratio updates_list / dism.exe /Get-Packages: {ratio:.2} (median {a:.0} ms vs {b:.0} ms, \
+         {RUNS} interleaved runs; gate {GATE})"
+    );
+    assert!(ratio <= GATE, "updates_list is {ratio:.2}× dism.exe");
+}
+
+/// Whether this session is elevated; says why a test skips when it isn't.
+fn elevated() -> bool {
+    let elevated = dpro_win::privilege::is_elevated().unwrap();
+    if !elevated {
+        eprintln!("skipped: needs an elevated session (T3 runners have one)");
+    }
+    elevated
+}
+
+/// A file in `%SystemRoot%\System32`.
+fn system32(name: &str) -> PathBuf {
+    std::env::var_os("SystemRoot")
+        .map_or_else(|| "C:\\Windows".into(), PathBuf::from)
+        .join("System32")
+        .join(name)
 }
 
 fn ms(since: Instant) -> f64 {
