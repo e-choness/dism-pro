@@ -45,6 +45,14 @@ jobs:
           path: dist/
           if-no-files-found: error
           retention-days: 7
+      # Dev tools for T3 (never shipped): see docker/task.sh.
+      - run: docker compose run --rm t3-tools
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: t3-tools
+          path: dist-t3/
+          if-no-files-found: error
+          retention-days: 7
 
   windows:
     name: T3 + G1 (windows-2025)
@@ -64,6 +72,10 @@ jobs:
         with:
           name: dist
           path: dist/
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: t3-tools
+          path: dist-t3/
       - name: CLI smoke (runner VM, online target)
         # Real DISM calls, a feature change and its undo on the throwaway runner VM.
         shell: pwsh
@@ -72,6 +84,10 @@ jobs:
         # On the VM, not in a container: S-02 found DISM can't service images inside one.
         shell: pwsh
         run: ./.github/scripts/offline-image.ps1 -Out "$env:RUNNER_TEMP\t3-image"
+      - name: T3 hive reader vs offreg.dll (offline image)
+        # ADR-0008: every key and value of the untouched image's hives, read both ways.
+        shell: pwsh
+        run: ./.github/scripts/regf-check.ps1 -Dump dist-t3/regf_dump.exe -Image "$env:RUNNER_TEMP\t3-image"
       - name: T3 CLI smoke (offline image)
         shell: pwsh
         run: ./.github/scripts/smoke.ps1 -Cli dist/x86_64-pc-windows-msvc/dismpro-cli.exe -Target "$env:RUNNER_TEMP\t3-image"
