@@ -341,13 +341,15 @@ if (-not $Target) {
             $watch = [Diagnostics.Stopwatch]::StartNew()
             $docs = Invoke-Cli 'packages', 'remove', $p.identity, '--yes', '--allow-irreversible' -Expect 0, 1
             $removeMs = $watch.ElapsedMilliseconds
+            # Before Get-Package: its own Invoke-Cli overwrites $script:lastExit.
+            $exit = $script:lastExit
             $job = Get-Doc $docs 'job.v1'
             $codes = @($job.failed | ForEach-Object code)
             $watch.Restart()
             $after = Get-Package $p.identity
             $listMs = $watch.ElapsedMilliseconds
             $state = if ($after) { $after.state } else { 'gone' }
-            if ($script:lastExit -eq 0) {
+            if ($exit -eq 0) {
                 if (@($job.applied).Count -ne 1) { throw "${label}: job $($job.job) exit 0 with applied [$($job.applied -join ', ')]" }
                 if ($state -notin $left) { throw "${label}: job $($job.job) exit 0, but the package is listed as $state" }
                 $script:pkgJob = $job
@@ -364,7 +366,7 @@ if (-not $Target) {
                 if ($said -ne $state) { throw "${label}: job $($job.job) says the package stayed $said ($($ours[0])), but it is listed as $state" }
                 $script:keptReported++
             }
-            $tried.Add("${label}: exit $script:lastExit, failed [$($codes -join ', ')], listed as $state")
+            $tried.Add("${label}: exit $exit, failed [$($codes -join ', ')], listed as $state")
         }
         if (-not $script:pkgJob) { throw "no removal took effect: $($tried -join '; ') (release types: $kinds)" }
         $before = if ($tried.Count) { "; before it: $($tried -join '; ')" } else { '' }
