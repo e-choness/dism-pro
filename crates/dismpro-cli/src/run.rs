@@ -504,7 +504,7 @@ impl Ctx<'_, '_> {
                 let i = p.install_time;
                 t.push(vec![
                     p.name.to_string_lossy().into_owned(),
-                    state_text(m, p.state),
+                    out::state_text(m, p.state),
                     format!("{:04}-{:02}-{:02}", i.wYear, i.wMonth, i.wDay),
                 ]);
             }
@@ -618,7 +618,7 @@ impl Ctx<'_, '_> {
             for f in features {
                 t.push(vec![
                     f.name.to_string_lossy().into_owned(),
-                    state_text(m, f.state),
+                    out::state_text(m, f.state),
                 ]);
             }
             print!("{}", table::render(&t, out::width()));
@@ -1025,14 +1025,6 @@ pub(crate) fn feature_entries(session: &Session<'_>) -> Result<Vec<FeatureEntry>
 /// `DismStateInstallPending`).
 fn is_enabled(state: i32) -> bool {
     matches!(state, 4 | 5)
-}
-
-/// Localized `DismPackageFeatureState`; unknown values show their number.
-fn state_text(m: &Messages, state: i32) -> String {
-    m.get(
-        &format!("state-{}", state_name(state)),
-        &[("value", &state)],
-    )
 }
 
 /// Tells the progress line which change of a multi-change job is running.

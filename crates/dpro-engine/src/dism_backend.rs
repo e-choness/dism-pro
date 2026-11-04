@@ -5,6 +5,9 @@
 //! Drivers (TD-0002 §5.6): a removal first copies the package's store folder into the job's
 //! quarantine, and that copy is its inverse. An add learns its inverse after the call, because
 //! DISM picks the published name (`oemN.inf`) then.
+//!
+//! Packages (TD-0002 §7, decision #31): DISM can report a removal as done and leave the package
+//! installed, so one listing afterwards confirms it.
 
 use std::{
     ffi::OsStr,
@@ -21,7 +24,10 @@ use dpro_win::{
     security,
 };
 
-use crate::job::{Applied, Backend};
+use crate::{
+    job::{Applied, Backend},
+    ops,
+};
 
 /// `E_NOTIMPL`.
 const E_NOTIMPL: i32 = i32::from_ne_bytes(0x8000_4001_u32.to_ne_bytes());
@@ -116,7 +122,9 @@ impl Backend for DismBackend<'_, '_, '_> {
                 ..
             } => self.session.disable_feature(OsStr::new(name), call),
             ChangeKind::PackageRemove { identity } => {
-                self.session.remove_package(OsStr::new(identity), call)
+                let result = self.session.remove_package(OsStr::new(identity), call);
+                let applied = self.settle(result)?;
+                return self.confirm_removed(identity, applied);
             }
             ChangeKind::DriverAdd { inf } => return self.add_driver(inf),
             ChangeKind::DriverRemove { published } => {
@@ -176,6 +184,33 @@ impl DismBackend<'_, '_, '_> {
                 code: E_INVALIDARG,
                 api: "DismBackend::apply",
             },
+        }
+    }
+
+    /// After `DismRemovePackage` reported success (TD-0002 §7, decision #31): one listing decides
+    /// whether the package left. Still listed in a state that keeps it in the image, the change
+    /// fails with [`OsError::package_not_removed`]. If the listing fails, DISM's word stands and a
+    /// note says the removal is unconfirmed.
+    fn confirm_removed(&mut self, identity: &str, applied: Applied) -> Result<Applied, OsError> {
+        let listed = match self.session.packages() {
+            Ok(listed) => listed,
+            Err(e) => {
+                self.notes.push(format!(
+                    "{identity}: DISM reported it removed, but listing the packages to confirm \
+                     that failed ({e})"
+                ));
+                return Ok(applied);
+            }
+        };
+        let state = listed
+            .iter()
+            .find(|p| p.name.to_string_lossy().eq_ignore_ascii_case(identity))
+            .map(|p| p.state);
+        match state {
+            Some(kept) if !ops::removal_took_effect(state) => {
+                Err(OsError::package_not_removed(kept))
+            }
+            _ => Ok(applied),
         }
     }
 

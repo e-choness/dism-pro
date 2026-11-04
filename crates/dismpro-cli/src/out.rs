@@ -13,14 +13,14 @@ use dpro_cli_fmt::{
     plan::{action_id, subject},
     units::rfc3339,
 };
-use dpro_core::progress::Progress;
+use dpro_core::{OsError, plan::ChangeKind, progress::Progress};
 use dpro_engine::journal::{self, JobReport, JobStatus, JournalEntry, Record, Recovered};
 use serde::Serialize;
 
 use crate::{
     args::{ApplyMode, Global},
     error::CliError,
-    json::{ErrorDoc, FailedJson, JobDoc, JournalJson, OsJson, hresult},
+    json::{ErrorDoc, FailedJson, JobDoc, JournalJson, OsJson, hresult, state_name},
 };
 
 /// Prints one JSON document as one line on stdout (JSON Lines): a command that prints a plan
@@ -131,21 +131,8 @@ pub(crate) fn print_job(rec: &Recovered, path: &Path, m: &Messages) {
             })
             .collect();
         for (index, code) in &report.failed {
-            let (action, object) = changes.get(index).map_or_else(
-                || (format!("#{index}"), String::new()),
-                |k| (m.text(&action_id(k)), subject(k)),
-            );
-            println!(
-                "  {}",
-                m.get(
-                    "cli-job-failed-change",
-                    &[
-                        ("action", &action),
-                        ("object", &object),
-                        ("code", &hresult(*code))
-                    ]
-                )
-            );
+            let line = failed_change_line(*index, changes.get(index).copied(), *code, m);
+            println!("  {line}");
         }
     }
     if report.reboot_required {
@@ -155,6 +142,41 @@ pub(crate) fn print_job(rec: &Recovered, path: &Path, m: &Messages) {
         "{}",
         m.get("cli-journal-file", &[("path", &path.display())])
     );
+}
+
+/// One failed change of a job report. DISM's codes show as they are (DISM's message went to
+/// stderr when the job ran); DISM Pro's own are explained, so `journal show` explains them too.
+fn failed_change_line(
+    index: u32,
+    kind: Option<&ChangeKind<String>>,
+    code: i32,
+    m: &Messages,
+) -> String {
+    let (action, object) = kind.map_or_else(
+        || (format!("#{index}"), String::new()),
+        |k| (m.text(&action_id(k)), subject(k)),
+    );
+    let (id, state) = match OsError::not_removed_state(code) {
+        Some(left) => ("cli-job-not-removed", state_text(m, left)),
+        None => ("cli-job-failed-change", String::new()),
+    };
+    m.get(
+        id,
+        &[
+            ("action", &action),
+            ("object", &object),
+            ("code", &hresult(code)),
+            ("state", &state),
+        ],
+    )
+}
+
+/// Localized `DismPackageFeatureState`; unknown values show their number.
+pub(crate) fn state_text(m: &Messages, state: i32) -> String {
+    m.get(
+        &format!("state-{}", state_name(state)),
+        &[("value", &state)],
+    )
 }
 
 /// `journal list` rows, oldest first, each with the job that undid it.
@@ -463,5 +485,35 @@ mod tests {
         assert_eq!(rows[1].undone_by, None);
         assert_eq!(rows[0].created, "1970-01-01T00:00:00Z");
         assert_eq!(rows[0].status, "completed");
+    }
+
+    #[test]
+    fn a_removal_that_changed_nothing_is_explained() {
+        let m = Messages::en_us();
+        let remove = ChangeKind::PackageRemove {
+            identity: "Containers-Edition-ServerCore-Package~31bf3856ad364e35~amd64~~10.0.26100.1"
+                .to_owned(),
+        };
+        let kept = OsError::package_not_removed(4).code;
+        assert_eq!(
+            failed_change_line(0, Some(&remove), kept, &m),
+            "Remove package Containers-Edition-ServerCore-Package~31bf3856ad364e35~amd64~~10.0.26100.1: \
+             DISM reported success, but the package is still listed as Installed (0xa0d10104). \
+             Another installed package may need it."
+        );
+        // DISM's own codes show as they are: its message went to stderr when the job ran.
+        let refused = i32::from_ne_bytes(0x800F_0805_u32.to_ne_bytes());
+        assert_eq!(
+            failed_change_line(1, Some(&remove), refused, &m),
+            "Remove package Containers-Edition-ServerCore-Package~31bf3856ad364e35~amd64~~10.0.26100.1: 0x800f0805"
+        );
+        // A state the byte couldn't hold still reads as a sentence.
+        let odd = OsError::package_not_removed(-1).code;
+        assert!(
+            failed_change_line(2, None, odd, &m)
+                .starts_with("#2 : DISM reported success, but the package is still listed as Unknown (255) (0xa0d101ff)"),
+            "{}",
+            failed_change_line(2, None, odd, &m)
+        );
     }
 }

@@ -66,6 +66,7 @@
             "minimum": 0
           },
           "code": {
+            "description": "HRESULT of the failure. 0xa0d101xx is DISM Pro's own: DISM reported a package removal as done, but the package is still listed, in DismPackageFeatureState xx (0xff: a value that didn't fit)",
             "type": "string",
             "pattern": "^0x[0-9a-f]{8}$"
           }

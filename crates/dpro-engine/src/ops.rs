@@ -207,6 +207,15 @@ pub fn plan_package_removal(
     Ok(b.finish())
 }
 
+/// Whether a removal DISM reported as done took effect (TD-0002 §7, decision #31), from the
+/// `DismPackageFeatureState` the package lists in afterwards: `None` when it isn't listed.
+/// Gone, not present (0), uninstall pending (1: online, until the restart) and removed (3) count.
+/// Any other state means DISM changed nothing a listing can see.
+#[must_use]
+pub fn removal_took_effect(state: Option<i32>) -> bool {
+    matches!(state, None | Some(0 | 1 | 3))
+}
+
 /// The INFs `drivers add` names, sorted and de-duplicated so a plan doesn't depend on directory
 /// order. A file must be an `.inf`; a folder gives its `*.inf` files, and its subfolders' with
 /// `recurse`. Links inside a folder are not followed. A folder without INFs is an error, not an
@@ -851,5 +860,17 @@ mod tests {
         )
         .unwrap();
         assert_eq!(plan.summary().irreversible, 1);
+    }
+
+    #[test]
+    fn a_removal_counts_only_when_the_package_leaves() {
+        // Gone, not present, uninstall pending (online, until the restart), removed.
+        for gone in [None, Some(0), Some(1), Some(3)] {
+            assert!(removal_took_effect(gone), "{gone:?}");
+        }
+        // Still installed (runs 41728952696, 41736115561), or anywhere else in the image.
+        for kept in [2, 4, 5, 6, 7, 0xFF, -1] {
+            assert!(!removal_took_effect(Some(kept)), "{kept}");
+        }
     }
 }

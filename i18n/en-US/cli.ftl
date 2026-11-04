@@ -41,6 +41,7 @@ cli-confirmation-required = Not applied: pass --yes to apply (and --allow-irreve
 cli-applied = Applied: { $applied } of { $count }.
 cli-job-partial = Failed: { $failed }.
 cli-job-failed-change = { $action } { $object }: { $code }
+cli-job-not-removed = { $action } { $object }: DISM reported success, but the package is still listed as { $state } ({ $code }). Another installed package may need it.
 cli-crash-dump = DISM Pro crashed. A crash dump was saved to { $path }.
 cli-cancelled = Cancelled. Changes applied before that stay journaled and can be undone.
 cli-reboot-required = Restart Windows to finish these changes.

@@ -327,33 +327,48 @@ if (-not $Target) {
         if (-not $candidates) { throw "no candidate among $($installed.Count) installed packages (release types: $kinds)" }
         $plan = Get-Doc (Invoke-Cli 'packages', 'remove', $candidates[0].identity, '--yes' -Expect 3) 'plan.v1'
         if ($plan.summary.irreversible -ne 1) { throw "without --allow-irreversible: $($plan.summary | ConvertTo-Json -Compress)" }
-        # Each attempt that didn't remove anything, in order. DISM can refuse a package, or accept
-        # the removal and leave it installed (run 41728952696: Containers-Edition-ServerCore-Package,
-        # which other packages presumably keep installed).
+        # DISM can refuse a package, or accept the removal and leave it installed (runs 41728952696,
+        # 41736115561: Containers-Edition-ServerCore-Package, which other packages presumably keep
+        # installed). The CLI confirms each removal with a listing (TD-0002 §7, decision #31) and
+        # fails one that changed nothing with 0xa0d101xx, xx = the state the package kept. This
+        # script checks each verdict against its own listing: exit 0 must mean the package left.
+        $left = 'gone', 'not-present', 'uninstall-pending', 'removed'
+        $stateNames = 'not-present', 'uninstall-pending', 'staged', 'removed', 'installed', 'install-pending', 'superseded', 'partially-installed'
         $tried = [Collections.Generic.List[string]]::new()
+        $script:keptReported = 0
         foreach ($p in $candidates) {
             $label = "$($p.identity) (type $($p.release_type))"
+            $watch = [Diagnostics.Stopwatch]::StartNew()
             $docs = Invoke-Cli 'packages', 'remove', $p.identity, '--yes', '--allow-irreversible' -Expect 0, 1
+            $removeMs = $watch.ElapsedMilliseconds
             $job = Get-Doc $docs 'job.v1'
-            if ($script:lastExit -ne 0 -or @($job.applied).Count -ne 1) {
-                $tried.Add("${label}: exit $script:lastExit, failed [$(@($job.failed | ForEach-Object code) -join ', ')]")
-                continue
-            }
+            $codes = @($job.failed | ForEach-Object code)
+            $watch.Restart()
             $after = Get-Package $p.identity
+            $listMs = $watch.ElapsedMilliseconds
             $state = if ($after) { $after.state } else { 'gone' }
-            if ($state -eq 'installed') {
-                $tried.Add("${label}: job $($job.job) applied, still installed, reboot_required=$($job.reboot_required)")
-                continue
+            if ($script:lastExit -eq 0) {
+                if (@($job.applied).Count -ne 1) { throw "${label}: job $($job.job) exit 0 with applied [$($job.applied -join ', ')]" }
+                if ($state -notin $left) { throw "${label}: job $($job.job) exit 0, but the package is listed as $state" }
+                $script:pkgJob = $job
+                $script:pkgId = $p.identity
+                $script:pkgType = $p.release_type
+                $script:pkgState = $state
+                $script:pkgTimes = "removal $removeMs ms, packages list $listMs ms ($([math]::Round(100 * $listMs / [math]::Max($removeMs, 1), 1)) %, budget 10 %)"
+                break
             }
-            $script:pkgJob = $job
-            $script:pkgId = $p.identity
-            $script:pkgType = $p.release_type
-            $script:pkgState = $state
-            break
+            $ours = @($codes | Where-Object { $_ -match '^0xa0d101[0-9a-f]{2}$' })
+            if ($ours) {
+                $n = [Convert]::ToInt32($ours[0].Substring(8), 16)
+                $said = if ($n -lt $stateNames.Count) { $stateNames[$n] } else { 'unknown' }
+                if ($said -ne $state) { throw "${label}: job $($job.job) says the package stayed $said ($($ours[0])), but it is listed as $state" }
+                $script:keptReported++
+            }
+            $tried.Add("${label}: exit $script:lastExit, failed [$($codes -join ', ')], listed as $state")
         }
         if (-not $script:pkgJob) { throw "no removal took effect: $($tried -join '; ') (release types: $kinds)" }
         $before = if ($tried.Count) { "; before it: $($tried -join '; ')" } else { '' }
-        "exit 3 without --allow-irreversible; removed $pkgId (type $pkgType) in job $($pkgJob.job), now $pkgState, reboot_required=$($pkgJob.reboot_required)$before; release types: $kinds"
+        "exit 3 without --allow-irreversible; removed $pkgId (type $pkgType) in job $($pkgJob.job), now $pkgState, reboot_required=$($pkgJob.reboot_required); $pkgTimes; removals DISM accepted without effect, reported as failed: $keptReported$before; release types: $kinds"
     }
     if ($script:pkgJob) {
         # Refused with the reason (exit 1), not an empty plan that reads as "already reversed".
