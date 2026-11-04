@@ -356,7 +356,9 @@ if (-not $Target) {
                 $script:pkgId = $p.identity
                 $script:pkgType = $p.release_type
                 $script:pkgState = $state
-                $script:pkgTimes = "removal $removeMs ms, packages list $listMs ms ($([math]::Round(100 * $listMs / [math]::Max($removeMs, 1), 1)) %, budget 10 %)"
+                # An upper bound: this listing also pays process start and session open; drivers_t3
+                # times the listing inside a session.
+                $script:pkgTimes = "removal $removeMs ms; a whole packages list $listMs ms = $([math]::Round(100 * $listMs / [math]::Max($removeMs, 1), 1)) % of it (upper bound for the confirming listing; budget 10 %, advisory)"
                 break
             }
             $ours = @($codes | Where-Object { $_ -match '^0xa0d101[0-9a-f]{2}$' })

@@ -1,7 +1,7 @@
 //! T3 probe of the DISM driver calls on real Windows (roadmap 2.5). It measures what the drivers
 //! design needs: call times, what DISM reports for a staged package, and the errors it returns.
-//! It also runs the round trip that undoing a removal relies on. A dev tool, never shipped; the T3
-//! job runs it.
+//! It also runs the round trip that undoing a removal relies on, and times the package listing
+//! that confirms a package removal (TD-0002 §7). A dev tool, never shipped; the T3 job runs it.
 //!
 //! ```text
 //! drivers_t3 offline <image root>   lists the drivers, then stages, removes and re-adds a test
@@ -226,6 +226,13 @@ Device   = "DISM Pro T3 null device"
         let all = timed3("DismGetDrivers, all", || s.drivers(true)).ctx("DismGetDrivers, all")?;
         summary("third-party", &third);
         summary("all", &all);
+        // What confirming a package removal costs inside an open session: the CLI's plan has
+        // already listed the packages once, so a later listing is a repeat.
+        let packages = timed3("DismGetPackages (confirms a package removal)", || {
+            s.packages()
+        })
+        .ctx("DismGetPackages")?;
+        say!("packages: {}", packages.len());
         if all.is_empty() {
             return Err("no driver packages at all".to_owned());
         }
