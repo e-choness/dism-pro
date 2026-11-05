@@ -230,6 +230,24 @@ impl<P: Model> Handler for Host<P> {
         }
         self.ui.clear_damage();
     }
+
+    fn a11y_tree(&mut self) -> Option<accesskit::TreeUpdate> {
+        Some(self.ui.a11y_tree())
+    }
+
+    fn a11y_update(&mut self) -> Option<accesskit::TreeUpdate> {
+        self.ui.a11y_update()
+    }
+
+    /// Runs like a click (or a focus move), then the frame shows it and the window serves it.
+    fn a11y_action(&mut self, request: &accesskit::ActionRequest, cx: &mut WindowCx<'_>) {
+        if self.ui.a11y_action(request, &mut self.msgs) {
+            for msg in self.msgs.drain(..) {
+                self.model.update(msg);
+            }
+            self.frame(cx);
+        }
+    }
 }
 
 /// Opens a window on `host` and runs it until it closes.

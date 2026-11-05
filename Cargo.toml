@@ -46,7 +46,10 @@ windows-sys = { version = "0.61.2", features = [
 # COM for dpro-win's GUI (TD-0009 §5.5): DirectWrite now, UI Automation through accesskit_windows
 # next, which uses this release. windows-sys has no COM interfaces. MIT OR Apache-2.0. Exact: the
 # version S-01 built.
-windows = { version = "=0.62.2", features = ["Win32_Graphics_DirectWrite"] }
+windows = { version = "=0.62.2", features = [
+    "Win32_Graphics_DirectWrite",
+    "Win32_UI_Accessibility",
+] }
 # Already in the tree through `windows`; named directly because `#[implement]` (our DirectWrite
 # renderer) expands to `windows_core::` paths. MIT OR Apache-2.0.
 windows-core = "=0.62.2"
@@ -63,6 +66,9 @@ serde_json = "1.0.154"
 # The accessibility tree (TD-0009 §5.5): platform-neutral types that dpro-ui builds and
 # accesskit_windows serves to UI Automation. MIT OR Apache-2.0. Exact: the version S-01 built.
 accesskit = "=0.25.2"
+# Serves that tree to UI Automation (TD-0009 §5.5), from dpro-win's GUI. Uses `windows` 0.62, the
+# release dpro-win names. MIT OR Apache-2.0. Exact: the version S-01 built.
+accesskit_windows = "=0.35.2"
 # Dev/bench only.
 criterion = "0.8.2"
 # Bench only: instruction counts under Callgrind, the deterministic gate (doc 04 §3). Apache-2.0 OR

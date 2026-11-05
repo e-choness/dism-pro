@@ -6,13 +6,21 @@
 //! `DestroyWindow`, `SetWindowPos` and the modal move/size loop all call it again before they
 //! return. A depth count keeps the state alive until the outermost call into it returns, so a
 //! window destroyed in the middle of handling a message never frees memory a caller still uses.
+//!
+//! **UI Automation.** The adapter is made before the window shows, as `accesskit_windows`
+//! requires. Answering `WM_GETOBJECT` and raising UI Automation events can both bring a nested
+//! `WM_GETOBJECT`, so both happen with nothing borrowed.
 
 use std::{
     cell::{Cell, RefCell},
     fmt,
     ptr::{null, null_mut},
     rc::Rc,
+    sync::Arc,
 };
+
+use accesskit_windows::Adapter;
+use windows::Win32::UI::Accessibility::{IRawElementProviderSimple, UiaReturnRawElementProvider};
 
 use windows_sys::{
     Win32::{
@@ -39,17 +47,21 @@ use windows_sys::{
                 RegisterClassExW, SIZE_MINIMIZED, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOMOVE,
                 SWP_NOZORDER, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
                 TranslateMessage, WM_CAPTURECHANGED, WM_CLOSE, WM_CREATE, WM_DESTROY,
-                WM_DPICHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS,
-                WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_NCDESTROY, WM_PAINT,
-                WM_SETFOCUS, WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSEXW,
-                WS_OVERLAPPEDWINDOW,
+                WM_DPICHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_GETOBJECT, WM_KEYDOWN, WM_KEYUP,
+                WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE,
+                WM_NCDESTROY, WM_PAINT, WM_SETFOCUS, WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER,
+                WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
             },
         },
     },
     core::w,
 };
 
-use super::{Event, Frame, Handler, Mods, PointPx, RectPx, SizePx, WindowOptions, probe};
+use super::{
+    Event, Frame, Handler, Mods, PointPx, RectPx, SizePx, WindowOptions,
+    a11y::{Initial, Requests, ToUiThread, WM_APP_A11Y},
+    probe,
+};
 use crate::{
     error::{Result, last_os_error},
     wide::WideCString,
@@ -115,6 +127,10 @@ impl Window {
             close: Cell::new(false),
             tracking: Cell::new(false),
             pressed: Cell::new(false),
+            a11y: RefCell::new(None),
+            requests: Arc::new(Requests::default()),
+            a11y_whole: Cell::new(false),
+            a11y_served: Cell::new(false),
             depth: Cell::new(0),
             life: Rc::clone(&life),
         }));
@@ -167,6 +183,18 @@ impl Window {
         // WM_SIZE may not have come during creation.
         // SAFETY: hwnd is this thread's window of our class.
         unsafe { with_state(hwnd, |s| s.sync_size(hwnd)) };
+        // SAFETY: as above. Not inside WM_GETOBJECT, and before the window shows, as
+        // `Adapter::new` requires: UI Automation learns the window serves it before any client asks.
+        unsafe {
+            with_state(hwnd, |s| {
+                s.requests.attach(hwnd);
+                let actions = ToUiThread(Arc::clone(&s.requests));
+                let adapter = Adapter::new(accesskit_windows::HWND(hwnd), false, actions);
+                if let Ok(mut slot) = s.a11y.try_borrow_mut() {
+                    *slot = Some(adapter);
+                }
+            })
+        };
         Ok(window)
     }
 
@@ -316,6 +344,15 @@ struct State {
     tracking: Cell<bool>,
     /// The primary button is down, and the window holds the pointer.
     pressed: Cell<bool>,
+    /// Serves the handler's tree to UI Automation; made once the window exists.
+    a11y: RefCell<Option<Adapter>>,
+    /// Clients' requests, queued on UI Automation's threads.
+    requests: Arc<Requests>,
+    /// The adapter serves a placeholder (the handler was busy at the first request), so the next
+    /// update must be the whole tree.
+    a11y_whole: Cell<bool>,
+    /// UI Automation holds a provider of ours; it's told to let go when the window is destroyed.
+    a11y_served: Cell<bool>,
     /// Calls into the state that haven't returned.
     depth: Cell<u32>,
     life: Rc<Cell<Life>>,
@@ -425,12 +462,34 @@ impl State {
                 self.send(hwnd, Event::Frame);
             }
             WM_SETFOCUS | WM_KILLFOCUS => {
-                self.send(hwnd, Event::Focus(msg == WM_SETFOCUS));
+                let focused = msg == WM_SETFOCUS;
+                self.send(hwnd, Event::Focus(focused));
+                self.a11y_focus(focused);
             }
             WM_CLOSE => {
                 self.send(hwnd, Event::Close);
             }
+            WM_GETOBJECT => return self.get_object(wp, lp),
+            WM_APP_A11Y => {
+                for request in self.requests.drain() {
+                    self.dispatch(hwnd, |h, cx| h.a11y_action(&request, cx));
+                }
+            }
             WM_DESTROY => {
+                self.requests.detach();
+                if self.a11y_served.get() {
+                    // UI Automation may release what it holds for this window (the documented
+                    // call for a window that served it).
+                    // SAFETY: hwnd is live until this message returns.
+                    unsafe {
+                        UiaReturnRawElementProvider(
+                            accesskit_windows::HWND(hwnd),
+                            accesskit_windows::WPARAM(0),
+                            accesskit_windows::LPARAM(0),
+                            None::<&IRawElementProviderSimple>,
+                        )
+                    };
+                }
                 // SAFETY: ends this thread's message loop.
                 unsafe { PostQuitMessage(0) };
             }
@@ -498,20 +557,104 @@ impl State {
         Some(0)
     }
 
-    /// Hands `event` to the handler, then destroys the window if the handler asked. Returns whether
-    /// the handler used it, or `None` if the handler is busy: it pumped messages while handling an
-    /// earlier one, and this one is dropped.
+    /// Hands `event` to the handler. Returns whether the handler used it, or `None` if the handler
+    /// is busy: it pumped messages while handling an earlier one, and this one is dropped.
     fn send(&self, hwnd: HWND, event: Event) -> Option<bool> {
-        let used = {
+        self.dispatch(hwnd, |h, cx| h.event(event, cx))
+    }
+
+    /// Runs `f` on the handler, then serves what changed to UI Automation and destroys the window
+    /// if the handler asked. `None` if the handler is busy.
+    fn dispatch<R>(
+        &self,
+        hwnd: HWND,
+        f: impl FnOnce(&mut dyn Handler, &mut WindowCx<'_>) -> R,
+    ) -> Option<R> {
+        let r = {
             let mut handler = self.handler.try_borrow_mut().ok()?;
             let mut cx = WindowCx { hwnd, state: self };
-            handler.event(event, &mut cx)
+            f(&mut **handler, &mut cx)
         };
+        self.a11y_sync();
         if self.close.take() {
             // SAFETY: hwnd is live. The state outlives this call (with_state's depth count).
             unsafe { DestroyWindow(hwnd) };
         }
-        Some(used)
+        Some(r)
+    }
+
+    /// `WM_GETOBJECT`: the adapter answers, asking the handler for its tree on the first request.
+    fn get_object(&self, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
+        let answer = {
+            let mut adapter = self.a11y.try_borrow_mut().ok()?;
+            let adapter = adapter.as_mut()?;
+            let mut initial = Initial {
+                handler: self.handler.try_borrow_mut().ok(),
+                placeholder: false,
+            };
+            let answer = adapter.handle_wm_getobject(
+                accesskit_windows::WPARAM(wp),
+                accesskit_windows::LPARAM(lp),
+                &mut initial,
+            )?;
+            if initial.placeholder {
+                self.a11y_whole.set(true);
+            }
+            answer
+        };
+        self.a11y_served.set(true);
+        // With nothing borrowed: handing UI Automation the provider may bring WM_GETOBJECT again.
+        let result: accesskit_windows::LRESULT = answer.into();
+        Some(result.0)
+    }
+
+    /// Gives the adapter what changed in the handler's tree, then raises the events that makes.
+    /// Until a client has asked for the tree, nothing is asked of the handler.
+    fn a11y_sync(&self) {
+        if !self.a11y_served.get() {
+            return;
+        }
+        let events = {
+            let Ok(mut adapter) = self.a11y.try_borrow_mut() else {
+                return;
+            };
+            let Some(adapter) = adapter.as_mut() else {
+                return;
+            };
+            let Ok(mut handler) = self.handler.try_borrow_mut() else {
+                return;
+            };
+            let update = if self.a11y_whole.get() {
+                let tree = handler.a11y_tree();
+                self.a11y_whole.set(tree.is_none());
+                tree
+            } else {
+                handler.a11y_update()
+            };
+            let Some(update) = update else {
+                return;
+            };
+            adapter.update_if_active(|| update)
+        };
+        // With nothing borrowed: raising events may bring WM_GETOBJECT.
+        if let Some(events) = events {
+            events.raise();
+        }
+    }
+
+    /// Tells UI Automation whether the window has the keyboard focus.
+    fn a11y_focus(&self, focused: bool) {
+        let events = {
+            let Ok(mut adapter) = self.a11y.try_borrow_mut() else {
+                return;
+            };
+            adapter
+                .as_mut()
+                .and_then(|a| a.update_window_focus_state(focused))
+        };
+        if let Some(events) = events {
+            events.raise();
+        }
     }
 
     /// Recreates the canvas at the client area's new size and tells the handler.
@@ -871,6 +1014,104 @@ mod tests {
         assert_eq!(window.life.get(), Life::Gone);
         assert_eq!(Rc::strong_count(&events), 1);
         drop(window);
+    }
+
+    /// Serves a window with one button whose label counts its clicks, and logs what it's asked.
+    struct Accessible {
+        log: Rc<RefCell<Vec<String>>>,
+        clicks: u32,
+    }
+
+    impl Accessible {
+        fn tree(&self) -> accesskit::TreeUpdate {
+            use accesskit::{Action, Node, NodeId, Role, TreeId, TreeInfo, TreeUpdate};
+            let mut root = Node::new(Role::Window);
+            root.set_children(vec![NodeId(1)]);
+            let mut button = Node::new(Role::Button);
+            button.set_label(format!("clicked {}", self.clicks));
+            button.add_action(Action::Click);
+            TreeUpdate {
+                nodes: vec![(NodeId(0), root), (NodeId(1), button)],
+                tree: Some(TreeInfo::new(NodeId(0))),
+                tree_id: TreeId::ROOT,
+                focus: NodeId(0),
+            }
+        }
+    }
+
+    impl Handler for Accessible {
+        fn event(&mut self, _: Event, _: &mut WindowCx<'_>) -> bool {
+            true
+        }
+
+        fn paint(&mut self, _: &mut Frame<'_>) {}
+
+        fn a11y_tree(&mut self) -> Option<accesskit::TreeUpdate> {
+            self.log.borrow_mut().push("tree".into());
+            Some(self.tree())
+        }
+
+        fn a11y_update(&mut self) -> Option<accesskit::TreeUpdate> {
+            self.log.borrow_mut().push("update".into());
+            Some(self.tree())
+        }
+
+        fn a11y_action(&mut self, request: &accesskit::ActionRequest, _: &mut WindowCx<'_>) {
+            self.log
+                .borrow_mut()
+                .push(format!("{:?} {}", request.action, request.target_node.0));
+            self.clicks += 1;
+        }
+    }
+
+    /// T2 (Wine's UI Automation): a client's first request gets the handler's tree; a request
+    /// from another thread reaches the handler on the UI thread, and the change is served after.
+    #[test]
+    fn ui_automation_gets_the_tree_and_requests_reach_the_ui_thread() {
+        use accesskit::{Action, ActionHandler, ActionRequest, NodeId, TreeId};
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let handler = Accessible {
+            log: Rc::clone(&log),
+            clicks: 0,
+        };
+        let options = WindowOptions {
+            title: "dpro-win a11y test",
+            size: (200, 100),
+            min_size: (100, 100),
+        };
+        let window = Window::new(&options, Box::new(handler)).expect("a window");
+        // Events before any client asked don't ask the handler for its tree.
+        // SAFETY: a message sent to this test's live window, on its thread.
+        unsafe { SendMessageW(window.hwnd, WM_SETFOCUS, 0, 0) };
+        assert_eq!(log.borrow().len(), 0, "{:?}", log.borrow());
+        // UiaRootObjectId, as a UI Automation client's first request sends it.
+        // SAFETY: as above.
+        unsafe { SendMessageW(window.hwnd, WM_GETOBJECT, 0, -25) };
+        assert_eq!(log.borrow().first().map(String::as_str), Some("tree"));
+        // SAFETY: as above.
+        let requests =
+            unsafe { with_state(window.hwnd, |s| Arc::clone(&s.requests)) }.expect("a live window");
+        std::thread::spawn(move || {
+            ToUiThread(requests).do_action(ActionRequest {
+                action: Action::Click,
+                target_tree: TreeId::ROOT,
+                target_node: NodeId(1),
+                data: None,
+            });
+        })
+        .join()
+        .expect("the client thread");
+        // SAFETY: plain data; all-zero is a valid value.
+        let mut msg: MSG = unsafe { std::mem::zeroed() };
+        // SAFETY: msg is a live local; the posted wake is dispatched to the window.
+        while unsafe { PeekMessageW(&raw mut msg, null_mut(), 0, 0, PM_REMOVE) } != 0 {
+            // SAFETY: msg is the message PeekMessageW just filled.
+            unsafe { DispatchMessageW(&raw const msg) };
+        }
+        assert_eq!(*log.borrow(), ["tree", "Click 1", "update"]);
+        drop(window);
+        // SAFETY: as above; takes the WM_QUIT the destroyed window posted.
+        while unsafe { PeekMessageW(&raw mut msg, null_mut(), 0, 0, PM_REMOVE) } != 0 {}
     }
 
     #[test]

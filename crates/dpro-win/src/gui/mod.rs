@@ -17,12 +17,19 @@
 //!   are physical pixels, and [`Event::Dpi`] says when the scale changes.
 //! - **Text.** [`text::Text`] lays out with DirectWrite and rasterizes glyph coverage, which the
 //!   handler blends into its frame.
+//! - **UI Automation** through `accesskit_windows`, which answers clients from its own copy of the
+//!   handler's tree. The first request (`WM_GETOBJECT`) asks [`Handler::a11y_tree`]; after every
+//!   event the window asks [`Handler::a11y_update`] for the changes. Clients' requests (Invoke,
+//!   Toggle, Select, Focus) arrive on UI Automation's threads; they are queued, the window is woken
+//!   with one posted message, and they reach [`Handler::a11y_action`] on the UI thread.
 
+mod a11y;
 mod lru;
 pub mod probe;
 pub mod text;
 mod window;
 
+pub use accesskit;
 pub use window::{Window, WindowCx};
 
 /// A size in physical pixels.
@@ -115,6 +122,24 @@ pub trait Handler {
 
     /// Paints what the handler damaged into the canvas; the window presents it after.
     fn paint(&mut self, frame: &mut Frame<'_>);
+
+    /// The whole accessibility tree, for a UI Automation client's first request. From then on
+    /// the window asks [`a11y_update`](Self::a11y_update) after every event. `None` serves an
+    /// empty window until the next event, which then asks for the tree again.
+    fn a11y_tree(&mut self) -> Option<accesskit::TreeUpdate> {
+        None
+    }
+
+    /// What changed since the tree or the last update; `None` if nothing a client sees did.
+    fn a11y_update(&mut self) -> Option<accesskit::TreeUpdate> {
+        None
+    }
+
+    /// A client's request (Invoke, Toggle, Select, Focus), on the UI thread. Requests for nodes
+    /// gone since are the handler's to ignore.
+    fn a11y_action(&mut self, request: &accesskit::ActionRequest, cx: &mut WindowCx<'_>) {
+        let _ = (request, cx);
+    }
 }
 
 /// How a [`Window`] starts.
