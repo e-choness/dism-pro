@@ -1,7 +1,8 @@
 //! A synthetic shell page for TD-0009 §7 U2 and U8, and S-01's scripted session.
 //!
-//! About 600 nodes, the size §7 gives for a real page: a header, a rail of 12 pages, a toolbar with
-//! 4 category toggles, a table of 40 rows × 8 cells over 1,000 data rows, and a drawer of 25 rows.
+//! 387 live nodes, or 488 with the drawer open: a header, a rail of 12 pages, a toolbar with 4
+//! category toggles, a table of 40 rows × 8 cells over 1,000 data rows, and a drawer of 25 rows. §7
+//! estimates a real page at about 600, so per-event costs there are about half again as high.
 //! Shared by `interact.rs`, `ir.rs` and `tests/alloc_per_frame.rs`.
 
 use dpro_ui::{

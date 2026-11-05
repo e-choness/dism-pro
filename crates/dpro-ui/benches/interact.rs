@@ -1,5 +1,5 @@
 //! TD-0009 §7 U2: UI-thread work per input event, without raster: dispatch → update → view →
-//! reconcile → layout → damage, on a page of about 600 nodes.
+//! reconcile → layout → damage, on a shell page of 387 to 488 nodes (`fixtures/shell.rs`).
 //!
 //! Budget: p99 ≤ 2 ms per event (doc 04 §5). C1: `docker compose run --rm bench -p dpro-ui
 //! --bench interact`. Advisory timings; the gate is the instruction count in `ir.rs`.
