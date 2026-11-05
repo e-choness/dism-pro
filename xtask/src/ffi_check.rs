@@ -4,9 +4,12 @@
 //! `ffi-check-source` example) and compiles them with `clang-cl /Zs` for x64 and ARM64
 //! against Microsoft's headers. A mismatch in any size, offset or prototype fails the build.
 //!
-//! Header search path: the Windows SDK baked into the image (`$XWIN_CACHE_DIR`), plus any
-//! directories in `DPRO_FFI_INCLUDE` (`:`-separated), e.g. the ADK's `SDKs/DismApi/Include`.
-//! A header that can't be found is an error, never a skip.
+//! Header search path: the Windows SDK that `docker/task.sh` downloads into `$XWIN_CACHE_DIR`,
+//! plus any directories in `DPRO_FFI_INCLUDE` (`:`-separated), e.g. the ADK's
+//! `SDKs/DismApi/Include`. A header that can't be found is an error, never a skip.
+//!
+//! This is the local run. CI compiles the same sources on the Windows runner, where the ADK
+//! headers are, with `.github/scripts/adk.ps1 -Check`, so those headers never leave it.
 
 use std::{
     env,

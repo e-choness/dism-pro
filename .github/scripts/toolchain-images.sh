@@ -9,8 +9,9 @@
 #   toolchain-images.sh check-publish  before a push: check-private, and the package must already
 #                                      exist and be reachable with $GHCR_USER / $GHCR_TOKEN
 #
-# The package is private: t1/t2 hold the xwin splat (MSVC CRT + Windows SDK), which isn't
-# redistributable. Log in to ghcr.io before `pull` (CI: GITHUB_TOKEN with packages: read; a person:
+# The package is private. Images published since the xwin splat (MSVC CRT + Windows SDK) moved out
+# of them hold no Microsoft files, but older versions do, and that splat isn't redistributable.
+# Log in to ghcr.io before `pull` (CI: GITHUB_TOKEN with packages: read; a person:
 # a token with read:packages). Anyone without access builds the same images from source, which is
 # what `docker compose` does on first use.
 #
@@ -134,7 +135,7 @@ check_private() {
     -H "Authorization: Bearer ${token:-none}" "https://ghcr.io/v2/$PACKAGE/tags/list") || true
   case $code in
     200)
-      say error "ghcr.io/$PACKAGE can be pulled without signing in. Its images hold Microsoft files that aren't redistributable. A package can't be made private again once public: delete it, create it again privately (steps at the top of $0), then run the toolchain workflow"
+      say error "ghcr.io/$PACKAGE can be pulled without signing in. Its older images hold Microsoft files that aren't redistributable. A package can't be made private again once public: delete it, create it again privately (steps at the top of $0), then run the toolchain workflow"
       return 5
       ;;
     401 | 403 | 404)

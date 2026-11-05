@@ -1,10 +1,14 @@
 # The only entry point for build / lint / test / bench (ADR-0003).
-#   docker compose run --rm <fmt|lint|test|test-win|bench|bench-gate|deny|build> [-- args]
+#   docker compose run --rm <fmt|lint|test|test-win|bench|bench-gate|deny|build|xwin> [-- args]
 #
 # The toolchain images build from docker/build.Dockerfile (everything in it is pinned) on
 # first use. CI pulls the same images by digest from GHCR instead (.github/toolchain.lock) and
 # tags them as below; the package is private (decision #29). With access to it:
 #   docker login ghcr.io && bash .github/scripts/toolchain-images.sh pull t1 t2
+#
+# The MSVC CRT + Windows SDK aren't in the images: the first task that targets Windows downloads
+# them from Microsoft into the `xwin` volume, at the versions the Dockerfile pins (`xwin` does
+# only that).
 
 x-toolchain: &toolchain
   working_dir: /src
@@ -15,9 +19,13 @@ x-toolchain: &toolchain
     - cargo-registry:/usr/local/cargo/registry
     - cargo-git:/usr/local/cargo/git
     - sccache:/sccache
+    - xwin:/opt/xwin
   environment: &env
     # Lets xtask turn failures into GitHub annotations (empty outside Actions).
     GITHUB_ACTIONS: ${GITHUB_ACTIONS:-}
+    # Owner decision #5: the Microsoft CRT/SDK license is accepted for these builds. cargo-xwin
+    # accepts it implicitly, so docker/task.sh downloads nothing without this explicit opt-in.
+    XWIN_ACCEPT_LICENSE: "1"
 
 x-t1: &t1
   <<: *toolchain
@@ -26,8 +34,6 @@ x-t1: &t1
     context: ./docker
     dockerfile: build.Dockerfile
     target: t1
-    args:
-      XWIN_ACCEPT_LICENSE: "1" # owner decision #5
 
 x-t2: &t2
   <<: *toolchain
@@ -36,8 +42,6 @@ x-t2: &t2
     context: ./docker
     dockerfile: build.Dockerfile
     target: t2
-    args:
-      XWIN_ACCEPT_LICENSE: "1" # owner decision #5
 
 services:
   fmt:
@@ -70,6 +74,9 @@ services:
   lock:
     <<: *t1
     entrypoint: ["bash", "/src/docker/task.sh", "lock"]
+  xwin:
+    <<: *t1
+    entrypoint: ["bash", "/src/docker/task.sh", "xwin"]
   ffi-check:
     <<: *t1
     entrypoint: ["bash", "/src/docker/task.sh", "ffi-check"]
@@ -83,3 +90,4 @@ volumes:
   cargo-registry:
   cargo-git:
   sccache:
+  xwin:

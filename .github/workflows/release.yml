@@ -25,6 +25,8 @@ jobs:
       - uses: ./.github/actions/toolchain
         with:
           pinned: require
+      # The MSVC CRT + Windows SDK, from Microsoft at the versions the toolchain pins, checked by hash.
+      - run: docker compose run --rm xwin
       - run: docker compose run --rm build
       - name: Stage files with per-arch names
         env:

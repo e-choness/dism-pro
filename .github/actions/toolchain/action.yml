@@ -62,7 +62,6 @@ runs:
         context: ./docker
         file: ./docker/build.Dockerfile
         target: t1
-        build-args: XWIN_ACCEPT_LICENSE=1
         tags: dism-pro-build:t1-local
         load: true
         cache-from: type=gha,scope=t1
@@ -74,7 +73,6 @@ runs:
         context: ./docker
         file: ./docker/build.Dockerfile
         target: t2
-        build-args: XWIN_ACCEPT_LICENSE=1
         tags: dism-pro-build:t2-local
         load: true
         cache-from: |
