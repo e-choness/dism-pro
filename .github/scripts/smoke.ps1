@@ -235,8 +235,8 @@ Test-Step 'packages list' {
 }
 
 # A G1 ratio gate (doc 04 §3): one warm-up each, then 5 interleaved runs; the ratio of the medians
-# must stay within $Gate. Returns the line the step reports.
-function Measure-Ratio([scriptblock] $Ours, [scriptblock] $Theirs, [double] $Gate = 1.3) {
+# must stay within $Gate. Returns the line the step reports; $Note goes inside its parentheses.
+function Measure-Ratio([scriptblock] $Ours, [scriptblock] $Theirs, [double] $Gate = 1.3, [string] $Note = '') {
     & $Ours
     & $Theirs
     $a = [Collections.Generic.List[double]]::new()
@@ -248,7 +248,7 @@ function Measure-Ratio([scriptblock] $Ours, [scriptblock] $Theirs, [double] $Gat
     # Five samples each: the median is the middle one.
     $ma = @($a | Sort-Object)[2]
     $mb = @($b | Sort-Object)[2]
-    $text = 'ratio {0:N2} (median {1:N0} ms vs {2:N0} ms)' -f ($ma / $mb), $ma, $mb
+    $text = 'ratio {0:N2} (median {1:N0} ms vs {2:N0} ms{3})' -f ($ma / $mb), $ma, $mb, $Note
     if ($ma / $mb -gt $Gate) { throw "over the $Gate gate: $text" }
     $text
 }
@@ -366,49 +366,28 @@ function Assert-OurDriver([bool] $Staged, $Job) {
     if ($p) { "job $($Job.job), staged as $($p.published) ($($p.signature))" } else { "job $($Job.job), not staged" }
 }
 
-function Get-Median([double[]] $Values) {
-    $s = @($Values | Sort-Object)
-    $mid = [int][Math]::Floor($s.Count / 2)
-    if ($s.Count % 2) { $s[$mid] } else { ($s[$mid - 1] + $s[$mid]) / 2 }
-}
-
 Test-Step 'drivers list' {
     $d = Get-Doc (Invoke-Cli 'drivers', 'list') 'drivers.v1'
     if (Get-OurDriver) { throw "$infName is already staged: a previous run didn't clean up" }
     "$(@($d.drivers).Count) third-party package(s)"
 }
 
-# G1 ratio gate (TD-0002 §7): the whole command against dism.exe on the same VM and target. One
-# warm-up each, then 5 interleaved runs; the medians' ratio must be at most 1.3. Offline lists the
-# inbox packages too (2.5 s, 246 packages); online stays third-party (inbox online takes 17-30 s).
+# G1 ratio gate (TD-0002 §7): the whole command against dism.exe on the same VM and target, through
+# Measure-Ratio. Offline lists the inbox packages too (2.5 s, 246 packages); online stays
+# third-party (inbox online takes 17-30 s).
 Test-Step 'drivers list vs dism.exe /Get-Drivers (gate 1.3x)' {
     # @(...) keeps it an array: an `if` unwraps a one-item array to a string, and splatting a
     # string passes each character as an argument.
     $all = @(if ($Target) { '--all' })
     $dismArgs = if ($Target) { @("/Image:$((Resolve-Path $Target).Path)", '/Get-Drivers', '/All') } else { @('/Online', '/Get-Drivers') }
     $dism = Join-Path $env:SystemRoot 'System32\dism.exe'
-    $ours = {
+    Measure-Ratio -Note $(if ($Target) { ', --all' } else { '' }) {
         $null = & $Cli 'drivers' 'list' @all @targetArgs '--json' 2> $null
         if ($LASTEXITCODE) { throw "dismpro-cli drivers list exited $LASTEXITCODE" }
-    }
-    $theirs = {
+    } {
         $null = & $dism @dismArgs '/English'
         if ($LASTEXITCODE) { throw "dism.exe $($dismArgs -join ' ') exited $LASTEXITCODE" }
     }
-    & $ours
-    & $theirs
-    $a = [Collections.Generic.List[double]]::new()
-    $b = [Collections.Generic.List[double]]::new()
-    for ($i = 0; $i -lt 5; $i++) {
-        $a.Add((Measure-Command $ours).TotalMilliseconds)
-        $b.Add((Measure-Command $theirs).TotalMilliseconds)
-    }
-    $ma = Get-Median $a
-    $mb = Get-Median $b
-    $ratio = $ma / $mb
-    $text = 'ratio {0:N2} (median {1:N0} ms vs {2:N0} ms{3})' -f $ratio, $ma, $mb, $(if ($Target) { ', --all' } else { '' })
-    if ($ratio -gt 1.3) { throw "over the gate: $text" }
-    $text
 }
 
 if (-not $Target) {
