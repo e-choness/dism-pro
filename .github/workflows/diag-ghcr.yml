@@ -1,0 +1,42 @@
+# Throwaway (diag/ghcr-token, never merged): why does toolchain-images.sh check-publish get HTTP 403
+# from the private package this repository has Write access to? Read-only: it can't create or push.
+name: diag-ghcr
+on:
+  push:
+    branches: [diag/ghcr-token]
+permissions:
+  contents: read
+  packages: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PKG: e-choness/dism-pro-build
+      U: ${{ github.actor }}
+      T: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Token flows
+        run: |
+          note() { echo "::notice title=ghcr probe::$*"; }
+          tok() { sed -n 's/.*"token":"\([^"]*\)".*/\1/p'; }
+          code() { curl -sS --max-time 30 -o /dev/null -w '%{http_code}' -H "Authorization: Bearer ${1:-none}" "https://ghcr.io/v2/$PKG/tags/list" || true; }
+          chal=$(curl -sS --max-time 30 -D - -o /dev/null "https://ghcr.io/v2/$PKG/tags/list" | tr -d '\r' | grep -i '^www-authenticate' || true)
+          note "anonymous challenge: ${chal:-none}"
+          for q in "scope=repository:$PKG:pull" "scope=repository:$PKG:pull&service=ghcr.io"; do
+            body=$(printf 'user = "%s:%s"\n' "$U" "$T" | curl -sS --max-time 30 -K - -w '\n%{http_code}' "https://ghcr.io/token?$q" || true)
+            hc=${body##*$'\n'}; t=$(printf '%s' "${body%$'\n'*}" | tok)
+            note "token?$q -> HTTP $hc, token ${t:+issued}${t:-none}; tags/list with it -> $(code "$t")"
+          done
+          note "tags/list with Bearer base64(GITHUB_TOKEN) -> $(code "$(printf '%s' "$T" | base64 -w0)")"
+          anon=$(curl -sS --max-time 30 "https://ghcr.io/token?scope=repository:$PKG:pull" | tok || true)
+          note "anonymous: token ${anon:+issued}${anon:-none}; tags/list -> $(code "$anon")"
+      - name: Ground truth (docker login + manifest)
+        run: |
+          echo "$T" | docker login ghcr.io -u "$U" --password-stdin >/dev/null 2>&1 && echo "::notice title=ghcr probe::docker login ok" || echo "::notice title=ghcr probe::docker login FAILED"
+          if out=$(docker manifest inspect "ghcr.io/$PKG:seed" 2>&1); then
+            echo "::notice title=ghcr probe::docker manifest inspect :seed ok"
+          else
+            echo "::notice title=ghcr probe::docker manifest inspect :seed FAILED: $(printf '%s' "$out" | head -c 300 | tr '\n' ' ')"
+          fi
+          docker logout ghcr.io >/dev/null 2>&1 || true
