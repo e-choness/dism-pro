@@ -30,7 +30,8 @@ use dpro_engine::{
     journal::{self, Begin, JobStatus, JournalWriter, Recovered},
     ops::{self, DriverEntry, DriverSignature, FeatureEntry, PackageEntry, Probed},
     paths,
-    registry::{OfflineRegistry, OnlineRegistry},
+    registry::{self, Hive, OfflineRegistry, OnlineRegistry, RegistryView},
+    servicing,
 };
 use dpro_win::{
     console,
@@ -423,6 +424,30 @@ impl Resolved {
             os_build: UNKNOWN_BUILD,
             edition: None,
         })
+    }
+
+    /// The target's servicing stamp (TD-0013 §7.1), read before the DISM call whose answer is
+    /// cached against it. A registry that can't be read leaves out the CBS pair; the stamp then
+    /// rests on `Sessions.xml`, or can't see changes at all and nothing gets cached.
+    pub(crate) fn servicing_stamp(&self) -> servicing::Stamp {
+        let cbs = match &self.image_root {
+            None => OnlineRegistry::open().ok().map(|r| {
+                servicing::STAMP_VALUES
+                    .map(|name| r.value(Hive::Software, servicing::CBS_KEY, name))
+            }),
+            Some(_) => registry::offline_software_values(
+                &self.windows_dir,
+                servicing::CBS_KEY,
+                &servicing::STAMP_VALUES,
+            )
+            .ok()
+            .and_then(|v| <[_; 2]>::try_from(v).ok()),
+        };
+        servicing::Stamp::read(
+            cbs.unwrap_or([None, None]),
+            &self.windows_dir,
+            &self.volume_root,
+        )
     }
 
     /// Why a restart is pending (TD-0006 F-16), and whether offline hives were dirty (their

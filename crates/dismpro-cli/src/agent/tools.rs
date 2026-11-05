@@ -13,23 +13,28 @@ use std::{
     io::{self, BufReader},
     path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard, PoisonError},
+    time::Instant,
 };
 
 use dpro_broker::{
     Handler,
     wire::{Caller, Outcome},
 };
-use dpro_cli_fmt::{messages::Messages, units::format_bytes};
+use dpro_cli_fmt::{
+    messages::Messages,
+    units::{format_bytes, rfc3339},
+};
 use dpro_core::{
     health::{ImageHealth, LogFile},
     id::JobId,
     plan::{OsBuild, Plan, PlanDoc, PlanSummary},
-    units::Bytes,
+    units::{Bytes, UnixMillis},
 };
 use dpro_engine::{
     actor::TargetActor,
     health::{self, logs},
     journal, paths,
+    servicing::StampedCache,
 };
 use dpro_mcp::{
     catalog::{self, Tier, Tool},
@@ -48,7 +53,7 @@ use super::{MAX_POLICY_BYTES, explain, parse_policy, policy_path, rows::change_r
 use crate::{
     args::{self, TargetSel},
     error::CliError,
-    json::hresult,
+    json::{PackageJson, hresult},
     out,
     run::{self, Resolved},
 };
@@ -96,6 +101,9 @@ pub(crate) struct BrokerTools {
 #[derive(Debug, Default)]
 struct Dism {
     api: Option<DismApi>,
+    /// Package lists by target (TD-0013 §7.1): `DismGetPackages` takes seconds, and the list
+    /// only changes when CBS services the target.
+    packages: StampedCache<Vec<PackageJson>>,
 }
 
 impl Dism {
@@ -105,6 +113,24 @@ impl Dism {
             empty @ None => empty.insert(DismApi::initialize(LogLevel::Errors, None, None)?),
         };
         Ok(api)
+    }
+
+    /// The target's packages and when DISM read them: from the cache while the target's
+    /// servicing stamp holds, otherwise from DISM. The stamp is read first, so a change that
+    /// lands during the DISM call leaves the entry stale-stamped and the next call reads again.
+    fn packages(&mut self, t: &Resolved) -> Result<(Arc<Vec<PackageJson>>, UnixMillis), CliError> {
+        let key = t.windows_dir.to_string_lossy().to_lowercase();
+        let stamp = t.servicing_stamp();
+        let now = Instant::now();
+        if let Some(hit) = self.packages.get(&key, &stamp, now) {
+            return Ok(hit);
+        }
+        let read_at = paths::now();
+        let rows = {
+            let session = t.open(self.api()?)?;
+            run::package_rows(&session)?
+        };
+        Ok((self.packages.put(&key, stamp, now, read_at, rows), read_at))
     }
 }
 
@@ -315,16 +341,17 @@ impl BrokerTools {
         Ok(Value::Object(v))
     }
 
+    /// Installed updates and packages. `as_of` says when DISM read the list: a cached answer
+    /// is as old as that (TD-0013 §7.1).
     fn updates(&self, target: Target, list: ListArgs) -> Result<Value, CallError> {
         let m = Arc::clone(&self.m);
         self.on_dism(move |dism: &mut Dism| -> Result<Value, CallError> {
             let fail = |e: CliError| failed(&e, &m);
             let t = Resolved::new(&target.sel).map_err(fail)?;
-            let api = dism.api().map_err(fail)?;
-            let session = t.open(api).map_err(fail)?;
-            let rows = run::package_rows(&session).map_err(fail)?;
+            let (rows, read_at) = dism.packages(&t).map_err(fail)?;
             let mut v = page(&rows, &list)?;
             v.insert("target".into(), json!(target.shown));
+            v.insert("as_of".into(), json!(rfc3339(read_at)));
             Ok(Value::Object(v))
         })?
     }

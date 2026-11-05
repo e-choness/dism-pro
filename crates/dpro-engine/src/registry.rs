@@ -21,6 +21,7 @@ pub enum Value {
     MultiStr(Vec<String>),
     Dword(u32),
     Qword(u64),
+    Binary(Vec<u8>),
     Other,
 }
 
@@ -82,6 +83,7 @@ impl RegistryView for FakeRegistry {
 
 const REG_SZ: u32 = 1;
 const REG_EXPAND_SZ: u32 = 2;
+const REG_BINARY: u32 = 3;
 const REG_DWORD: u32 = 4;
 const REG_DWORD_BIG_ENDIAN: u32 = 5;
 const REG_MULTI_SZ: u32 = 7;
@@ -121,8 +123,35 @@ fn decode(kind: u32, data: &[u8]) -> Value {
         REG_QWORD => data
             .try_into()
             .map_or(Value::Other, |b| Value::Qword(u64::from_le_bytes(b))),
+        REG_BINARY => Value::Binary(data.to_vec()),
         _ => Value::Other,
     }
+}
+
+/// Values of one key in an offline installation's `SOFTWARE` hive, read from the file without
+/// loading `SYSTEM` (TD-0013 §7.1: the servicing stamp before every cached answer). One entry
+/// per name, `None` for a value that's missing (all of them when the key is).
+///
+/// # Errors
+/// The hive file is missing, unreadable or not a hive, or the key's cells are damaged.
+pub fn offline_software_values(
+    windows_dir: &Path,
+    key: &str,
+    names: &[&str],
+) -> Result<Vec<Option<Value>>, RegfError> {
+    let path = windows_dir.join("System32").join("config").join("SOFTWARE");
+    let hive = Regf::open(&path)?;
+    let Some(key) = hive.key(key)? else {
+        return Ok(vec![None; names.len()]);
+    };
+    names
+        .iter()
+        .map(|name| {
+            key.value(name)?
+                .map(|v| Ok(decode(v.kind()?, &v.data()?)))
+                .transpose()
+        })
+        .collect()
 }
 
 /// An offline installation's `SOFTWARE` and `SYSTEM`, read from their files (ADR-0008). Both
@@ -190,7 +219,8 @@ mod win {
             }
             RegValue::Dword(d) => Value::Dword(d),
             RegValue::Qword(q) => Value::Qword(q),
-            RegValue::Binary(_) | RegValue::Other { .. } => Value::Other,
+            RegValue::Binary(b) => Value::Binary(b),
+            RegValue::Other { .. } => Value::Other,
         }
     }
 
@@ -286,7 +316,8 @@ mod tests {
             Value::Qword(1)
         );
         assert_eq!(decode(REG_QWORD, &[1]), Value::Other);
-        assert_eq!(decode(3, &[1]), Value::Other);
+        assert_eq!(decode(REG_BINARY, &[1, 2]), Value::Binary(vec![1, 2]));
+        assert_eq!(decode(0, &[1]), Value::Other);
     }
 
     /// `<dir>\System32\config\{SOFTWARE,SYSTEM}`, as an offline install has them.
@@ -338,6 +369,23 @@ mod tests {
             (10, 0, 26100, 7)
         );
         assert!(identity::target_id(&registry).is_some());
+
+        let read = offline_software_values(
+            &windows,
+            r"Microsoft\Windows NT\CurrentVersion",
+            &["UBR", "Nope", "CurrentBuildNumber"],
+        )
+        .unwrap();
+        assert_eq!(
+            read,
+            [
+                Some(Value::Dword(7)),
+                None,
+                Some(Value::Str("26100".into()))
+            ]
+        );
+        let absent = offline_software_values(&windows, r"Microsoft\Nope", &["A", "B"]).unwrap();
+        assert_eq!(absent, [None, None]);
         std::fs::remove_dir_all(&windows).unwrap();
     }
 

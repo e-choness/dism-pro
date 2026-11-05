@@ -229,7 +229,8 @@ fn maintain() -> Vec<Tool> {
             Broker,
             "updates_list",
             "List installed updates",
-            "Installed packages and updates of a target.",
+            "Installed packages and updates of a target. as_of is when DISM read the list: the \
+             server keeps it until the target is serviced again, for at most 10 minutes.",
             list_args(&[("target", target())]),
         ),
     ]
