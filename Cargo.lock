@@ -329,6 +329,10 @@ dependencies = [
 [[package]]
 name = "dpro-app"
 version = "0.1.0"
+dependencies = [
+ "criterion",
+ "dpro-core",
+]
 
 [[package]]
 name = "dpro-broker"
