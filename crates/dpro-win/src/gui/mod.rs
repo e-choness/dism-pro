@@ -22,8 +22,11 @@
 //!   event the window asks [`Handler::a11y_update`] for the changes. Clients' requests (Invoke,
 //!   Toggle, Select, Focus) arrive on UI Automation's threads; they are queued, the window is woken
 //!   with one posted message, and they reach [`Handler::a11y_action`] on the UI thread.
+//! - **Environment.** [`Event::Env`] gives Windows' look-and-motion settings ([`env::Env`]) at
+//!   creation and whenever one of them changes, so the handler re-themes live (TD-0009 §5.2).
 
 mod a11y;
+pub mod env;
 mod lru;
 pub mod probe;
 pub mod text;
@@ -91,6 +94,9 @@ pub enum Event {
     Dpi(u32),
     /// Keyboard focus came to the window, or left it.
     Focus(bool),
+    /// Windows' settings for how the window looks and moves. Sent first, before [`Event::Dpi`],
+    /// then whenever any of them changes.
+    Env(env::Env),
     /// The frame timer fired: advance the animations.
     Frame,
     /// The user asked to close the window. It closes when the handler calls [`WindowCx::close`].

@@ -20,6 +20,26 @@ pub struct Motion {
     pub hover_ms: u16,
 }
 
+impl Motion {
+    /// The motion tokens' durations.
+    pub const STANDARD: Self = Self {
+        hover_ms: crate::tokens::motion::HOVER_MS,
+    };
+    /// Reduced motion: every duration 0.
+    pub const REDUCED: Self = Self { hover_ms: 0 };
+
+    /// [`STANDARD`](Self::STANDARD) while Windows' *Animation effects* are on, else
+    /// [`REDUCED`](Self::REDUCED) (TD-0009 §5.2).
+    #[must_use]
+    pub const fn system(animations: bool) -> Self {
+        if animations {
+            Self::STANDARD
+        } else {
+            Self::REDUCED
+        }
+    }
+}
+
 /// The UI of one window: a retained tree of nodes reconciled from views each frame.
 ///
 /// `M` is the view's message type: input on a node yields the message the view gave it.
@@ -94,6 +114,17 @@ impl<M> Ui<M> {
             self.damage_all();
             self.a11y.all = true;
         }
+    }
+
+    /// The durations changed (*Animation effects* toggled). A running animation finishes on its
+    /// next tick if its duration is now 0.
+    pub fn set_motion(&mut self, motion: Motion) {
+        self.motion = motion;
+    }
+
+    #[must_use]
+    pub fn motion(&self) -> Motion {
+        self.motion
     }
 
     #[must_use]

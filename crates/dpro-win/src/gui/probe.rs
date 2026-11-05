@@ -46,11 +46,25 @@ pub enum Kind {
     Idle,
 }
 
-/// A probe target's arguments: `[--size WxH] [--ui-probe first-frame|idle --probe-out <file>]`.
+/// `--materials`: the materials a window shows, forced for tests (TD-0009 §6). `bare_window` has
+/// none and ignores it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ForceMaterials {
+    /// As the user's preference and Windows' settings say.
+    #[default]
+    Auto,
+    Solid,
+    /// Glass wherever the presenter can compose, on WARP too.
+    Glass,
+}
+
+/// A probe target's arguments: `[--size WxH] [--materials auto|solid|glass]
+/// [--ui-probe first-frame|idle --probe-out <file>]`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Args {
     /// The client area at 100 % scale, if given.
     pub size: Option<(u32, u32)>,
+    pub materials: ForceMaterials,
     pub probe: Option<(Kind, PathBuf)>,
 }
 
@@ -78,6 +92,18 @@ impl Args {
                         .and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)))
                         .filter(|&(w, h)| w > 0 && h > 0);
                     parsed.size = Some(size.ok_or_else(|| format!("--size {v}: expected WxH"))?);
+                }
+                "--materials" => {
+                    parsed.materials = match value()?.as_str() {
+                        "auto" => ForceMaterials::Auto,
+                        "solid" => ForceMaterials::Solid,
+                        "glass" => ForceMaterials::Glass,
+                        other => {
+                            return Err(format!(
+                                "--materials {other}: expected auto, solid or glass"
+                            ));
+                        }
+                    };
                 }
                 "--ui-probe" => {
                     kind = Some(match value()?.as_str() {
@@ -279,9 +305,20 @@ mod tests {
             ]),
             Ok(Args {
                 size: Some((1000, 700)),
+                materials: ForceMaterials::Auto,
                 probe: Some((Kind::Idle, PathBuf::from("o.txt"))),
             })
         );
+        for (flag, materials) in [
+            ("auto", ForceMaterials::Auto),
+            ("solid", ForceMaterials::Solid),
+            ("glass", ForceMaterials::Glass),
+        ] {
+            assert_eq!(
+                parse(&["--materials", flag]).map(|a| a.materials),
+                Ok(materials)
+            );
+        }
         assert_eq!(
             parse(&["--probe-out", "o.txt", "--ui-probe", "first-frame"])
                 .map(|a| a.probe.map(|p| p.0)),
@@ -298,6 +335,8 @@ mod tests {
             &["--ui-probe", "uia", "--probe-out", "o"],
             &["--ui-probe", "idle"],
             &["--probe-out", "o"],
+            &["--materials"],
+            &["--materials", "mica"],
             &["--frobnicate"],
         ] {
             assert!(parse(bad).is_err(), "{bad:?}");

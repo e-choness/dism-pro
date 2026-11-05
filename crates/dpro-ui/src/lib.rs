@@ -57,6 +57,7 @@ mod damage;
 mod geom;
 mod input;
 mod layout;
+pub mod materials;
 mod paint;
 #[cfg(windows)]
 pub mod platform;
@@ -75,6 +76,6 @@ pub use geom::{Insets, Point, Rect, RectPx, Size};
 pub use input::{Input, KeyCode, KeyEvent, Mods};
 pub use style::{Align, Axis, Dim, Justify, Style};
 pub use text::{FakeText, GlyphSink, Icon, TextMetrics, TextStyle, TextSystem};
-pub use theme::{Color, Scheme, Theme, Tone, tokens};
+pub use theme::{Color, Scheme, SysColors, Theme, Tone, tokens};
 pub use tree::{Element, Key, Look, NodeId, NodeInfo, Radius, Role};
 pub use ui::{Motion, Ui};

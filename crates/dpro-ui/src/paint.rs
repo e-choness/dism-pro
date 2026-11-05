@@ -15,6 +15,12 @@
 //! - check boxes: a box a line high, with the state layer, then the label half a line after it;
 //! - while focus is visible, Windows 11's focus visual over everything else: a ring in text color
 //!   with a one-pixel surface-colored ring inside it, so it shows on any fill, accent included.
+//!
+//! Ink is looked up with the fill under it (the node's own, else its nearest ancestor's), which
+//! is how high contrast gives text the system color paired with its background
+//! ([`Theme::ink`]). High contrast also draws borders in `WindowText` (`GrayText` when disabled),
+//! keeps `Highlight` fills for what can be used, and shows hover and press as an outline instead
+//! of a state layer.
 
 use dpro_app::table::Tri;
 
@@ -23,7 +29,7 @@ use crate::{
     geom::{Rect, RectPx},
     text::{GlyphSink, Icon, TextSystem},
     theme::{
-        Color, Theme, Tone,
+        Color, Scheme, Theme, Tone,
         tokens::{radius, stroke},
     },
     tree::{NIL, Node, Role},
@@ -76,15 +82,16 @@ impl<M> Ui<M> {
         };
         let mut c = self.nodes[ROOT as usize].first;
         while c != NIL {
-            self.paint_node(c, region, &mut p);
+            self.paint_node(c, region, Tone::App, &mut p);
             c = self.nodes[c as usize].next;
         }
         let all = p.canvas.bounds();
         p.canvas.set_clip(all);
     }
 
-    /// Paints node `i` and its subtree within `clip`.
-    fn paint_node(&self, i: u32, clip: RectPx, p: &mut Painter<'_, '_>) {
+    /// Paints node `i` and its subtree within `clip`, over the fill `under` (its nearest
+    /// ancestor's, which picks high contrast's ink).
+    fn paint_node(&self, i: u32, clip: RectPx, under: Tone, p: &mut Painter<'_, '_>) {
         let node = &self.nodes[i as usize];
         let rect = node.rect.snap(p.scale);
         let visible = rect.intersect(clip);
@@ -94,21 +101,30 @@ impl<M> Ui<M> {
         }
         p.canvas.set_clip(visible);
         let corner = node.look.radius.logical() * p.scale;
-        if let Some(fill) = node.look.fill {
+        let fill = node.look.fill.map(|f| p.theme.fill(f, node.enabled));
+        if let Some(fill) = fill {
             p.canvas.rrect(rect, corner, p.theme.color(fill));
         }
+        let under = fill.unwrap_or(under);
         let interactive = node.enabled && node.role.interactive();
         if interactive && node.role == Role::Button {
             p.state_layer(node, rect, corner);
         }
         if let Some(border) = node.look.border {
-            p.canvas.ring(rect, corner, 1, p.theme.color(border));
+            p.canvas
+                .ring(rect, corner, 1, p.theme.stroke(border, node.enabled));
         }
-        let ink = p.theme.color(if node.enabled {
-            node.look.ink
-        } else {
-            Tone::TextSecondary
-        });
+        if interactive && node.role == Role::Button {
+            p.outline(node, rect, corner, under);
+        }
+        let ink = p.theme.ink(
+            if node.enabled {
+                node.look.ink
+            } else {
+                Tone::TextSecondary
+            },
+            under,
+        );
         match node.role {
             Role::CheckBox => p.check_box(node, interactive, ink),
             Role::Label | Role::Button if node.first == NIL && !node.text.is_empty() => {
@@ -119,7 +135,7 @@ impl<M> Ui<M> {
         }
         let mut child = node.first;
         while child != NIL {
-            self.paint_node(child, visible, p);
+            self.paint_node(child, visible, under, p);
             child = self.nodes[child as usize].next;
         }
         if self.focus == i && self.focus_visible {
@@ -144,8 +160,7 @@ impl Painter<'_, '_> {
         // Whole pixels, at least one.
         let wide = (stroke::FOCUS * self.scale).round().max(1.0);
         let width = px_width(wide);
-        self.canvas
-            .ring(rect, corner, width, self.theme.color(Tone::Text));
+        self.canvas.ring(rect, corner, width, self.theme.focus());
         let inner = RectPx {
             x0: rect.x0 + width,
             y0: rect.y0 + width,
@@ -160,8 +175,12 @@ impl Painter<'_, '_> {
         );
     }
 
-    /// The hover or pressed layer over a control's shape.
+    /// The hover or pressed layer over a control's shape (none in high contrast: see
+    /// [`outline`](Self::outline)).
     fn state_layer<M>(&mut self, n: &Node<M>, r: RectPx, corner: f32) {
+        if self.theme.scheme() == Scheme::HighContrast {
+            return;
+        }
         let layer = if n.pressed {
             self.theme.color(Tone::Pressed)
         } else if n.hover_t > 0.0 {
@@ -171,6 +190,18 @@ impl Painter<'_, '_> {
             return;
         };
         self.canvas.rrect(r, corner, layer);
+    }
+
+    /// High contrast's hover and press: a whole-pixel outline over the border, in the color that
+    /// shows on the fill `under` ([`Theme::hover_outline`]).
+    fn outline<M>(&mut self, n: &Node<M>, r: RectPx, corner: f32, under: Tone) {
+        let Some(color) = self.theme.hover_outline(under) else {
+            return;
+        };
+        if n.pressed || n.hover_t > 0.0 {
+            let width = px_width(self.scale.round().max(1.0));
+            self.canvas.ring(r, corner, width, color);
+        }
     }
 
     /// `n`'s text in `ink`, centered vertically in `content` (and horizontally if `center`).
@@ -216,12 +247,14 @@ impl Painter<'_, '_> {
             } else {
                 Tone::Border
             };
-            self.canvas.ring(r, corner, 1, self.theme.color(edge));
+            self.canvas
+                .ring(r, corner, 1, self.theme.stroke(edge, n.enabled));
         }
         if interactive {
             self.state_layer(n, r, corner);
+            self.outline(n, r, corner, fill);
         }
-        let mark = self.theme.color(Tone::OnAccent);
+        let mark = self.theme.ink(Tone::OnAccent, fill);
         match n.check {
             Tri::On => {
                 let mut sink = Ink {
@@ -384,6 +417,87 @@ mod tests {
         assert_eq!(f.at(5, 12), argb(&t, Tone::Accent));
         assert_eq!(f.at(46, 12), argb(&t, Tone::OnAccent));
         assert!((20..80).all(|x| f.at(x, 5) == argb(&t, Tone::Accent)));
+    }
+
+    /// TD-0009 §4.4: only the system's colors, and each text in the color paired with its fill.
+    #[test]
+    fn high_contrast_paints_system_colors_paired_with_their_fills() {
+        use crate::{Color, SysColors};
+        // Distinct values, so every pixel says which system color it is.
+        let sys = SysColors {
+            window: Color::hex(0x00_0001),
+            window_text: Color::hex(0x00_0002),
+            highlight: Color::hex(0x00_0003),
+            highlight_text: Color::hex(0x00_0004),
+            hot_light: Color::hex(0x00_0005),
+            gray_text: Color::hex(0x00_0006),
+            btn_face: Color::hex(0x00_0007),
+            btn_text: Color::hex(0x00_0008),
+        };
+        let t = Theme::high_contrast(sys);
+        let opaque =
+            |c: Color| 0xFF00_0000 | u32::from(c.r) << 16 | u32::from(c.g) << 8 | u32::from(c.b);
+        let mut ui = window(1.0);
+        let f = paint(&ui, &t);
+        // The card: a WindowText border around Window.
+        assert_eq!(f.at(50, 0), opaque(sys.window_text));
+        assert_eq!(f.at(50, 2), opaque(sys.window));
+        assert_eq!(f.at(50, 50), opaque(sys.window));
+        // The accent button is Highlight, and its label HighlightText (the "Go" glyph box at 46).
+        assert_eq!(f.at(5, 12), opaque(sys.highlight));
+        assert_eq!(f.at(46, 12), opaque(sys.highlight_text));
+        // No color outside the system's, anywhere.
+        let allowed: Vec<u32> = [
+            sys.window,
+            sys.window_text,
+            sys.highlight,
+            sys.highlight_text,
+            sys.hot_light,
+            sys.gray_text,
+            sys.btn_face,
+            sys.btn_text,
+        ]
+        .into_iter()
+        .map(opaque)
+        .collect();
+        assert!(
+            f.px.iter().all(|p| allowed.contains(p)),
+            "a color that isn't a system color"
+        );
+        // Hovering tints nothing: the accent button gets a HighlightText outline, and the rest
+        // of it stays as it was.
+        let center = button(&ui).center();
+        let go = button(&ui).snap(1.0);
+        let mut msgs = Vec::new();
+        ui.dispatch(Input::PointerMove(center), &mut msgs);
+        ui.repaint_all();
+        let hovered = paint(&ui, &t);
+        assert_eq!(hovered.at(go.x0, 12), opaque(sys.highlight_text));
+        assert_eq!(hovered.at(go.x0 + 1, 12), opaque(sys.highlight));
+        assert!(hovered.px.iter().all(|p| allowed.contains(p)));
+        let outside = |x: i32, y: i32| x < go.x0 || x >= go.x1 || y < go.y0 || y >= go.y1;
+        for (k, (now, was)) in hovered.px.iter().zip(&f.px).enumerate() {
+            let (x, y) = (
+                i32::try_from(k % 100).unwrap(),
+                i32::try_from(k / 100).unwrap(),
+            );
+            if outside(x, y) {
+                assert_eq!(now, was, "({x}, {y}) changed");
+            }
+        }
+        ui.dispatch(Input::PointerLeave, &mut msgs);
+        let tab = Input::Key(KeyEvent {
+            key: KeyCode::Tab,
+            down: true,
+            mods: Mods::default(),
+        });
+        ui.dispatch(tab, &mut msgs);
+        let focused = paint(&ui, &t);
+        let r = button(&ui).snap(1.0);
+        assert_eq!(
+            focused.at(r.x0, i32::midpoint(r.y0, r.y1)),
+            opaque(sys.highlight)
+        );
     }
 
     #[test]

@@ -570,6 +570,25 @@ mod tests {
         assert_eq!(ui.info(ui.find(&[Key(1)]).unwrap()).unwrap().hover, 1.0);
     }
 
+    /// *Animation effects* turned off mid-fade: the fade ends on the next tick, and the frames
+    /// stop.
+    #[test]
+    fn reduced_motion_mid_fade_ends_it_at_the_next_tick() {
+        let mut ui = ui(Motion::STANDARD, true);
+        let mut out = Vec::new();
+        ui.dispatch(Input::PointerMove(at(10.0)), &mut out);
+        ui.tick(1_000);
+        ui.tick(1_030);
+        let a = ui.find(&[Key(1)]).unwrap();
+        assert!(ui.info(a).unwrap().hover < 1.0);
+        assert!(ui.wants_frame());
+        ui.set_motion(Motion::system(false));
+        assert_eq!(ui.motion(), Motion::REDUCED);
+        ui.tick(1_031);
+        assert_eq!(ui.info(a).unwrap().hover, 1.0);
+        assert!(!ui.wants_frame());
+    }
+
     #[test]
     fn hover_follows_nodes_that_move_under_a_still_pointer() {
         let mut ui = ui(Motion::default(), true);

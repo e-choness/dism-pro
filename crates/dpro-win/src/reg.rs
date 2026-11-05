@@ -13,9 +13,9 @@ use std::{
 use windows_sys::Win32::{
     Foundation::{ERROR_FILE_NOT_FOUND, ERROR_MORE_DATA},
     System::Registry::{
-        HKEY, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WRITE, REG_BINARY, REG_DWORD, REG_EXPAND_SZ,
-        REG_MULTI_SZ, REG_QWORD, REG_SZ, RegCloseKey, RegDeleteValueW, RegOpenKeyExW,
-        RegQueryValueExW, RegSetValueExW,
+        HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WRITE, REG_BINARY, REG_DWORD,
+        REG_EXPAND_SZ, REG_MULTI_SZ, REG_QWORD, REG_SZ, RegCloseKey, RegDeleteValueW,
+        RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
     },
 };
 
@@ -79,6 +79,15 @@ impl RegKey {
     pub fn local_machine() -> Self {
         Self {
             hkey: HKEY_LOCAL_MACHINE,
+            owned: false,
+        }
+    }
+
+    /// `HKEY_CURRENT_USER`: the hive of the user the process runs as.
+    #[must_use]
+    pub fn current_user() -> Self {
+        Self {
+            hkey: HKEY_CURRENT_USER,
             owned: false,
         }
     }

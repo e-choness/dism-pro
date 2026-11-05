@@ -23,6 +23,7 @@ dpro-win = { path = "crates/dpro-win" }
 # Win32 FFI for dpro-win (coding standards §7: windows-sys over windows). MIT OR Apache-2.0.
 windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
+    "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
     "Win32_Security",
     "Win32_Security_Authorization",
@@ -34,8 +35,10 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_System_Kernel",
     "Win32_System_LibraryLoader",
     "Win32_System_Pipes",
+    "Win32_System_Power",
     "Win32_System_ProcessStatus",
     "Win32_System_Registry",
+    "Win32_System_RemoteDesktop",
     "Win32_System_SystemInformation",
     "Win32_System_Threading",
     "Win32_UI_HiDpi",
@@ -43,9 +46,9 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
-# COM for dpro-win's GUI (TD-0009 §5.5): DirectWrite now, UI Automation through accesskit_windows
-# next, which uses this release. windows-sys has no COM interfaces. MIT OR Apache-2.0. Exact: the
-# version S-01 built.
+# COM for dpro-win's GUI (TD-0009 §5.5): DirectWrite, and the UI Automation types that
+# accesskit_windows shares (this release) and HIGHCONTRASTW. windows-sys has no COM interfaces.
+# MIT OR Apache-2.0. Exact: the version S-01 built.
 windows = { version = "=0.62.2", features = [
     "Win32_Graphics_DirectWrite",
     "Win32_UI_Accessibility",

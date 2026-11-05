@@ -4,8 +4,9 @@
 //! pipeline and painting. It exits with 1 if DirectWrite is unavailable rather than measure a
 //! different program.
 //!
-//! `shell [--size WxH] [--ui-probe first-frame|idle --probe-out <file>]`, the arguments of
-//! dpro-win's `bare_window`, which `.github/scripts/ui-gates.ps1` measures it against.
+//! `shell [--size WxH] [--materials auto|solid|glass] [--ui-probe first-frame|idle --probe-out
+//! <file>]`, the arguments of dpro-win's `bare_window`, which `.github/scripts/ui-gates.ps1`
+//! measures it against. It follows Windows' theme, high contrast and animation settings live.
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
@@ -30,13 +31,13 @@ mod win {
     use std::process::ExitCode;
 
     use dpro_ui::{
-        Cx, Motion, Theme,
+        Cx,
+        materials::GlassPref,
         platform::{self, DirectWrite, Host, Model},
-        tokens::motion::HOVER_MS,
     };
     use dpro_win::gui::{
         WindowOptions,
-        probe::{self, Args},
+        probe::{self, Args, ForceMaterials},
     };
 
     use crate::shell::{Msg, Shell, view};
@@ -66,12 +67,12 @@ mod win {
         let Ok(text) = DirectWrite::new() else {
             return ExitCode::FAILURE;
         };
-        let host = Host::new(
-            Shell::new(),
-            Box::new(text),
-            Theme::LIGHT,
-            Motion { hover_ms: HOVER_MS },
-        );
+        let glass = match args.materials {
+            ForceMaterials::Auto => GlassPref::Auto,
+            ForceMaterials::Solid => GlassPref::Off,
+            ForceMaterials::Glass => GlassPref::Force,
+        };
+        let host = Host::new(Shell::new(), Box::new(text), glass);
         match platform::run(&options, host) {
             Ok(()) => ExitCode::SUCCESS,
             Err(_) => ExitCode::FAILURE,

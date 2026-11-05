@@ -6,8 +6,13 @@
 //! rebuild.
 //!
 //! The colors are doc 05's solid-fallback values, which every contrast check is made against
-//! (tested below: WCAG 2.2 AA). The glass materials and high contrast's system colors come with
-//! the Win32 platform.
+//! (tested below: WCAG 2.2 AA). The glass materials come with the composition presenter.
+//!
+//! **High contrast** ([`Theme::high_contrast`], TD-0009 §4.4) shows the system's colors only: no
+//! tints, no state layers. Text takes the color the system pairs with the fill under it
+//! ([`Theme::ink`]): `HighlightText` on the highlight fills (accent, danger, selection),
+//! `ButtonText` on `ButtonFace`, else `WindowText`, with `GrayText` for secondary text and
+//! `HotLight` for accent text. The focus ring is `Highlight`.
 
 /// An sRGB color with straight (not premultiplied) alpha.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -122,11 +127,25 @@ impl Tone {
     ];
 }
 
-/// Light or dark.
+/// Light, dark, or the system's high-contrast colors.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Scheme {
     Light,
     Dark,
+    HighContrast,
+}
+
+/// The system colors high contrast shows (`GetSysColor`), the only colors in that mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SysColors {
+    pub window: Color,
+    pub window_text: Color,
+    pub highlight: Color,
+    pub highlight_text: Color,
+    pub hot_light: Color,
+    pub gray_text: Color,
+    pub btn_face: Color,
+    pub btn_text: Color,
 }
 
 /// The colors of every [`Tone`] in one scheme.
@@ -134,6 +153,8 @@ pub enum Scheme {
 pub struct Theme {
     scheme: Scheme,
     colors: [Color; Tone::ALL.len()],
+    /// High contrast's system colors, which pick the ink by the fill under it.
+    sys: Option<SysColors>,
 }
 
 /// The state layers' ink alphas: 6 % and 4 % (15 and 10 of 255).
@@ -168,6 +189,7 @@ impl Theme {
                 ink.alpha(HOVER_ALPHA),
                 ink.alpha(PRESSED_ALPHA),
             ],
+            sys: None,
         }
     };
 
@@ -199,17 +221,125 @@ impl Theme {
                 ink.alpha(HOVER_ALPHA),
                 ink.alpha(PRESSED_ALPHA),
             ],
+            sys: None,
         }
     };
+
+    /// High contrast: the system's colors only. Fills map to `Window`, `ButtonFace` (quiet
+    /// fills) and `Highlight` (accent, danger, selection); borders to `WindowText`; the state
+    /// layers vanish. Text goes through [`ink`](Self::ink).
+    #[must_use]
+    pub const fn high_contrast(sys: SysColors) -> Self {
+        let none = Color {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 0,
+        };
+        Self {
+            scheme: Scheme::HighContrast,
+            colors: [
+                sys.window,
+                sys.window,
+                sys.btn_face,
+                sys.window_text,
+                sys.window_text,
+                sys.gray_text,
+                sys.highlight,
+                sys.highlight_text,
+                sys.window_text,
+                sys.window_text,
+                sys.window_text,
+                sys.window_text,
+                sys.highlight,
+                sys.window_text,
+                sys.window,
+                sys.highlight,
+                none,
+                none,
+            ],
+            sys: Some(sys),
+        }
+    }
 
     #[must_use]
     pub const fn scheme(&self) -> Scheme {
         self.scheme
     }
 
+    /// `tone` as a fill.
     #[must_use]
     pub const fn color(&self, tone: Tone) -> Color {
         self.colors[tone as usize]
+    }
+
+    /// The tone a fill of `tone` shows as. High contrast keeps `Highlight` for what can be used:
+    /// a disabled accent, danger or selected fill shows as the window, so its `GrayText` reads
+    /// as disabled. Light and dark: `tone`.
+    #[must_use]
+    pub const fn fill(&self, tone: Tone, enabled: bool) -> Tone {
+        if self.sys.is_some()
+            && !enabled
+            && matches!(tone, Tone::Accent | Tone::Danger | Tone::Selected)
+        {
+            Tone::Surface
+        } else {
+            tone
+        }
+    }
+
+    /// `tone` as a border or outline. High contrast: `WindowText`, or `GrayText` when disabled.
+    #[must_use]
+    pub const fn stroke(&self, tone: Tone, enabled: bool) -> Color {
+        match self.sys {
+            Some(sys) if enabled => sys.window_text,
+            Some(sys) => sys.gray_text,
+            None => self.color(tone),
+        }
+    }
+
+    /// High contrast has no tints, so a hovered or pressed control on a fill of `under` shows an
+    /// outline instead of a state layer: `Highlight`, or `HighlightText` on a highlight fill.
+    /// `None` in light and dark.
+    #[must_use]
+    pub const fn hover_outline(&self, under: Tone) -> Option<Color> {
+        match self.sys {
+            Some(sys) if matches!(under, Tone::Accent | Tone::Danger | Tone::Selected) => {
+                Some(sys.highlight_text)
+            }
+            Some(sys) => Some(sys.highlight),
+            None => None,
+        }
+    }
+
+    /// `tone` as text or a glyph over a fill of `under`. Light and dark: the tone's own color,
+    /// whose contrast on every fill it's used on is tested. High contrast: the color the system
+    /// pairs with that fill.
+    #[must_use]
+    pub const fn ink(&self, tone: Tone, under: Tone) -> Color {
+        let Some(sys) = self.sys else {
+            return self.color(tone);
+        };
+        match under {
+            Tone::Accent | Tone::Danger | Tone::Selected => sys.highlight_text,
+            Tone::Subtle => sys.btn_text,
+            // A disabled, checked box: GrayText's partner.
+            Tone::TextSecondary => sys.window,
+            _ => match tone {
+                Tone::TextSecondary => sys.gray_text,
+                Tone::Accent => sys.hot_light,
+                _ => sys.window_text,
+            },
+        }
+    }
+
+    /// The keyboard focus ring: text color, or `Highlight` in high contrast (TD-0009 §4.4).
+    #[must_use]
+    pub const fn focus(&self) -> Color {
+        match self.sys {
+            Some(sys) => sys.highlight,
+            None => self.color(Tone::Text),
+        }
     }
 }
 
@@ -306,6 +436,68 @@ mod tests {
         assert_eq!(Theme::DARK.scheme(), Scheme::Dark);
         for (i, t) in Tone::ALL.into_iter().enumerate() {
             assert_eq!(t as usize, i);
+        }
+    }
+
+    /// TD-0009 §4.4: high contrast shows the system's colors only, and each text in the color
+    /// the system pairs with what's under it.
+    #[test]
+    fn high_contrast_pairs_every_ink_with_its_fill() {
+        use Tone::{Accent, App, OnAccent, Selected, Subtle, Surface, Text, TextSecondary};
+        let sys = SysColors {
+            window: Color::hex(0x00_0001),
+            window_text: Color::hex(0x00_0002),
+            highlight: Color::hex(0x00_0003),
+            highlight_text: Color::hex(0x00_0004),
+            hot_light: Color::hex(0x00_0005),
+            gray_text: Color::hex(0x00_0006),
+            btn_face: Color::hex(0x00_0007),
+            btn_text: Color::hex(0x00_0008),
+        };
+        let t = Theme::high_contrast(sys);
+        assert_eq!(t.scheme(), Scheme::HighContrast);
+        let system = [
+            sys.window,
+            sys.window_text,
+            sys.highlight,
+            sys.highlight_text,
+            sys.hot_light,
+            sys.gray_text,
+            sys.btn_face,
+            sys.btn_text,
+        ];
+        for tone in Tone::ALL {
+            let c = t.color(tone);
+            assert!(c.a == 0 || system.contains(&c), "{tone:?} is {c:?}");
+        }
+        // No tints: the state layers are clear.
+        assert_eq!((t.color(Tone::Hover).a, t.color(Tone::Pressed).a), (0, 0));
+        // Fills and their text.
+        assert_eq!(t.color(Accent), sys.highlight);
+        assert_eq!(t.ink(OnAccent, Accent), sys.highlight_text);
+        assert_eq!(t.ink(Text, Selected), sys.highlight_text);
+        assert_eq!(t.color(Subtle), sys.btn_face);
+        assert_eq!(t.ink(Text, Subtle), sys.btn_text);
+        assert_eq!(t.ink(Text, Surface), sys.window_text);
+        assert_eq!(t.ink(TextSecondary, App), sys.gray_text);
+        assert_eq!(t.ink(Accent, Surface), sys.hot_light);
+        // A disabled highlight fill shows as the window, so its gray text reads as disabled.
+        assert_eq!(t.fill(Accent, true), Accent);
+        assert_eq!(t.fill(Accent, false), Surface);
+        assert_eq!(t.ink(TextSecondary, t.fill(Accent, false)), sys.gray_text);
+        // Borders, focus and hover.
+        assert_eq!(t.stroke(TextSecondary, true), sys.window_text);
+        assert_eq!(t.stroke(Tone::Border, false), sys.gray_text);
+        assert_eq!(t.focus(), sys.highlight);
+        assert_eq!(t.hover_outline(Surface), Some(sys.highlight));
+        assert_eq!(t.hover_outline(Accent), Some(sys.highlight_text));
+        // Light and dark are unchanged by all of it.
+        for theme in [Theme::LIGHT, Theme::DARK] {
+            assert_eq!(theme.ink(Text, Accent), theme.color(Text));
+            assert_eq!(theme.fill(Accent, false), Accent);
+            assert_eq!(theme.stroke(Tone::Border, false), theme.color(Tone::Border));
+            assert_eq!(theme.focus(), theme.color(Text));
+            assert_eq!(theme.hover_outline(Surface), None);
         }
     }
 

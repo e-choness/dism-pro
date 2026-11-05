@@ -10,6 +10,11 @@
 //! **UI Automation.** The adapter is made before the window shows, as `accesskit_windows`
 //! requires. Answering `WM_GETOBJECT` and raising UI Automation events can both bring a nested
 //! `WM_GETOBJECT`, so both happen with nothing borrowed.
+//!
+//! **Environment.** At `WM_CREATE` the window subscribes to session changes (remote desktop) and to
+//! battery saver, the two signals that aren't broadcast to every window, and unsubscribes at
+//! `WM_DESTROY`. Every signal re-reads the [`Env`]; only a changed one reaches the handler, so the
+//! bursts of `WM_SETTINGCHANGE` that one switch in Settings sends cost no repaint.
 
 use std::{
     cell::{Cell, RefCell},
@@ -28,12 +33,24 @@ use windows_sys::{
             ERROR_CLASS_ALREADY_EXISTS, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, RECT,
             WPARAM,
         },
-        Graphics::Gdi::{
-            BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, BitBlt, CreateCompatibleDC,
-            CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject, EndPaint, GdiFlush, HBITMAP,
-            HDC, HGDIOBJ, InvalidateRect, PAINTSTRUCT, SRCCOPY, SelectObject,
+        Graphics::{
+            Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute},
+            Gdi::{
+                BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, BitBlt, CreateCompatibleDC,
+                CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject, EndPaint, GdiFlush,
+                HBITMAP, HDC, HGDIOBJ, InvalidateRect, PAINTSTRUCT, SRCCOPY, SelectObject,
+            },
         },
-        System::LibraryLoader::GetModuleHandleW,
+        System::{
+            LibraryLoader::GetModuleHandleW,
+            Power::{
+                HPOWERNOTIFY, RegisterPowerSettingNotification, UnregisterPowerSettingNotification,
+            },
+            RemoteDesktop::{
+                NOTIFY_FOR_THIS_SESSION, WTSRegisterSessionNotification,
+                WTSUnRegisterSessionNotification,
+            },
+        },
         UI::{
             HiDpi::{AdjustWindowRectExForDpi, GetDpiForSystem, GetDpiForWindow},
             Input::KeyboardAndMouse::{
@@ -41,25 +58,27 @@ use windows_sys::{
                 TrackMouseEvent, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
             },
             WindowsAndMessaging::{
-                CREATESTRUCTW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow,
-                DispatchMessageW, GWLP_USERDATA, GetClientRect, GetMessageW, GetWindowLongPtrW,
-                IDC_ARROW, KillTimer, LoadCursorW, MINMAXINFO, MSG, PostQuitMessage,
-                RegisterClassExW, SIZE_MINIMIZED, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOMOVE,
-                SWP_NOZORDER, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-                TranslateMessage, WM_CAPTURECHANGED, WM_CLOSE, WM_CREATE, WM_DESTROY,
-                WM_DPICHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_GETOBJECT, WM_KEYDOWN, WM_KEYUP,
-                WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE,
-                WM_NCDESTROY, WM_PAINT, WM_SETFOCUS, WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER,
-                WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
+                CREATESTRUCTW, CW_USEDEFAULT, CreateWindowExW, DEVICE_NOTIFY_WINDOW_HANDLE,
+                DefWindowProcW, DestroyWindow, DispatchMessageW, GWLP_USERDATA, GetClientRect,
+                GetMessageW, GetWindowLongPtrW, IDC_ARROW, KillTimer, LoadCursorW, MINMAXINFO, MSG,
+                PBT_POWERSETTINGCHANGE, PostQuitMessage, RegisterClassExW, SIZE_MINIMIZED,
+                SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SetTimer,
+                SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, WM_CAPTURECHANGED,
+                WM_CLOSE, WM_CREATE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO,
+                WM_GETOBJECT, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP,
+                WM_MOUSEMOVE, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_POWERBROADCAST, WM_SETFOCUS,
+                WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_SYSKEYDOWN, WM_SYSKEYUP,
+                WM_THEMECHANGED, WM_TIMER, WM_WTSSESSION_CHANGE, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
             },
         },
     },
-    core::w,
+    core::{BOOL, w},
 };
 
 use super::{
     Event, Frame, Handler, Mods, PointPx, RectPx, SizePx, WindowOptions,
     a11y::{Initial, Requests, ToUiThread, WM_APP_A11Y},
+    env::{Env, GUID_POWER_SAVING_STATUS},
     probe,
 };
 use crate::{
@@ -104,7 +123,7 @@ enum Life {
 
 impl Window {
     /// Creates the window, hidden, with its client area at `options.size` scaled to its monitor.
-    /// The handler gets [`Event::Dpi`] and [`Event::Resize`] before this returns.
+    /// The handler gets [`Event::Env`], [`Event::Dpi`] and [`Event::Resize`] before this returns.
     ///
     /// # Errors
     /// The title holds a NUL, or the class or window can't be created.
@@ -131,6 +150,9 @@ impl Window {
             requests: Arc::new(Requests::default()),
             a11y_whole: Cell::new(false),
             a11y_served: Cell::new(false),
+            env: Cell::new(Env::default()),
+            power: Cell::new(0),
+            sessions: Cell::new(false),
             depth: Cell::new(0),
             life: Rc::clone(&life),
         }));
@@ -324,6 +346,27 @@ impl WindowCx<'_> {
     pub fn size(&self) -> SizePx {
         self.state.size.get()
     }
+
+    /// Windows' settings as the handler last heard them ([`Event::Env`]).
+    #[must_use]
+    pub fn env(&self) -> Env {
+        self.state.env.get()
+    }
+
+    /// Draws the title bar and frame dark or light, to match the client area. Windows before
+    /// 10 20H1, and `WinPE` without DWM, keep their frame.
+    pub fn set_dark_frame(&mut self, dark: bool) {
+        let on = BOOL::from(dark);
+        // SAFETY: hwnd is live; the attribute's value is one BOOL, read during the call.
+        unsafe {
+            DwmSetWindowAttribute(
+                self.hwnd,
+                u32::try_from(DWMWA_USE_IMMERSIVE_DARK_MODE).unwrap_or(0),
+                (&raw const on).cast(),
+                u32::try_from(size_of::<BOOL>()).unwrap_or(0),
+            )
+        };
+    }
 }
 
 /// The window's side of the handler: its canvas and what it tracks between messages.
@@ -353,6 +396,12 @@ struct State {
     a11y_whole: Cell<bool>,
     /// UI Automation holds a provider of ours; it's told to let go when the window is destroyed.
     a11y_served: Cell<bool>,
+    /// Windows' settings, as last sent to the handler.
+    env: Cell<Env>,
+    /// The battery saver subscription; 0 if there is none.
+    power: Cell<HPOWERNOTIFY>,
+    /// Subscribed to session changes.
+    sessions: Cell<bool>,
     /// Calls into the state that haven't returned.
     depth: Cell<u32>,
     life: Rc<Cell<Life>>,
@@ -416,12 +465,25 @@ impl State {
     fn handle(&self, hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
         match msg {
             WM_CREATE => {
+                self.subscribe(hwnd);
+                let env = Env::read();
+                self.env.set(env);
+                self.send(hwnd, Event::Env(env));
                 // SAFETY: hwnd is live.
                 let dpi = unsafe { GetDpiForWindow(hwnd) };
                 if dpi != 0 {
                     self.dpi.set(dpi);
                 }
                 self.send(hwnd, Event::Dpi(self.dpi.get()));
+            }
+            // Broadcast to every top-level window: theme, colors, accessibility settings.
+            WM_SETTINGCHANGE | WM_SYSCOLORCHANGE | WM_THEMECHANGED | WM_WTSSESSION_CHANGE => {
+                self.env_changed(hwnd);
+                return None;
+            }
+            WM_POWERBROADCAST if u32::try_from(wp).ok() == Some(PBT_POWERSETTINGCHANGE) => {
+                self.env_changed(hwnd);
+                return Some(1);
             }
             WM_SIZE => {
                 // Minimized, the canvas is kept for the restore.
@@ -476,6 +538,7 @@ impl State {
                 }
             }
             WM_DESTROY => {
+                self.unsubscribe(hwnd);
                 self.requests.detach();
                 if self.a11y_served.get() {
                     // UI Automation may release what it holds for this window (the documented
@@ -561,6 +624,48 @@ impl State {
     /// is busy: it pumped messages while handling an earlier one, and this one is dropped.
     fn send(&self, hwnd: HWND, event: Event) -> Option<bool> {
         self.dispatch(hwnd, |h, cx| h.event(event, cx))
+    }
+
+    /// Subscribes to the signals that aren't broadcast: session changes and battery saver. Either
+    /// may be unavailable (no session manager); the window then misses that change only.
+    fn subscribe(&self, hwnd: HWND) {
+        // SAFETY: hwnd is live; unsubscribed at WM_DESTROY.
+        self.sessions
+            .set(unsafe { WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION) } != 0);
+        // SAFETY: as above; the GUID is a static. Windows sends the current state at once, which
+        // matches the first reading and so reaches no one.
+        self.power.set(unsafe {
+            RegisterPowerSettingNotification(
+                hwnd,
+                &raw const GUID_POWER_SAVING_STATUS,
+                DEVICE_NOTIFY_WINDOW_HANDLE,
+            )
+        });
+    }
+
+    fn unsubscribe(&self, hwnd: HWND) {
+        if self.sessions.take() {
+            // SAFETY: hwnd is live until WM_DESTROY returns, and subscribed.
+            unsafe { WTSUnRegisterSessionNotification(hwnd) };
+        }
+        let power = self.power.take();
+        if power != 0 {
+            // SAFETY: the handle RegisterPowerSettingNotification returned, released once.
+            unsafe { UnregisterPowerSettingNotification(power) };
+        }
+    }
+
+    /// Windows signaled a change: the handler hears of it if a setting it sees changed. A busy
+    /// handler misses it, and the next signal tries again.
+    fn env_changed(&self, hwnd: HWND) {
+        let env = Env::read();
+        if env == self.env.get() {
+            return;
+        }
+        let heard = self.env.replace(env);
+        if self.send(hwnd, Event::Env(env)).is_none() {
+            self.env.set(heard);
+        }
     }
 
     /// Runs `f` on the handler, then serves what changed to UI Automation and destroys the window
@@ -977,12 +1082,13 @@ mod tests {
     }
 
     #[test]
-    fn the_handler_learns_the_dpi_then_the_size_and_paints_its_damage() {
+    fn the_handler_learns_the_env_the_dpi_then_the_size_and_paints_its_damage() {
         let (window, events, paints) = open(0);
         let recorded = events.borrow().clone();
-        let Some(&Event::Dpi(dpi)) = recorded.first() else {
-            panic!("the first event isn't the DPI: {recorded:?}");
+        let [Event::Env(env), Event::Dpi(dpi), ..] = recorded[..] else {
+            panic!("the first events aren't the environment and the DPI: {recorded:?}");
         };
+        assert_eq!(env, Env::read());
         let scaled = |v: u32| v * dpi / BASE_DPI;
         assert_eq!(
             recorded.last(),
@@ -1000,6 +1106,38 @@ mod tests {
         // SAFETY: as above.
         unsafe { SendMessageW(window.hwnd, WM_PAINT, 0, 0) };
         assert_eq!(paints.get(), 1, "nothing new was damaged");
+    }
+
+    /// A settings signal reaches the handler only when a setting it sees changed.
+    #[test]
+    fn only_a_changed_environment_reaches_the_handler() {
+        let (window, events, _) = open(0);
+        let before = events.borrow().len();
+        let power = WPARAM::try_from(PBT_POWERSETTINGCHANGE).expect("a WPARAM");
+        // SAFETY: messages sent to this test's live window, on its thread.
+        unsafe {
+            SendMessageW(window.hwnd, WM_SETTINGCHANGE, 0, 0);
+            SendMessageW(window.hwnd, WM_SYSCOLORCHANGE, 0, 0);
+            SendMessageW(window.hwnd, WM_POWERBROADCAST, power, 0);
+        };
+        assert_eq!(events.borrow().len(), before, "{:?}", events.borrow());
+        // As if the user switched apps to dark since the last reading.
+        let real = Env::read();
+        // SAFETY: this test's window, on its thread.
+        unsafe {
+            with_state(window.hwnd, |s| {
+                s.env.set(Env {
+                    dark: !real.dark,
+                    ..real
+                });
+            })
+        };
+        // SAFETY: as above.
+        unsafe { SendMessageW(window.hwnd, WM_SETTINGCHANGE, 0, 0) };
+        assert_eq!(events.borrow().last(), Some(&Event::Env(real)));
+        // SAFETY: as above.
+        let heard = unsafe { with_state(window.hwnd, |s| s.env.get()) };
+        assert_eq!(heard, Some(real));
     }
 
     #[test]

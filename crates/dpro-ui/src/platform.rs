@@ -8,6 +8,12 @@
 //! once they all end it stops, so a settled window wakes for nothing (U6).
 //!
 //! [`DirectWrite`] is the [`TextSystem`] over `dpro_win`'s DirectWrite text.
+//!
+//! **Environment** (TD-0009 §5.2). The window reports Windows' settings at creation and on every
+//! change. The host turns them into the theme (high contrast's system colors, else dark or light),
+//! the motion (*Animation effects* off is reduced motion) and the [`Materials`]. A new theme
+//! repaints the whole window once; any other change repaints nothing. The GDI presenter is the
+//! only one so far, so the materials are always solid.
 
 use std::time::Instant;
 
@@ -16,8 +22,9 @@ use dpro_win::gui::{
 };
 
 use crate::{
-    Canvas, Cx, GlyphSink, Icon, Input, KeyCode, KeyEvent, Mods, Motion, Point, Rect, Size,
-    TextMetrics, TextStyle, TextSystem, Theme, Ui,
+    Canvas, Color, Cx, GlyphSink, Icon, Input, KeyCode, KeyEvent, Mods, Motion, Point, Rect,
+    Scheme, Size, SysColors, TextMetrics, TextStyle, TextSystem, Theme, Ui,
+    materials::{Environment, GlassPref, Materials, PresenterKind, SolidReason, materials},
 };
 
 /// Text measured and drawn with DirectWrite.
@@ -104,12 +111,14 @@ pub trait Model {
     fn update(&mut self, msg: Self::Msg);
 }
 
-/// A window's [`Handler`]: the [`Ui`] of a [`Model`], with its text system and theme.
+/// A window's [`Handler`]: the [`Ui`] of a [`Model`], with its text system, theme and materials.
 pub struct Host<P: Model> {
     ui: Ui<P::Msg>,
     model: P,
     text: Box<dyn TextSystem>,
     theme: Theme,
+    glass: GlassPref,
+    materials: Materials,
     msgs: Vec<P::Msg>,
     /// The animation clock's zero.
     start: Instant,
@@ -120,19 +129,24 @@ impl<P: Model> std::fmt::Debug for Host<P> {
         f.debug_struct("Host")
             .field("viewport", &self.ui.viewport())
             .field("scale", &self.ui.scale())
+            .field("scheme", &self.theme.scheme())
+            .field("materials", &self.materials)
             .finish_non_exhaustive()
     }
 }
 
 impl<P: Model> Host<P> {
-    /// The window sends its DPI and size before the first frame, so the [`Ui`] starts empty.
+    /// The window sends Windows' settings, its DPI and its size before the first frame, so the
+    /// [`Ui`] starts empty, light and solid. `glass` is the user's preference (or `--materials`).
     #[must_use]
-    pub fn new(model: P, text: Box<dyn TextSystem>, theme: Theme, motion: Motion) -> Self {
+    pub fn new(model: P, text: Box<dyn TextSystem>, glass: GlassPref) -> Self {
         Self {
-            ui: Ui::new(Size { w: 0.0, h: 0.0 }, 1.0, motion),
+            ui: Ui::new(Size { w: 0.0, h: 0.0 }, 1.0, Motion::STANDARD),
             model,
             text,
-            theme,
+            theme: Theme::LIGHT,
+            glass,
+            materials: Materials::Solid(SolidReason::NoHardwareGpu),
             msgs: Vec::with_capacity(4),
             start: Instant::now(),
         }
@@ -142,6 +156,31 @@ impl<P: Model> Host<P> {
     #[must_use]
     pub fn model(&self) -> &P {
         &self.model
+    }
+
+    /// What the window shows, and why it's solid if it is (Settings › Appearance's line).
+    #[must_use]
+    pub fn materials(&self) -> Materials {
+        self.materials
+    }
+
+    #[must_use]
+    pub fn theme(&self) -> &Theme {
+        &self.theme
+    }
+
+    /// Windows' settings changed (or arrived): the theme, motion and materials follow. Returns
+    /// whether the theme changed, which repaints everything.
+    fn environment(&mut self, env: &gui::env::Env) -> bool {
+        self.materials = materials(&environment(env), self.glass);
+        self.ui.set_motion(Motion::system(env.animations));
+        let theme = theme_of(env);
+        if theme == self.theme {
+            return false;
+        }
+        self.theme = theme;
+        self.ui.repaint_all();
+        true
     }
 
     /// Dispatches `input` and updates the model with the messages it produced.
@@ -209,6 +248,12 @@ impl<P: Model> Handler for Host<P> {
                     win: mods.win,
                 },
             })),
+            Event::Env(env) => {
+                if self.environment(&env) {
+                    cx.set_dark_frame(self.theme.scheme() == Scheme::Dark);
+                }
+                true
+            }
             Event::Focus(_) => false,
             Event::Frame => {
                 let now = self.now_ms();
@@ -261,6 +306,44 @@ pub fn run<P: Model + 'static>(
     let window = Window::new(options, Box::new(host))?;
     window.show();
     window.run()
+}
+
+/// The materials' view of Windows' settings. The GDI presenter is the only one yet: it never
+/// composes, whatever the GPU, so `hardware_gpu` stays false until the composition presenter
+/// probes the adapter.
+const fn environment(env: &gui::env::Env) -> Environment {
+    Environment {
+        winpe: env.winpe,
+        build: env.build,
+        presenter: PresenterKind::Gdi,
+        hardware_gpu: false,
+        device_lost: false,
+        transparency: env.transparency,
+        high_contrast: env.high_contrast,
+        remote: env.remote,
+        battery_saver: env.battery_saver,
+    }
+}
+
+/// High contrast's system colors, else the app mode's scheme (TD-0009 §4.4).
+const fn theme_of(env: &gui::env::Env) -> Theme {
+    if env.high_contrast {
+        let c = env.colors;
+        Theme::high_contrast(SysColors {
+            window: Color::hex(c.window),
+            window_text: Color::hex(c.window_text),
+            highlight: Color::hex(c.highlight),
+            highlight_text: Color::hex(c.highlight_text),
+            hot_light: Color::hex(c.hot_light),
+            gray_text: Color::hex(c.gray_text),
+            btn_face: Color::hex(c.btn_face),
+            btn_text: Color::hex(c.btn_text),
+        })
+    } else if env.dark {
+        Theme::DARK
+    } else {
+        Theme::LIGHT
+    }
 }
 
 /// Physical pixels per logical pixel at `dpi`.
@@ -339,12 +422,7 @@ mod tests {
     #[test]
     fn directwrite_inks_a_label_inside_its_button() {
         let text = DirectWrite::new().expect("DirectWrite");
-        let mut host = Host::new(
-            Counter::default(),
-            Box::new(text),
-            Theme::LIGHT,
-            Motion::default(),
-        );
+        let mut host = Host::new(Counter::default(), Box::new(text), GlassPref::Auto);
         host.ui.set_scale(1.5);
         host.ui.set_viewport(Size { w: 200.0, h: 100.0 });
         let model = &host.model;
@@ -395,12 +473,7 @@ mod tests {
 
     #[test]
     fn a_press_at_a_physical_point_reaches_the_model() {
-        let mut host = Host::new(
-            Counter::default(),
-            Box::new(FakeText),
-            Theme::LIGHT,
-            Motion::default(),
-        );
+        let mut host = Host::new(Counter::default(), Box::new(FakeText), GlassPref::Auto);
         host.ui.set_scale(scale_of(144));
         host.ui.set_viewport(Size { w: 200.0, h: 100.0 });
         let model = &host.model;
@@ -423,5 +496,72 @@ mod tests {
         assert!(host.input(Input::PointerDown(point)));
         host.input(Input::PointerUp(point));
         assert_eq!(host.model().presses, 1);
+    }
+
+    /// TD-0009 §5.2: the theme, motion and materials follow Windows' settings, and only a new
+    /// theme repaints.
+    #[test]
+    fn windows_settings_set_the_theme_motion_and_materials() {
+        let mut host = Host::new(Counter::default(), Box::new(FakeText), GlassPref::Auto);
+        host.ui.set_viewport(Size { w: 200.0, h: 100.0 });
+        host.ui.clear_damage();
+        let light = gui::env::Env {
+            build: 26_100,
+            transparency: true,
+            animations: true,
+            colors: gui::env::SysColors {
+                window: 0xFF_FFFF,
+                window_text: 0x00_0000,
+                highlight: 0x00_78D7,
+                highlight_text: 0xFF_FFFF,
+                hot_light: 0x00_66CC,
+                gray_text: 0x6D_6D6D,
+                btn_face: 0xF0_F0F0,
+                btn_text: 0x00_0000,
+            },
+            ..gui::env::Env::default()
+        };
+        // Light is where the host starts: nothing to repaint.
+        assert!(!host.environment(&light));
+        assert_eq!(host.ui.damage().len(), 0);
+        assert_eq!(host.ui.motion(), Motion::STANDARD);
+        // GDI never composes.
+        assert_eq!(
+            host.materials(),
+            Materials::Solid(SolidReason::NoHardwareGpu)
+        );
+        // Dark: a new theme, all of it damaged.
+        let dark = gui::env::Env {
+            dark: true,
+            ..light
+        };
+        assert!(host.environment(&dark));
+        assert_eq!(*host.theme(), Theme::DARK);
+        assert_ne!(host.ui.damage().len(), 0);
+        host.ui.clear_damage();
+        // Reduced motion and transparency off change no pixel.
+        let calm = gui::env::Env {
+            animations: false,
+            transparency: false,
+            ..dark
+        };
+        assert!(!host.environment(&calm));
+        assert_eq!(host.ui.motion(), Motion::REDUCED);
+        assert_eq!(host.ui.damage().len(), 0);
+        // High contrast: the system's colors, whatever the app mode.
+        let hc = gui::env::Env {
+            high_contrast: true,
+            ..calm
+        };
+        assert!(host.environment(&hc));
+        assert_eq!(host.theme().scheme(), Scheme::HighContrast);
+        assert_eq!(
+            host.theme().color(crate::Tone::Accent),
+            Color::hex(0x00_78D7)
+        );
+        // WinPE says so, whatever else holds.
+        let pe = gui::env::Env { winpe: true, ..hc };
+        host.environment(&pe);
+        assert_eq!(host.materials(), Materials::Solid(SolidReason::WinPe));
     }
 }
