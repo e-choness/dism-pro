@@ -8,6 +8,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+accesskit.workspace = true
 dpro-app.workspace = true
 
 [dev-dependencies]
@@ -18,6 +19,11 @@ stats_alloc.workspace = true
 # TD-0009 §7 U2: written before the toolkit core (measure-first).
 [[bench]]
 name = "interact"
+harness = false
+
+# TD-0009 §7 U12: the accessibility tree and its updates, written before the code.
+[[bench]]
+name = "a11y"
 harness = false
 
 # U2 as instruction counts, for `docker compose run --rm bench-gate` (doc 04 §3).
