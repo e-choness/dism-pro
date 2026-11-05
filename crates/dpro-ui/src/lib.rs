@@ -6,9 +6,9 @@
 //!
 //! The toolkit core is a retained, keyed element tree that views rebuild cheaply each frame, with
 //! flexbox-subset layout, pointer and keyboard input, focus, damage tracking and an animation
-//! clock, and paints on a software [`Canvas`] in [`Theme`] colors. It is platform-free, has no `unsafe`,
-//! and runs in T1 against [`FakeText`]. The accessibility tree and the Win32 platform build on it
-//! in later slices (TD-0009 §11).
+//! clock. It paints on a software [`Canvas`] in [`Theme`] colors and describes itself to assistive
+//! technology as an [`accesskit`] tree. It is platform-free, has no `unsafe`, and runs in T1 against
+//! [`FakeText`]. The Win32 platform builds on it in a later slice (TD-0009 §11).
 //!
 //! A frame, on the UI thread:
 //! 1. [`Ui::dispatch`] turns input into the view's messages, and the app updates its view-model.
@@ -16,6 +16,7 @@
 //! 3. [`Ui::layout`] lays out what changed and records the damage.
 //! 4. [`Ui::paint`] repaints [`Ui::damage`] into the canvas; the presenter shows it and calls
 //!    [`Ui::clear_damage`].
+//! 5. While a screen reader or other client listens, [`Ui::a11y_update`] gives what it must learn.
 //!
 //! ```
 //! use dpro_ui::{Canvas, Element, FakeText, Input, Key, Motion, Size, Theme, Ui};
@@ -49,6 +50,7 @@
 
 #![forbid(unsafe_code)]
 
+mod a11y;
 mod build;
 mod canvas;
 mod damage;
@@ -63,6 +65,7 @@ mod theme;
 mod tree;
 mod ui;
 
+pub use accesskit;
 pub use build::Cx;
 pub use canvas::Canvas;
 pub use dpro_app::table::Tri;

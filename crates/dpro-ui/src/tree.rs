@@ -137,6 +137,7 @@ pub struct Element<'s, M> {
     pub(crate) msg: Option<M>,
     pub(crate) check: Tri,
     pub(crate) enabled: bool,
+    pub(crate) selected: Option<bool>,
 }
 
 impl<'s, M> Element<'s, M> {
@@ -151,6 +152,7 @@ impl<'s, M> Element<'s, M> {
             msg,
             check: Tri::Off,
             enabled: true,
+            selected: None,
         }
     }
 
@@ -206,6 +208,23 @@ impl<'s, M> Element<'s, M> {
     pub fn enabled(self, enabled: bool) -> Self {
         Self { enabled, ..self }
     }
+
+    /// Makes the node an item of a set the user picks from (a table row, a rail page), currently
+    /// picked or not: UI Automation's selection item. The view still chooses its look.
+    #[must_use]
+    pub fn selected(self, selected: bool) -> Self {
+        Self {
+            selected: Some(selected),
+            ..self
+        }
+    }
+
+    /// The accessible name of a container, which draws no text: "Pages" for a rail, a table's
+    /// title. Labels and buttons are named by their text.
+    #[must_use]
+    pub fn name(self, name: &'s str) -> Self {
+        Self { text: name, ..self }
+    }
 }
 
 /// No node: the end of a sibling list, or no parent.
@@ -230,6 +249,7 @@ pub(crate) struct Node<M> {
     pub(crate) msg: Option<M>,
     pub(crate) check: Tri,
     pub(crate) enabled: bool,
+    pub(crate) selected: Option<bool>,
 
     pub(crate) parent: u32,
     pub(crate) first: u32,
@@ -257,6 +277,8 @@ pub(crate) struct Node<M> {
     pub(crate) anim_start: Option<u64>,
     /// In the window's animation set.
     pub(crate) animating: bool,
+    /// Listed for the next accessibility update.
+    pub(crate) a11y_dirty: bool,
 }
 
 impl<M> Node<M> {
@@ -273,6 +295,7 @@ impl<M> Node<M> {
             msg: None,
             check: Tri::Off,
             enabled: true,
+            selected: None,
             parent: NIL,
             first: NIL,
             last: NIL,
@@ -290,6 +313,7 @@ impl<M> Node<M> {
             anim_from: 0.0,
             anim_start: None,
             animating: false,
+            a11y_dirty: false,
         }
     }
 
@@ -320,6 +344,8 @@ pub struct NodeInfo<'a> {
     pub text: &'a str,
     pub enabled: bool,
     pub check: Tri,
+    /// Whether it's picked, for an item of a set the user picks from.
+    pub selected: Option<bool>,
     pub hovered: bool,
     pub pressed: bool,
     pub focused: bool,
