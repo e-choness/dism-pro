@@ -1,13 +1,18 @@
-//! A synthetic shell page for TD-0009 §7 U2 and U8, and S-01's scripted session.
+//! A synthetic shell page for TD-0009 §7 U2, U3 and U8, and S-01's scripted session.
 //!
 //! 387 live nodes, or 488 with the drawer open: a header, a rail of 12 pages, a toolbar with 4
 //! category toggles, a table of 40 rows × 8 cells over 1,000 data rows, and a drawer of 25 rows. §7
 //! estimates a real page at about 600, so per-event costs there are about half again as high.
-//! Shared by `interact.rs`, `ir.rs` and `tests/alloc_per_frame.rs`.
+//! Shared by `interact.rs`, `ir.rs`, `tests/alloc_per_frame.rs` and `tests/paint_damage.rs`.
+
+#![allow(
+    dead_code,
+    reason = "each file that includes the fixture uses a part of it"
+)]
 
 use dpro_ui::{
-    Align, Axis, Cx, Dim, Element, FakeText, Input, Insets, Justify, Key, KeyCode, KeyEvent, Mods,
-    Motion, Point, Size, Style, TextStyle, Tri, Ui,
+    Align, Axis, Canvas, Cx, Dim, Element, FakeText, Input, Insets, Justify, Key, KeyCode,
+    KeyEvent, Look, Mods, Motion, Point, Radius, Size, Style, TextStyle, Theme, Tone, Tri, Ui,
 };
 
 const RAIL: u8 = 12;
@@ -125,6 +130,32 @@ fn row(gap: f32) -> Style {
     }
 }
 
+/// A card: surface, hairline border, rounded by `radius`.
+fn card(radius: Radius) -> Look {
+    Look {
+        fill: Some(Tone::Surface),
+        border: Some(Tone::Border),
+        radius,
+        ..Look::PLAIN
+    }
+}
+
+fn ink(tone: Tone) -> Look {
+    Look {
+        ink: tone,
+        ..Look::PLAIN
+    }
+}
+
+/// A control-rounded button look, `fill`ed when given.
+fn control(fill: Option<Tone>) -> Look {
+    Look {
+        fill,
+        radius: Radius::Control,
+        ..Look::PLAIN
+    }
+}
+
 const BODY: TextStyle = TextStyle {
     size: 14.0,
     weight: 400,
@@ -149,16 +180,22 @@ pub(crate) fn view(s: &Shell, cx: &mut Cx<'_, Msg>) {
         }),
         |cx| {
             cx.add(Element::text(Key::name("title"), "DISM Pro").text_style(TITLE));
-            cx.add(Element::text(Key::name("target"), "This PC (online)"));
-            cx.add(Element::button(
-                Key::name("drawer"),
-                if s.drawer {
-                    "Hide changes"
-                } else {
-                    "Review changes"
-                },
-                Msg::Drawer,
-            ));
+            cx.add(Element::text(Key::name("target"), "This PC (online)").look(ink(Tone::Accent)));
+            cx.add(
+                Element::button(
+                    Key::name("drawer"),
+                    if s.drawer {
+                        "Hide changes"
+                    } else {
+                        "Review changes"
+                    },
+                    Msg::Drawer,
+                )
+                .look(Look {
+                    ink: Tone::OnAccent,
+                    ..control(Some(Tone::Accent))
+                }),
+            );
         },
     );
     cx.add_with(
@@ -183,12 +220,17 @@ fn rail(s: &Shell, cx: &mut Cx<'_, Msg>) {
         "Startup", "Services", "Images", "Settings",
     ];
     cx.add_with(
-        Element::stack(Key::name("rail")).style(Style {
-            width: Dim::Fixed(200.0),
-            padding: Insets::all(8.0),
-            align: Align::Stretch,
-            ..column(4.0)
-        }),
+        Element::stack(Key::name("rail"))
+            .style(Style {
+                width: Dim::Fixed(200.0),
+                padding: Insets::all(8.0),
+                align: Align::Stretch,
+                ..column(4.0)
+            })
+            .look(Look {
+                fill: Some(Tone::Subtle),
+                ..Look::PLAIN
+            }),
         |cx| {
             for (p, label) in (0..RAIL).zip(PAGES) {
                 cx.add(
@@ -198,6 +240,7 @@ fn rail(s: &Shell, cx: &mut Cx<'_, Msg>) {
                             padding: Insets::xy(12.0, 0.0),
                             ..Style::default()
                         })
+                        .look(control((p == s.page).then_some(Tone::Selected)))
                         .enabled(p != s.page),
                 );
             }
@@ -216,21 +259,31 @@ fn content(s: &Shell, cx: &mut Cx<'_, Msg>) {
         }),
         |cx| {
             cx.add_with(Element::stack(Key::name("toolbar")).style(row(8.0)), |cx| {
-                let shown = if s.filter.is_empty() {
-                    "Filter"
+                let (shown, tone) = if s.filter.is_empty() {
+                    ("Filter", Tone::TextSecondary)
                 } else {
-                    &s.filter
+                    (s.filter.as_str(), Tone::Text)
                 };
-                cx.add(Element::text(Key::name("filter"), shown).style(Style {
-                    width: Dim::Fixed(240.0),
-                    ..Style::default()
-                }));
+                cx.add(
+                    Element::text(Key::name("filter"), shown)
+                        .style(Style {
+                            width: Dim::Fixed(240.0),
+                            padding: Insets::xy(8.0, 4.0),
+                            ..Style::default()
+                        })
+                        .look(Look {
+                            ink: tone,
+                            ..card(Radius::Control)
+                        }),
+                );
                 let selection = if s.selected.is_some() {
                     "1 selected"
                 } else {
                     ""
                 };
-                cx.add(Element::text(Key::name("selection"), selection));
+                cx.add(
+                    Element::text(Key::name("selection"), selection).look(ink(Tone::TextSecondary)),
+                );
                 for (c, name) in (0..CATEGORIES).zip(NAMES) {
                     let on = if s.categories[usize::from(c)] {
                         Tri::On
@@ -246,31 +299,41 @@ fn content(s: &Shell, cx: &mut Cx<'_, Msg>) {
                 }
             });
             cx.add_with(
-                Element::stack(Key::name("table")).style(Style {
-                    grow: 1.0,
-                    align: Align::Stretch,
-                    ..column(0.0)
-                }),
+                Element::stack(Key::name("table"))
+                    .style(Style {
+                        grow: 1.0,
+                        padding: Insets::all(4.0),
+                        align: Align::Stretch,
+                        ..column(0.0)
+                    })
+                    .look(card(Radius::Card)),
                 |cx| {
                     for &r in s.visible.iter().take(ROWS) {
                         let cells = &s.cells[r as usize];
+                        let selected = s.selected == Some(r);
                         cx.add_with(
                             Element::button(Key::index(u64::from(r)), &cells[0], Msg::Row(r))
                                 .style(Style {
                                     height: Dim::Fixed(32.0),
                                     padding: Insets::xy(8.0, 0.0),
                                     ..row(12.0)
-                                }),
+                                })
+                                .look(control(selected.then_some(Tone::Selected))),
                             |cx| {
                                 for (c, text) in (0..).zip(cells) {
-                                    let style = if c == 2 || c == 7 { MONO } else { BODY };
+                                    let (style, tone) = match c {
+                                        0 => (BODY, Tone::Text),
+                                        2 | 7 => (MONO, Tone::TextSecondary),
+                                        _ => (BODY, Tone::TextSecondary),
+                                    };
                                     cx.add(
-                                        Element::text(Key::index(c), text).text_style(style).style(
-                                            Style {
+                                        Element::text(Key::index(c), text)
+                                            .text_style(style)
+                                            .style(Style {
                                                 grow: 1.0,
                                                 ..Style::default()
-                                            },
-                                        ),
+                                            })
+                                            .look(ink(tone)),
                                     );
                                 }
                             },
@@ -284,19 +347,23 @@ fn content(s: &Shell, cx: &mut Cx<'_, Msg>) {
 
 fn drawer(s: &Shell, cx: &mut Cx<'_, Msg>) {
     cx.add_with(
-        Element::stack(Key::name("drawer")).style(Style {
-            width: Dim::Fixed(320.0),
-            padding: Insets::all(16.0),
-            align: Align::Stretch,
-            ..column(6.0)
-        }),
+        Element::stack(Key::name("drawer"))
+            .style(Style {
+                width: Dim::Fixed(320.0),
+                padding: Insets::all(16.0),
+                align: Align::Stretch,
+                ..column(6.0)
+            })
+            .look(card(Radius::Drawer)),
         |cx| {
             for i in 0..DRAWER_ROWS {
                 let cells = &s.cells[usize::try_from(i).unwrap_or(0)];
                 cx.add_with(Element::stack(Key::index(i)).style(row(8.0)), |cx| {
                     cx.add(Element::text(Key::name("what"), &cells[0]));
-                    cx.add(Element::text(Key::name("size"), &cells[3]));
-                    cx.add(Element::text(Key::name("undo"), "Undoable"));
+                    cx.add(
+                        Element::text(Key::name("size"), &cells[3]).look(ink(Tone::TextSecondary)),
+                    );
+                    cx.add(Element::text(Key::name("undo"), "Undoable").look(ink(Tone::Ok)));
                 });
             }
         },
@@ -310,30 +377,52 @@ pub(crate) enum Step {
     Type(char),
     ClearFilter,
     Resize(Size),
+    /// The animation clock moves on by this many milliseconds.
+    Tick(u64),
 }
 
-/// A shell, its Ui and text system, laid out at [`START`] when created.
+/// A shell, its Ui and text system, laid out at [`START`] when created; painted too, when made by
+/// [`Run::painted`].
 pub(crate) struct Run {
     pub(crate) ui: Ui<Msg>,
     pub(crate) shell: Shell,
     text: FakeText,
     msgs: Vec<Msg>,
+    /// What frames are painted in; `None` stops at layout and damage.
+    theme: Option<Theme>,
+    /// The canvas's pixels, window-sized, kept between frames like a DIB section.
+    pixels: Vec<u32>,
+    /// The animation clock, in milliseconds.
+    now: u64,
 }
 
 impl Run {
+    /// Frames end at layout and damage (U2).
     pub(crate) fn with(shell: Shell) -> Self {
+        Self::new(shell, 1.0, None)
+    }
+
+    /// Frames are painted too, at `scale` in `theme` (U3).
+    pub(crate) fn painted(shell: Shell, scale: f32, theme: Theme) -> Self {
+        Self::new(shell, scale, Some(theme))
+    }
+
+    fn new(shell: Shell, scale: f32, theme: Option<Theme>) -> Self {
         let mut run = Self {
-            ui: Ui::new(START, 1.0, Motion { hover_ms: 120 }),
+            ui: Ui::new(START, scale, Motion { hover_ms: 120 }),
             shell,
             text: FakeText,
             msgs: Vec::with_capacity(4),
+            theme,
+            pixels: Vec::new(),
+            now: 0,
         };
         run.frame();
         run
     }
 
-    /// One event through the whole UI-thread pipeline (TD-0009 §5.2), without raster: dispatch,
-    /// update, view, reconcile, layout, damage.
+    /// One event through the whole UI-thread pipeline (TD-0009 §5.2): dispatch, update, view,
+    /// reconcile, layout, damage, and raster when painted.
     pub(crate) fn step(&mut self, step: Step) {
         match step {
             Step::Input(input) => {
@@ -351,7 +440,17 @@ impl Run {
                 self.shell.refilter();
             }
             Step::Resize(size) => self.ui.set_viewport(size),
+            Step::Tick(ms) => {
+                self.now += ms;
+                self.ui.tick(self.now);
+            }
         }
+        self.frame();
+    }
+
+    /// The window's damage repainted, as after a theme switch.
+    pub(crate) fn repaint_all(&mut self) {
+        self.ui.repaint_all();
         self.frame();
     }
 
@@ -359,7 +458,33 @@ impl Run {
         let shell = &self.shell;
         self.ui.build(|cx| view(shell, cx));
         self.ui.layout(&mut self.text);
+        if let Some(theme) = &self.theme {
+            let (w, h) = self.ui.pixel_size();
+            // Within capacity after warm-up: a resize back and forth doesn't allocate.
+            self.pixels.resize(area(w, h), 0);
+            if let Some(mut canvas) = Canvas::new(&mut self.pixels, w, h) {
+                self.ui.paint(&mut canvas, &mut self.text, theme);
+            }
+        }
         self.ui.clear_damage();
+    }
+
+    /// The painted pixels, and the canvas's width.
+    pub(crate) fn pixels(&self) -> (&[u32], u32) {
+        (&self.pixels, self.ui.pixel_size().0)
+    }
+
+    /// The whole window painted from scratch into `out`, whatever the damage.
+    pub(crate) fn paint_all_into(&mut self, out: &mut Vec<u32>) {
+        let (w, h) = self.ui.pixel_size();
+        out.clear();
+        out.resize(area(w, h), 0);
+        let theme = self.theme.unwrap_or(Theme::LIGHT);
+        if let Some(mut canvas) = Canvas::new(out, w, h) {
+            let all = canvas.bounds();
+            self.ui
+                .paint_region(&mut canvas, &mut self.text, &theme, all);
+        }
     }
 
     /// The center of the node at `path`, from the current layout.
@@ -416,4 +541,9 @@ impl Run {
         }
         steps
     }
+}
+
+/// Pixels in a `w × h` canvas.
+fn area(w: u32, h: u32) -> usize {
+    usize::try_from(u64::from(w) * u64::from(h)).unwrap_or(usize::MAX)
 }
