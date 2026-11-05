@@ -122,6 +122,20 @@ jobs:
             Write-Host "::$kind title=$($run.Title) (real Windows, exit $code)::$text"
           }
           exit $failed
+      - name: T3 GUI platform (window, DirectWrite)
+        # What Wine only approximates: a real window station, and DirectWrite with Windows' fonts.
+        # The output names the font families picked (TD-0009 §5.2).
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          $out = & dist-t3/dpro-win-tests.exe gui:: --test-threads 1 --nocapture 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          Write-Host $out
+          $kind = if ($code) { 'error' } else { 'notice' }
+          $text = $out.Trim().Replace('%', '%25').Replace("`r", '').Replace("`n", '%0A')
+          Write-Host "::$kind title=dpro-win GUI tests (real Windows, exit $code)::$text"
+          exit $code
       - name: G1 UI gates (startup, idle)
         # TD-0009 §7 against bare_window in this job: U4 startup <= 3x, U6 no timer or paint once
         # settled, U7 idle working set <= 40 MiB.

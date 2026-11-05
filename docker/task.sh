@@ -131,7 +131,8 @@ case "${task}" in
       cargo xwin test --color never --locked --no-run -p "$1" --target "${t}" "${@:2}" 2>&1 \
         | tee /dev/stderr | sed -n 's/^ *Executable unittests src\/lib\.rs (\(.*\))$/\1/p'
     }
-    win_tests=$(test_exe dpro-win "$@")
+    # With the GUI's tests: windows and DirectWrite with the runner's own fonts.
+    win_tests=$(test_exe dpro-win --features gui "$@")
     broker_tests=$(test_exe dpro-broker "$@")
     mcp_tests=$(cargo xwin test --color never --locked --no-run -p dismpro-cli --test mcp_stdio \
       --target "${t}" "$@" 2>&1 \
