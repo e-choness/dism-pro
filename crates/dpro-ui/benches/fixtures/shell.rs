@@ -1,9 +1,12 @@
-//! A synthetic shell page for TD-0009 §7 U2, U3 and U8, and S-01's scripted session.
+//! A synthetic shell page for TD-0009 §7 U2, U3, U8 and U12, and S-01's scripted session.
 //!
 //! 387 live nodes, or 488 with the drawer open: a header, a rail of 12 pages, a toolbar with 4
 //! category toggles, a table of 40 rows × 8 cells over 1,000 data rows, and a drawer of 25 rows. §7
-//! estimates a real page at about 600, so per-event costs there are about half again as high.
-//! Shared by `interact.rs`, `ir.rs`, `tests/alloc_per_frame.rs` and `tests/paint_damage.rs`.
+//! estimates a real page at about 600, so per-event costs there are about half again as high. The
+//! other pages show 8 summary cards instead of the toolbar and table, so switching pages replaces
+//! the content.
+//!
+//! Shared by `interact.rs`, `a11y.rs`, `ir.rs` and the tests that replay the session.
 
 #![allow(
     dead_code,
@@ -13,6 +16,7 @@
 use dpro_ui::{
     Align, Axis, Canvas, Cx, Dim, Element, FakeText, Input, Insets, Justify, Key, KeyCode,
     KeyEvent, Look, Mods, Motion, Point, Radius, Size, Style, TextStyle, Theme, Tone, Tri, Ui,
+    accesskit::TreeUpdate,
 };
 
 const RAIL: u8 = 12;
@@ -23,6 +27,10 @@ const CATEGORIES: u8 = 4;
 const DATA: usize = 1_000;
 /// The text typed into the filter: 10 keystrokes.
 const TYPED: &str = "contoso up";
+const PAGES: [&str; RAIL as usize] = [
+    "Overview", "Clean", "Repair", "Packages", "Features", "Drivers", "Updates", "Apps", "Startup",
+    "Services", "Images", "Settings",
+];
 
 pub(crate) const START: Size = Size {
     w: 1000.0,
@@ -206,7 +214,11 @@ pub(crate) fn view(s: &Shell, cx: &mut Cx<'_, Msg>) {
         }),
         |cx| {
             rail(s, cx);
-            content(s, cx);
+            if s.page == 0 {
+                content(s, cx);
+            } else {
+                summary(s, cx);
+            }
             if s.drawer {
                 drawer(s, cx);
             }
@@ -215,10 +227,6 @@ pub(crate) fn view(s: &Shell, cx: &mut Cx<'_, Msg>) {
 }
 
 fn rail(s: &Shell, cx: &mut Cx<'_, Msg>) {
-    const PAGES: [&str; RAIL as usize] = [
-        "Overview", "Clean", "Repair", "Packages", "Features", "Drivers", "Updates", "Apps",
-        "Startup", "Services", "Images", "Settings",
-    ];
     cx.add_with(
         Element::stack(Key::name("rail"))
             .style(Style {
@@ -230,7 +238,8 @@ fn rail(s: &Shell, cx: &mut Cx<'_, Msg>) {
             .look(Look {
                 fill: Some(Tone::Subtle),
                 ..Look::PLAIN
-            }),
+            })
+            .name("Pages"),
         |cx| {
             for (p, label) in (0..RAIL).zip(PAGES) {
                 cx.add(
@@ -241,7 +250,7 @@ fn rail(s: &Shell, cx: &mut Cx<'_, Msg>) {
                             ..Style::default()
                         })
                         .look(control((p == s.page).then_some(Tone::Selected)))
-                        .enabled(p != s.page),
+                        .selected(p == s.page),
                 );
             }
         },
@@ -306,7 +315,8 @@ fn content(s: &Shell, cx: &mut Cx<'_, Msg>) {
                         align: Align::Stretch,
                         ..column(0.0)
                     })
-                    .look(card(Radius::Card)),
+                    .look(card(Radius::Card))
+                    .name("Programs"),
                 |cx| {
                     for &r in s.visible.iter().take(ROWS) {
                         let cells = &s.cells[r as usize];
@@ -318,7 +328,8 @@ fn content(s: &Shell, cx: &mut Cx<'_, Msg>) {
                                     padding: Insets::xy(8.0, 0.0),
                                     ..row(12.0)
                                 })
-                                .look(control(selected.then_some(Tone::Selected))),
+                                .look(control(selected.then_some(Tone::Selected)))
+                                .selected(selected),
                             |cx| {
                                 for (c, text) in (0..).zip(cells) {
                                     let (style, tone) = match c {
@@ -354,7 +365,8 @@ fn drawer(s: &Shell, cx: &mut Cx<'_, Msg>) {
                 align: Align::Stretch,
                 ..column(6.0)
             })
-            .look(card(Radius::Drawer)),
+            .look(card(Radius::Drawer))
+            .name("Changes"),
         |cx| {
             for i in 0..DRAWER_ROWS {
                 let cells = &s.cells[usize::try_from(i).unwrap_or(0)];
@@ -370,6 +382,62 @@ fn drawer(s: &Shell, cx: &mut Cx<'_, Msg>) {
     );
 }
 
+/// Every page but the first: a heading and 8 summary cards (artboard 02).
+fn summary(s: &Shell, cx: &mut Cx<'_, Msg>) {
+    const CARDS: [(&str, &str); 8] = [
+        ("Temporary files", "1.2 GB"),
+        ("Windows Update cache", "3.4 GB"),
+        ("Delivery Optimization", "860 MB"),
+        ("Thumbnails", "120 MB"),
+        ("Error reports", "45 MB"),
+        ("Logs", "310 MB"),
+        ("Recycle Bin", "2.1 GB"),
+        ("Browser caches", "640 MB"),
+    ];
+    let title = PAGES.get(usize::from(s.page)).copied().unwrap_or_default();
+    cx.add_with(
+        Element::stack(Key::name("summary"))
+            .style(Style {
+                grow: 1.0,
+                padding: Insets::all(16.0),
+                align: Align::Stretch,
+                ..column(8.0)
+            })
+            .name(title),
+        |cx| {
+            cx.add(Element::text(Key::name("heading"), title).text_style(TITLE));
+            for (i, (what, size)) in (0..).zip(CARDS) {
+                cx.add_with(
+                    Element::stack(Key::index(i))
+                        .style(Style {
+                            height: Dim::Fixed(56.0),
+                            padding: Insets::xy(12.0, 8.0),
+                            ..row(12.0)
+                        })
+                        .look(card(Radius::Card)),
+                    |cx| {
+                        cx.add(Element::text(Key::name("what"), what).style(Style {
+                            grow: 1.0,
+                            ..Style::default()
+                        }));
+                        cx.add(
+                            Element::text(Key::name("size"), size).look(ink(Tone::TextSecondary)),
+                        );
+                        cx.add(
+                            Element::button(Key::name("review"), "Review", Msg::Drawer).style(
+                                Style {
+                                    padding: Insets::xy(12.0, 4.0),
+                                    ..Style::default()
+                                },
+                            ),
+                        );
+                    },
+                );
+            }
+        },
+    );
+}
+
 /// One step of the scripted session.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Step {
@@ -379,6 +447,9 @@ pub(crate) enum Step {
     Resize(Size),
     /// The animation clock moves on by this many milliseconds.
     Tick(u64),
+    /// A message straight to the view-model, as from a keyboard accelerator or assistive
+    /// technology.
+    Update(Msg),
 }
 
 /// A shell, its Ui and text system, laid out at [`START`] when created; painted too, when made by
@@ -394,6 +465,9 @@ pub(crate) struct Run {
     pixels: Vec<u32>,
     /// The animation clock, in milliseconds.
     now: u64,
+    /// Each frame takes the accessibility update, as the platform does while a client listens.
+    /// Off for the frame a U12 bench measures the update of.
+    pub(crate) take_a11y: bool,
 }
 
 impl Run {
@@ -407,6 +481,15 @@ impl Run {
         Self::new(shell, scale, Some(theme))
     }
 
+    /// Frames end at layout, and an assistive technology listens (U12): the first frame's whole
+    /// tree is served, then every frame's changes are taken.
+    pub(crate) fn accessible(shell: Shell) -> Self {
+        let mut run = Self::new(shell, 1.0, None);
+        drop(run.ui.a11y_tree());
+        run.take_a11y = true;
+        run
+    }
+
     fn new(shell: Shell, scale: f32, theme: Option<Theme>) -> Self {
         let mut run = Self {
             ui: Ui::new(START, scale, Motion { hover_ms: 120 }),
@@ -416,6 +499,7 @@ impl Run {
             theme,
             pixels: Vec::new(),
             now: 0,
+            take_a11y: false,
         };
         run.frame();
         run
@@ -444,6 +528,7 @@ impl Run {
                 self.now += ms;
                 self.ui.tick(self.now);
             }
+            Step::Update(msg) => self.shell.update(msg),
         }
         self.frame();
     }
@@ -467,6 +552,15 @@ impl Run {
             }
         }
         self.ui.clear_damage();
+        if self.take_a11y {
+            drop(self.ui.a11y_update());
+        }
+    }
+
+    /// The accessibility update the frames since the last one taken left, as the platform would
+    /// take it.
+    pub(crate) fn a11y_update(&mut self) -> Option<TreeUpdate> {
+        self.ui.a11y_update()
     }
 
     /// The painted pixels, and the canvas's width.

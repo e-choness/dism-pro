@@ -5,6 +5,7 @@
 //! physical pixels until the presenter takes it.
 
 use crate::{
+    a11y::A11y,
     damage::Damage,
     geom::{Point, Rect, RectPx, Size},
     pool::TextPool,
@@ -44,6 +45,8 @@ pub struct Ui<M> {
     pub(crate) anims: Vec<NodeId>,
     /// Text buffers of freed nodes, for new ones.
     pub(crate) texts: TextPool,
+    /// What the next accessibility update sends.
+    pub(crate) a11y: A11y,
 }
 
 /// The root: index 0, never freed.
@@ -69,6 +72,7 @@ impl<M> Ui<M> {
             pointer: None,
             anims: Vec::new(),
             texts: TextPool::default(),
+            a11y: A11y::new(),
         };
         ui.damage_all();
         ui
@@ -82,11 +86,13 @@ impl<M> Ui<M> {
         }
     }
 
-    /// The window's scale changed (`WM_DPICHANGED`): every pixel is repainted.
+    /// The window's scale changed (`WM_DPICHANGED`): every pixel is repainted, and every node's
+    /// bounds go to assistive technology again.
     pub fn set_scale(&mut self, scale: f32) {
         if self.scale.to_bits() != scale.to_bits() {
             self.scale = scale;
             self.damage_all();
+            self.a11y.all = true;
         }
     }
 
@@ -170,6 +176,7 @@ impl<M> Ui<M> {
             text: &n.text,
             enabled: n.enabled,
             check: n.check,
+            selected: n.selected,
             hovered: n.hovered,
             pressed: n.pressed,
             focused: self.focus == i,
@@ -269,6 +276,7 @@ impl<M> Ui<M> {
         self.unlink(child);
         self.free_subtree(child);
         self.mark_dirty(parent);
+        self.a11y_touch(parent);
     }
 
     fn free_subtree(&mut self, i: u32) {

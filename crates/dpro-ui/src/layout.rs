@@ -152,6 +152,7 @@ impl<M> Ui<M> {
         }
         let mut covered = covered;
         if moved {
+            self.a11y_touch(i);
             if !covered {
                 self.damage_rect(old);
                 self.damage_rect(rect);

@@ -1,4 +1,4 @@
-//! TD-0009 §7 U2 and U3 as instruction counts: the deterministic gate (doc 04 §3).
+//! TD-0009 §7 U2, U3 and U12 as instruction counts: the deterministic gate (doc 04 §3).
 //!
 //! The same shell and session as `interact.rs`. Setups warm the Ui with one full session first, so
 //! the counts are the steady state an open window lives in, and keep everything alive until the
@@ -6,6 +6,8 @@
 //! - `interact`: U2, frames end at layout and damage.
 //! - `paint`: U3 without presenting, frames painted at 1000 × 700, scale 1, light theme; and the
 //!   whole window repainted, as after a theme switch, at scales 1 and 1.5.
+//! - `a11y`: U12 with a client listening, as in `a11y.rs`: the whole tree, and one frame's update
+//!   for an unchanged event, another row selected, and a page switch each way.
 //!
 //! C1: `docker compose run --rm bench-gate`.
 
@@ -16,11 +18,11 @@ mod shell;
 
 use std::hint::black_box;
 
-use dpro_ui::{Input, Point, Size, Theme};
+use dpro_ui::{Input, Point, Size, Theme, accesskit::TreeUpdate};
 use gungraun::{
     Callgrind, LibraryBenchmarkConfig, library_benchmark, library_benchmark_group, main,
 };
-use shell::{Run, START, Shell, Step};
+use shell::{Msg, Run, START, Shell, Step};
 
 /// `run` after one full session, and the session.
 fn warmed(mut run: Run) -> (Run, Vec<Step>) {
@@ -119,8 +121,46 @@ library_benchmark_group!(
     ]
 );
 
+/// An accessible run after one full session, with row 2 selected.
+fn warm_accessible() -> Run {
+    let mut run = Run::accessible(Shell::new());
+    for s in run.session() {
+        run.step(s);
+    }
+    run.step(Step::Update(Msg::Row(2)));
+    run
+}
+
+/// [`warm_accessible`], then `before` if any, then `step` with its update left to take.
+fn accessible_after(before: Option<Step>, step: Step) -> Run {
+    let mut run = warm_accessible();
+    if let Some(s) = before {
+        run.step(s);
+    }
+    run.take_a11y = false;
+    run.step(step);
+    run
+}
+
+#[library_benchmark]
+#[bench::shell(setup = warm_accessible)]
+fn a11y_tree(mut run: Run) -> (TreeUpdate, Run) {
+    (run.ui.a11y_tree(), run)
+}
+
+#[library_benchmark]
+#[bench::unchanged(args = (None, Step::Input(Input::PointerMove(Point { x: -1.0, y: -1.0 }))), setup = accessible_after)]
+#[bench::row_selection(args = (None, Step::Update(Msg::Row(3))), setup = accessible_after)]
+#[bench::page_away(args = (None, Step::Update(Msg::Page(1))), setup = accessible_after)]
+#[bench::page_back(args = (Some(Step::Update(Msg::Page(1))), Step::Update(Msg::Page(0))), setup = accessible_after)]
+fn a11y_update(mut run: Run) -> (Option<TreeUpdate>, Run) {
+    (run.a11y_update(), run)
+}
+
+library_benchmark_group!(name = a11y, benchmarks = [a11y_tree, a11y_update]);
+
 main!(
     // Instruction counts only: the cache simulation would slow every run for metrics nothing gates.
     config = LibraryBenchmarkConfig::default().tool(Callgrind::with_args(["--cache-sim=no"]));
-    library_benchmark_groups = interact, paint
+    library_benchmark_groups = interact, paint, a11y
 );
