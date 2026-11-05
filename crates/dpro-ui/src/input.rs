@@ -149,7 +149,7 @@ impl<M: Clone> Ui<M> {
         }
     }
 
-    fn activate(&mut self, i: u32, out: &mut Vec<M>) {
+    pub(crate) fn activate(&mut self, i: u32, out: &mut Vec<M>) {
         let n = &self.nodes[i as usize];
         if n.interactive()
             && let Some(msg) = &n.msg
@@ -294,7 +294,7 @@ impl<M> Ui<M> {
         }
     }
 
-    fn move_focus(&mut self, to: u32) {
+    pub(crate) fn move_focus(&mut self, to: u32) {
         let from = self.focus;
         if from == to {
             return;
@@ -309,7 +309,7 @@ impl<M> Ui<M> {
         self.damage_node(to);
     }
 
-    fn show_focus_ring(&mut self) {
+    pub(crate) fn show_focus_ring(&mut self) {
         if !self.focus_visible {
             self.focus_visible = true;
             self.damage_node(self.focus);

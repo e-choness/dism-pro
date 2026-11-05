@@ -77,6 +77,7 @@ impl<M> Cx<'_, M> {
     }
 
     /// Matches, moves or creates the node for `el` at the cursor, and updates it.
+    #[inline]
     fn place(&mut self, el: Element<'_, M>) -> u32 {
         let ui = &mut *self.ui;
         let matches = |ui: &Ui<M>, c: u32| {
@@ -102,6 +103,8 @@ impl<M> Cx<'_, M> {
                 let i = ui.alloc(el.key, el.role, el.text.len());
                 ui.link_before(self.parent, i, self.next);
                 ui.mark_dirty(self.parent);
+                ui.a11y_touch(i);
+                ui.a11y_touch(self.parent);
                 i
             } else {
                 // Moved: its old place is damaged, and layout finds its new one.
@@ -110,6 +113,7 @@ impl<M> Cx<'_, M> {
                 ui.unlink(found);
                 ui.link_before(self.parent, found, self.next);
                 ui.mark_dirty(self.parent);
+                ui.a11y_touch(self.parent);
                 found
             }
         };
@@ -130,10 +134,15 @@ impl<M> Cx<'_, M> {
 
 impl<M> Ui<M> {
     /// Copies what changed from `el` into node `i`: layout changes mark it dirty, looks (check
-    /// state, enabled, [`Look`](crate::Look)) damage it.
+    /// state, enabled, [`Look`](crate::Look)) damage it, and what a client sees (text, check
+    /// state, enabled, selected) goes into the next accessibility update.
+    #[inline]
     fn update(&mut self, i: u32, el: Element<'_, M>) {
         let n = &mut self.nodes[i as usize];
         let mut layout = false;
+        // Check state and enabled show, and a client sees them.
+        let state = n.check != el.check || n.enabled != el.enabled;
+        let mut seen = state || n.selected != el.selected;
         if n.style != el.style {
             n.style = el.style;
             layout = true;
@@ -149,10 +158,12 @@ impl<M> Ui<M> {
             }
             n.text.push_str(el.text);
             layout = true;
+            seen = true;
         }
-        let looks = n.check != el.check || n.enabled != el.enabled || n.look != el.look;
+        let looks = state || n.look != el.look;
         n.look = el.look;
         n.check = el.check;
+        n.selected = el.selected;
         n.msg = el.msg;
         if n.enabled != el.enabled {
             n.enabled = el.enabled;
@@ -166,6 +177,9 @@ impl<M> Ui<M> {
         if looks {
             // Where it is now; if layout moves it, layout damages where it goes.
             self.damage_node(i);
+        }
+        if seen {
+            self.a11y_touch(i);
         }
     }
 
