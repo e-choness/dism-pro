@@ -11,6 +11,10 @@ publish.workspace = true
 accesskit.workspace = true
 dpro-app.workspace = true
 
+# The Win32 platform the `platform` module adapts (TD-0009 §5.1).
+[target.'cfg(windows)'.dependencies]
+dpro-win = { workspace = true, features = ["gui"] }
+
 [dev-dependencies]
 criterion.workspace = true
 gungraun.workspace = true
@@ -31,6 +35,12 @@ harness = false
 name = "ir"
 harness = false
 bench = false
+
+# TD-0009 §7 U4, U6, U7: G1's probe target until roadmap 3.2 gives dismpro.exe its shell. The
+# benches' synthetic shell in a real window; `.github/scripts/ui-gates.ps1` measures it against
+# dpro-win's bare_window.
+[[example]]
+name = "shell"
 
 [lints]
 workspace = true

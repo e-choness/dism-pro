@@ -8,7 +8,7 @@
 //! flexbox-subset layout, pointer and keyboard input, focus, damage tracking and an animation
 //! clock. It paints on a software [`Canvas`] in [`Theme`] colors and describes itself to assistive
 //! technology as an [`accesskit`] tree. It is platform-free, has no `unsafe`, and runs in T1 against
-//! [`FakeText`]. The Win32 platform builds on it in a later slice (TD-0009 §11).
+//! [`FakeText`]. On Windows, `platform` hosts it in a `dpro_win::gui` window (TD-0009 §5.1).
 //!
 //! A frame, on the UI thread:
 //! 1. [`Ui::dispatch`] turns input into the view's messages, and the app updates its view-model.
@@ -58,6 +58,8 @@ mod geom;
 mod input;
 mod layout;
 mod paint;
+#[cfg(windows)]
+pub mod platform;
 mod pool;
 mod style;
 mod text;
