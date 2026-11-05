@@ -1,12 +1,14 @@
 # syntax=docker/dockerfile:1
 #
 # DISM Pro toolchain image (ADR-0003). Two targets:
-#   t1 — build / lint / pure tests / benches / cross-compile to *-pc-windows-msvc
+#   t1 — build / lint / pure tests / benches (criterion; gungraun under valgrind) /
+#        cross-compile to *-pc-windows-msvc
 #   t2 — t1 + Wine, for `cargo xwin test` of dpro-win logic
 #
 # Everything is pinned: the base image by digest, Debian packages through a dated
 # snapshot.debian.org archive, and the cargo tools by version + SHA-256.
-# Changing any pin is its own PR: `build(docker): …`.
+# Changing any pin is its own PR: `build(docker): …`. A new rustc, glibc or valgrind can move
+# the bench gate's instruction counts; that PR runs `bench-gate -- --update` and says by how much.
 
 # rust:1.99.1-slim-trixie (multi-arch index), resolved 2026-10-22.
 ARG RUST_IMAGE=docker.io/library/rust:1.99.1-slim-trixie@sha256:f938561c139ff3f8b4449fe5064ede0ea526229b0fc8ea58a5031c3bf40e72d3
@@ -81,6 +83,27 @@ RUN if [ "${XWIN_ACCEPT_LICENSE}" != "1" ]; then \
     fi \
  && cargo xwin cache xwin \
  && chmod -R a+rwX /opt/xwin
+
+# The deterministic bench gate's runner (doc 04 §3; `bench-gate` in docker/task.sh). It must be
+# the same version as the `gungraun` dev-dependency in Cargo.toml, so bump both together. Its own
+# layer, after the xwin cache, so a bump doesn't download the Microsoft files again. The hashes
+# match the upstream .sha256 files; arm64 has no musl build.
+ARG GUNGRAUN_VERSION=0.20.0
+RUN case "${TARGETARCH}" in \
+      amd64) t=x86_64-unknown-linux-musl \
+             sha=f6dcbd5af550c199b23ba258eb69d5444af8299c0c49309aa785599f60f9ec8b ;; \
+      arm64) t=aarch64-unknown-linux-gnu \
+             sha=30ddf6737e486d1d3c11746eb603d8a228afeb1614dcf84ebe9ee1442f59d2f3 ;; \
+      *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
+    esac \
+ && f="gungraun-runner-v${GUNGRAUN_VERSION}-${t}" \
+ && curl -fsSL --retry 3 -o /tmp/r.tgz \
+      "https://github.com/gungraun/gungraun/releases/download/v${GUNGRAUN_VERSION}/${f}.tar.gz" \
+ && echo "${sha}  /tmp/r.tgz" | sha256sum -c - \
+ && tar -xzf /tmp/r.tgz -C /tmp \
+ && install -m 0755 "/tmp/${f}/gungraun-runner" /usr/local/cargo/bin/ \
+ && rm -rf /tmp/* \
+ && gungraun-runner --version
 
 ENV RUSTC_WRAPPER=sccache \
     SCCACHE_DIR=/sccache \
