@@ -11,8 +11,13 @@
 //!   working set and private bytes at the end, then exits. A message another process *sends* is
 //!   handled inside `GetMessageW` without being taken, so only the CPU time shows it.
 //!
+//! Both reports end with the presenter that drew the frames: `composed=1` for `DirectComposition`
+//! (`warp=1` on WARP), `composed=0` for GDI. G1 checks it, so a glass run that fell back to GDI
+//! can't pass as a measurement of the composition path.
+//!
 //! A probe target calls [`arm`] before its window exists, [`message`] for every message its loop
-//! takes, and [`painted`] after every `WM_PAINT`; all three cost an atomic or two when unarmed.
+//! takes, and [`painted`] after every `WM_PAINT`; all three cost an atomic or two when unarmed. Its
+//! window calls [`presenter`] once it knows how it presents.
 
 use std::{
     ffi::OsString,
@@ -135,12 +140,30 @@ static FIRST_PAINT: AtomicBool = AtomicBool::new(false);
 static MESSAGES: AtomicU64 = AtomicU64::new(0);
 static TIMERS: AtomicU64 = AtomicU64::new(0);
 static PAINTS: AtomicU64 = AtomicU64::new(0);
+static COMPOSED: AtomicBool = AtomicBool::new(false);
+static WARP: AtomicBool = AtomicBool::new(false);
 
 /// Arms the probe `args` asked for, if any. Call it before the window exists.
 pub fn arm(args: &Args) {
     if let Some(probe) = &args.probe {
         let _ = ARMED.set(probe.clone());
     }
+}
+
+/// How the window presents: through `DirectComposition` (`warp`: on the WARP software device), or
+/// GDI. The last call before a report is what it says.
+pub fn presenter(composed: bool, warp: bool) {
+    COMPOSED.store(composed, Ordering::Relaxed);
+    WARP.store(composed && warp, Ordering::Relaxed);
+}
+
+/// The report's presenter fields.
+fn presented() -> String {
+    format!(
+        "composed={} warp={}",
+        u8::from(COMPOSED.load(Ordering::Relaxed)),
+        u8::from(WARP.load(Ordering::Relaxed))
+    )
 }
 
 /// Counts one message the UI thread woke for.
@@ -168,7 +191,7 @@ pub fn painted() {
     match kind {
         Kind::FirstFrame => {
             let us = since_process_start().as_micros();
-            finish(out, &format!("first_frame_us={us}\n"));
+            finish(out, &format!("first_frame_us={us} {}\n", presented()));
         }
         Kind::Idle => {
             // The watcher sleeps between its two readings, so it adds no wakes of its own.
@@ -196,7 +219,7 @@ fn watch_idle(out: &Path) {
     let mem = memory();
     let line = format!(
         "idle_cpu_us={} messages={} timers={} paints={} working_set_kib={} private_kib={} \
-         watched_ms={}\n",
+         watched_ms={} {}\n",
         cpu.as_micros(),
         counts(&MESSAGES) - msgs,
         counts(&TIMERS) - timers,
@@ -204,6 +227,7 @@ fn watch_idle(out: &Path) {
         mem.working_set / 1024,
         mem.private / 1024,
         WATCH.as_millis(),
+        presented(),
     );
     finish(out, &line);
 }
