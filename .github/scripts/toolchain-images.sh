@@ -14,16 +14,32 @@
 # a token with read:packages). Anyone without access builds the same images from source, which is
 # what `docker compose` does on first use.
 #
-# A workflow never creates the package: one created by a workflow's GITHUB_TOKEN takes the
-# repository's visibility, public here, and a public package can't be made private again. The
-# owner creates it once, outside Actions, where a new package starts private:
-#   1. With a classic token that has write:packages: docker login ghcr.io -u e-choness
-#   2. docker pull hello-world
-#      docker tag hello-world ghcr.io/e-choness/dism-pro-build:seed
-#      docker push ghcr.io/e-choness/dism-pro-build:seed
-#   3. In the package's settings: check it says Private, then under "Manage Actions access" add
-#      e-choness/dism-pro with the Write role.
-#   4. Run the toolchain workflow. The seed version can be deleted afterwards.
+# This repository's workflows never create the package. A package a workflow creates with its
+# GITHUB_TOKEN takes the visibility of the workflow's repository, which is public here, and a
+# public package can't be made private again. The owner creates the package once, from a PRIVATE
+# repository's workflow, so no personal token is made or pasted anywhere:
+#   1. Create a private repository (e.g. e-choness/ghcr-seed) with a README.
+#   2. Add .github/workflows/seed.yml there:
+#        name: seed
+#        on: workflow_dispatch
+#        permissions:
+#          packages: write
+#        jobs:
+#          seed:
+#            runs-on: ubuntu-latest
+#            steps:
+#              - env:
+#                  GHCR_USER: ${{ github.actor }}
+#                  GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+#                run: |
+#                  echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+#                  docker pull hello-world
+#                  docker tag hello-world ghcr.io/e-choness/dism-pro-build:seed
+#                  docker push ghcr.io/e-choness/dism-pro-build:seed
+#   3. Run it (Actions > seed > Run workflow). The new package is private, like that repository.
+#   4. In the package's settings: check it says Private, then under "Manage Actions access" add
+#      e-choness/dism-pro with the Write role. Keep the seed repository private (archive it).
+#   5. Run this repository's toolchain workflow. The seed version can be deleted afterwards.
 #
 # Exit codes: 0 done; 1 usage or a malformed lock; 3 nothing is pinned for this Dockerfile (build
 # from source instead); 4 a pull failed; 5 the package is public; 6 the package doesn't exist yet,
