@@ -7,5 +7,20 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[dependencies]
+dpro-core.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+
+# TD-0009 §7 U10 and U11: written before the implementation (measure-first).
+[[bench]]
+name = "palette"
+harness = false
+
+[[bench]]
+name = "table"
+harness = false
+
 [lints]
 workspace = true
