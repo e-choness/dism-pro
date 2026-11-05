@@ -1,5 +1,5 @@
 //! The GUI's Win32 platform (TD-0009 §5.1; feature `gui`): a top-level window and its message loop,
-//! the GDI presenter, the animation timer, and the probes G1 measures with.
+//! the GDI presenter, the animation timer, DirectWrite text, and the probes G1 measures with.
 //!
 //! The boundary has no `dpro-ui` types, because layers point down; `dpro-ui`'s `platform` module
 //! adapts it. A [`Handler`] gets [`Event`]s and paints [`Frame`]s, and the window presents them.
@@ -15,8 +15,12 @@
 //!   has no timer and its thread sleeps in `GetMessageW` (U6).
 //! - **DPI.** The process is per-monitor DPI aware (v2) through its manifest. Positions and sizes
 //!   are physical pixels, and [`Event::Dpi`] says when the scale changes.
+//! - **Text.** [`text::Text`] lays out with DirectWrite and rasterizes glyph coverage, which the
+//!   handler blends into its frame.
 
+mod lru;
 pub mod probe;
+pub mod text;
 mod window;
 
 pub use window::{Window, WindowCx};

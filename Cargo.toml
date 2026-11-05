@@ -43,6 +43,13 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
+# COM for dpro-win's GUI (TD-0009 §5.5): DirectWrite now, UI Automation through accesskit_windows
+# next, which uses this release. windows-sys has no COM interfaces. MIT OR Apache-2.0. Exact: the
+# version S-01 built.
+windows = { version = "=0.62.2", features = ["Win32_Graphics_DirectWrite"] }
+# Already in the tree through `windows`; named directly because `#[implement]` (our DirectWrite
+# renderer) expands to `windows_core::` paths. MIT OR Apache-2.0.
+windows-core = "=0.62.2"
 # Error enums per crate (coding standards §3). MIT OR Apache-2.0, proc-macro only.
 thiserror = "2.0.21"
 # Plan/JSON model (TD-0001 G1). MIT OR Apache-2.0.

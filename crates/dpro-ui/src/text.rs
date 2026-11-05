@@ -48,6 +48,16 @@ pub enum Icon {
     CheckMark,
 }
 
+impl Icon {
+    /// Its code point in both icon fonts.
+    #[must_use]
+    pub const fn codepoint(self) -> u32 {
+        match self {
+            Self::CheckMark => 0xE73E,
+        }
+    }
+}
+
 /// Where drawn text and icons go. The painter tints whatever it receives with the current ink and
 /// clips it.
 pub trait GlyphSink {

@@ -14,11 +14,13 @@ thiserror.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys.workspace = true
+windows = { workspace = true, optional = true }
+windows-core = { workspace = true, optional = true }
 
 [features]
-# The GUI's Win32 platform (TD-0009 §5.1): window, message loop, GDI presenter, G1 probes.
-# dismpro.exe needs it; the CLI and the broker don't.
-gui = []
+# The GUI's Win32 platform (TD-0009 §5.1): window, message loop, GDI presenter, DirectWrite text,
+# G1 probes. dismpro.exe needs it; the CLI and the broker don't.
+gui = ["dep:windows", "dep:windows-core"]
 
 # TD-0009 §7 U4, U6, U7: the raw-API window that G1's startup and idle ratios divide by.
 [[example]]

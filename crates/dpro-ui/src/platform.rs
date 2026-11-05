@@ -6,16 +6,92 @@
 //! damage is handed to the window. On `WM_PAINT` the damage is painted into the window's canvas,
 //! which the window then presents. While an animation runs the window ticks the clock every frame;
 //! once they all end it stops, so a settled window wakes for nothing (U6).
+//!
+//! [`DirectWrite`] is the [`TextSystem`] over `dpro_win`'s DirectWrite text.
 
 use std::time::Instant;
 
 use dpro_win::gui::{
-    self, Event, Frame, Handler, PointPx, SizePx, Window, WindowCx, WindowOptions,
+    self, Event, Frame, Handler, PointPx, SizePx, Window, WindowCx, WindowOptions, text,
 };
 
 use crate::{
-    Canvas, Cx, Input, KeyCode, KeyEvent, Mods, Motion, Point, Size, TextSystem, Theme, Ui,
+    Canvas, Cx, GlyphSink, Icon, Input, KeyCode, KeyEvent, Mods, Motion, Point, Rect, Size,
+    TextMetrics, TextStyle, TextSystem, Theme, Ui,
 };
+
+/// Text measured and drawn with DirectWrite.
+#[derive(Debug)]
+pub struct DirectWrite(text::Text);
+
+impl DirectWrite {
+    /// # Errors
+    /// DirectWrite or its system font collection is unavailable.
+    pub fn new() -> Result<Self, dpro_win::Error> {
+        text::Text::new().map(Self)
+    }
+}
+
+impl TextSystem for DirectWrite {
+    fn measure(&mut self, text: &str, style: &TextStyle, max_width: f32) -> TextMetrics {
+        let m = self.0.measure(text, &text_style(*style), max_width);
+        TextMetrics {
+            width: m.width,
+            height: m.height,
+            lines: m.lines,
+            trimmed: m.trimmed,
+        }
+    }
+
+    fn draw(
+        &mut self,
+        text: &str,
+        style: &TextStyle,
+        rect: Rect,
+        scale: f32,
+        sink: &mut dyn GlyphSink,
+    ) {
+        self.0.draw(
+            text,
+            &text_style(*style),
+            rect_f(rect),
+            scale,
+            &mut Masks(sink),
+        );
+    }
+
+    fn icon(&mut self, icon: Icon, rect: Rect, scale: f32, sink: &mut dyn GlyphSink) {
+        self.0
+            .icon(icon.codepoint(), rect_f(rect), scale, &mut Masks(sink));
+    }
+}
+
+/// The painter's sink, as the one `dpro_win`'s text draws into.
+struct Masks<'a>(&'a mut dyn GlyphSink);
+
+impl text::Sink for Masks<'_> {
+    fn mask(&mut self, x: i32, y: i32, width: u32, coverage: &[u8]) {
+        self.0.mask(x, y, width, coverage);
+    }
+}
+
+fn text_style(s: TextStyle) -> text::Style {
+    text::Style {
+        size: s.size,
+        weight: s.weight,
+        mono: s.mono,
+        wrap: s.wrap,
+    }
+}
+
+fn rect_f(r: Rect) -> text::RectF {
+    text::RectF {
+        x: r.x,
+        y: r.y,
+        w: r.w,
+        h: r.h,
+    }
+}
 
 /// A view-model and its view: what a [`Host`] shows.
 pub trait Model {
@@ -238,6 +314,50 @@ mod tests {
             match msg {
                 Msg::Pressed => self.presses += 1,
             }
+        }
+    }
+
+    /// T2: a button's label set and inked by DirectWrite (Wine's fonts), inside the button.
+    #[test]
+    fn directwrite_inks_a_label_inside_its_button() {
+        let text = DirectWrite::new().expect("DirectWrite");
+        let mut host = Host::new(
+            Counter::default(),
+            Box::new(text),
+            Theme::LIGHT,
+            Motion::default(),
+        );
+        host.ui.set_scale(1.5);
+        host.ui.set_viewport(Size { w: 200.0, h: 100.0 });
+        let model = &host.model;
+        host.ui.build(|c| model.view(c));
+        host.ui.layout(host.text.as_mut());
+        host.ui.repaint_all();
+        let button = host
+            .ui
+            .find(&[Key::name("b")])
+            .and_then(|id| host.ui.info(id))
+            .map(|n| n.rect)
+            .expect("the button");
+        let (w, h) = (300_u32, 150_u32);
+        let mut pixels = vec![0_u32; (w * h) as usize];
+        let mut canvas = Canvas::new(&mut pixels, w, h).expect("a canvas");
+        host.ui.paint(&mut canvas, host.text.as_mut(), &host.theme);
+        // Dark pixels are the label's ink: the light theme's button and its border are light.
+        let dark: Vec<(u32, u32)> = (0..h)
+            .flat_map(|y| (0..w).map(move |x| (x, y)))
+            .filter(|&(x, y)| {
+                let p = pixels[(y * w + x) as usize];
+                [p >> 16, p >> 8, p].iter().all(|c| c & 0xFF < 0x80)
+            })
+            .collect();
+        assert!(dark.len() >= 4, "no ink: {} dark pixels", dark.len());
+        for &(x, y) in &dark {
+            let p = Point {
+                x: logical(i32::try_from(x).unwrap_or(0), 1.5),
+                y: logical(i32::try_from(y).unwrap_or(0), 1.5),
+            };
+            assert!(button.contains(p), "ink at {p:?} outside {button:?}");
         }
     }
 
