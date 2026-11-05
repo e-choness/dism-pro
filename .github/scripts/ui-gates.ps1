@@ -11,6 +11,10 @@ raw-API baseline, measured in this job, so it holds on whatever machine the runn
       timer and no paint in those 5 s. CPU time and messages are reported next to bare_window's.
   U7  Idle working set. Gate: <= 40 MiB (doc 04 §2), at the 1000x700 window that fits the runner's
       screen. The budget's 1280x800 default adds 1.1 MiB of canvas.
+  U12 UI Automation, as a client sees it. The time from the window showing to the tree served
+      (the "Review changes" button found through UIA) is advisory: <= 100 ms (S-01: 40-42 ms).
+      The checks are gates: names and roles (the page list, the table's rows, the check boxes),
+      then Toggle, SelectionItem and Invoke through UIA, each read back through UIA.
 
 The probe target is dpro-ui's `shell` example until roadmap 3.2 gives dismpro.exe its shell.
 Results go to annotations and the job summary; the raw reports go to -Out.
@@ -125,5 +129,110 @@ if ($shell.idle_cpu_us -gt [Math]::Max($idle.bare.idle_cpu_us, 15625)) {
 }
 Publish 'U6, U7 idle' $lines ($quiet -and $small)
 if (-not ($quiet -and $small)) { $failed++ }
+
+# U12 UI Automation --------------------------------------------------------------------------------
+Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class UiaGateWin32 {
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern IntPtr FindWindowW(string cls, string title);
+    [DllImport("user32.dll")]
+    public static extern bool IsWindowVisible(IntPtr hwnd);
+    [DllImport("user32.dll")]
+    public static extern bool PostMessageW(IntPtr hwnd, uint msg, IntPtr wp, IntPtr lp);
+}
+'@
+$ae = [Windows.Automation.AutomationElement]
+$types = [Windows.Automation.ControlType]
+
+# Every element of `$Type` (and `$Name`, if given) under `$Root`.
+function Find-Elements($Root, $Type, [string] $Name) {
+    $c = [Windows.Automation.PropertyCondition]::new($ae::ControlTypeProperty, $Type)
+    if ($Name) {
+        $c = [Windows.Automation.AndCondition]::new($c, [Windows.Automation.PropertyCondition]::new($ae::NameProperty, $Name))
+    }
+    @($Root.FindAll([Windows.Automation.TreeScope]::Descendants, $c))
+}
+
+# Polls `$Test` every 10 ms until it's true or `$Ms` pass; returns whether it came true.
+function Wait-Until([scriptblock] $Test, [int] $Ms = 3000) {
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    do {
+        if (& $Test) { return $true }
+        Start-Sleep -Milliseconds 10
+    } while ($sw.ElapsedMilliseconds -lt $Ms)
+    $false
+}
+
+function Get-Pattern($Element, $Pattern) {
+    $p = $null
+    if (-not $Element.TryGetCurrentPattern($Pattern, [ref] $p)) { throw "'$($Element.Current.Name)' has no $($Pattern.ProgrammaticName)" }
+    $p
+}
+
+$lines = @("UI Automation on the shell at $Size (advisory: tree served <= 100 ms after the window shows; the checks are gates)")
+$checks = [ordered]@{}
+$p = Start-Process -FilePath $exe.shell -ArgumentList @('--size', $Size) -PassThru
+$null = $p.Handle
+try {
+    $hwnd = [IntPtr]::Zero
+    $shown = Wait-Until {
+        $script:hwnd = [UiaGateWin32]::FindWindowW('dismpro.window', 'DISM Pro shell probe')
+        $script:hwnd -ne [IntPtr]::Zero -and [UiaGateWin32]::IsWindowVisible($script:hwnd)
+    } 30000
+    if (-not $shown) { throw "the shell showed no window in 30 s (exited: $($p.HasExited))" }
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    $root = $ae::FromHandle($hwnd)
+    $review = $null
+    $served = Wait-Until {
+        $script:review = Find-Elements $root $types::Button 'Review changes' | Select-Object -First 1
+        $null -ne $script:review
+    } 10000
+    $servedMs = $sw.Elapsed.TotalMilliseconds
+    $lines += if ($served) { 'tree served {0:N1} ms after the window showed{1}' -f $servedMs, $(if ($servedMs -gt 100) { ' (advisory: over 100 ms)' } else { '' }) } else { 'tree NOT served in 10 s' }
+    $checks['served'] = $served
+
+    $pages = @(Find-Elements $root $types::Group 'Pages' | ForEach-Object { Find-Elements $_ $types::ListItem })
+    $rows = @(Find-Elements $root $types::Group 'Programs' | ForEach-Object { Find-Elements $_ $types::ListItem })
+    $boxes = @(Find-Elements $root $types::CheckBox | ForEach-Object { $_.Current.Name })
+    $checks['12 pages, Overview first'] = $pages.Count -eq 12 -and $pages[0].Current.Name -eq 'Overview'
+    $checks['40 named rows'] = $rows.Count -eq 40 -and @($rows | Where-Object { $_.Current.Name }).Count -eq 40
+    $checks['4 check boxes'] = ($boxes -join ',') -eq 'Apps,Games,Tools,System'
+    $lines += "pages $($pages.Count), rows $($rows.Count) (first '$(if ($rows) { $rows[0].Current.Name })'), check boxes: $($boxes -join ', ')"
+
+    $toggleState = [Windows.Automation.ToggleState]
+    $games = Find-Elements $root $types::CheckBox 'Games' | Select-Object -First 1
+    if ($games) {
+        $toggle = Get-Pattern $games ([Windows.Automation.TogglePattern]::Pattern)
+        $before = $toggle.Current.ToggleState
+        $toggle.Toggle()
+        $checks['Toggle(Games) turns it on'] = $before -eq $toggleState::Off -and (Wait-Until { $toggle.Current.ToggleState -eq $toggleState::On })
+    }
+    if ($rows.Count -gt 3) {
+        $item = Get-Pattern $rows[3] ([Windows.Automation.SelectionItemPattern]::Pattern)
+        $item.Select()
+        $checks['Select(row 4) selects it'] = Wait-Until { $item.Current.IsSelected }
+    }
+    if ($review) {
+        (Get-Pattern $review ([Windows.Automation.InvokePattern]::Pattern)).Invoke()
+        $checks['Invoke(Review changes) opens the drawer'] = Wait-Until {
+            (Find-Elements $root $types::Group 'Changes').Count -eq 1 -and (Find-Elements $root $types::Button 'Hide changes').Count -eq 1
+        }
+    }
+} catch {
+    $lines += "UI Automation FAILED: $($_.Exception.Message)"
+    $checks['client'] = $false
+} finally {
+    if (-not $p.HasExited) {
+        if ($hwnd -ne [IntPtr]::Zero) { [void][UiaGateWin32]::PostMessageW($hwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) } # WM_CLOSE
+        if (-not $p.WaitForExit(5000)) { $p.Kill(); $lines += 'the shell did not close on WM_CLOSE' ; $checks['closes'] = $false }
+    }
+}
+foreach ($k in $checks.Keys) { $lines += '{0,-44} {1}' -f $k, (Format-Verdict $checks[$k]) }
+$ok = $checks.Count -gt 0 -and -not ($checks.Values -contains $false)
+Publish 'U12 UI Automation' $lines $ok
+if (-not $ok) { $failed++ }
 
 exit $failed
