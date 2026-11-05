@@ -33,7 +33,9 @@ case "${task}" in
     cargo xtask i18n-check
     ;;
   test)
-    exec cargo nextest run --workspace --locked "$@"
+    # nextest doesn't run doctests, so `cargo test --doc` follows it. Arguments go to nextest.
+    cargo nextest run --workspace --locked "$@"
+    exec cargo test --doc --workspace --locked
     ;;
   test-win)
     # T2: x86_64 only; the Wine runner is set in the t2 image.
