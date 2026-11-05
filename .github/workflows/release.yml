@@ -25,6 +25,8 @@ jobs:
       - uses: ./.github/actions/toolchain
         with:
           pinned: require
+      # The MSVC CRT + Windows SDK, from Microsoft at the versions the toolchain pins, checked by hash.
+      - run: docker compose run --rm xwin
       - run: docker compose run --rm build
       - name: Stage files with per-arch names
         env:
@@ -36,6 +38,8 @@ jobs:
             triple="${pair%%:*}" arch="${pair##*:}"
             for exe in dist/"$triple"/*.exe; do
               name="$(basename "$exe" .exe)"
+              # The GUI is built and gated from the start but ships from the Phase 3 exit (TD-0009 §11).
+              if [[ $name == dismpro ]]; then continue; fi
               cp "$exe" "release/${name}-${VERSION}-${arch}.exe"
             done
           done
