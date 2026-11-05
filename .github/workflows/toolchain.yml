@@ -33,9 +33,10 @@ jobs:
         with:
           persist-credentials: false
       - name: Refuse a public or missing package (decision #29)
-        # Pushing to a public package would redistribute the MSVC CRT and Windows SDK files in the
-        # images, and this job's first push would create the package public, like the repository.
-        # The owner creates it privately first (steps in toolchain-images.sh).
+        # New images hold no Microsoft files, but older versions in the package do (the MSVC CRT
+        # and Windows SDK, not redistributable), and this job's first push would create the
+        # package public, like the repository. The owner creates it privately first (steps in
+        # toolchain-images.sh).
         env:
           GHCR_USER: ${{ github.actor }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -52,7 +53,6 @@ jobs:
           context: ./docker
           file: ./docker/build.Dockerfile
           target: ${{ matrix.target }}
-          build-args: XWIN_ACCEPT_LICENSE=1
           tags: ghcr.io/e-choness/dism-pro-build:${{ matrix.target }}-${{ github.sha }}
           push: true
           cache-from: |

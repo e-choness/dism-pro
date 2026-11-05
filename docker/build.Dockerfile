@@ -25,9 +25,6 @@ FROM ${RUST_IMAGE} AS t1
 # installed bytes are the pinned ones either way. deb.debian.org drops a version once Debian
 # supersedes it, so the fallback only helps while the pin is recent.
 ARG DEBIAN_SNAPSHOT=20261020T000000Z
-# Owner decision #5: the Microsoft CRT/SDK license is accepted for Docker builds.
-# cargo-xwin accepts it implicitly, so we gate on an explicit opt-in instead.
-ARG XWIN_ACCEPT_LICENSE=0
 ARG TARGETARCH
 
 ARG CARGO_XWIN_VERSION=0.23.1
@@ -88,21 +85,24 @@ RUN case "${TARGETARCH}" in \
 RUN rustup component add rustfmt clippy llvm-tools \
  && rustup target add x86_64-pc-windows-msvc aarch64-pc-windows-msvc
 
-# Bake the MSVC CRT + Windows SDK into the image so builds never download it.
-# The cache stays writable: cargo-xwin drops tool symlinks into it at run time.
+# The MSVC CRT + Windows SDK (the xwin splat) aren't in the image. Microsoft's license lets us
+# build with them (decision #5) but not redistribute them, and nothing CI stores (images, caches,
+# artifacts) holds a file we can't redistribute, so a fork's workflow has nothing to take.
+# docker/task.sh downloads them from Microsoft into the `xwin` volume on first use, at these
+# versions, and checks the files against XWIN_SPLAT_SHA256. Bump the three together; on a
+# mismatch task.sh prints the hash it got.
 ENV XWIN_CACHE_DIR=/opt/xwin \
-    XWIN_ARCH=x86_64,aarch64
-RUN if [ "${XWIN_ACCEPT_LICENSE}" != "1" ]; then \
-      echo "Set --build-arg XWIN_ACCEPT_LICENSE=1 to accept the Microsoft CRT/SDK license (decisions-log #5)." >&2; \
-      exit 1; \
-    fi \
- && cargo xwin cache xwin \
- && chmod -R a+rwX /opt/xwin
+    XWIN_ARCH=x86_64,aarch64 \
+    XWIN_VERSION=17 \
+    XWIN_SDK_VERSION=10.0.26100 \
+    XWIN_CRT_VERSION=14.44.17.14 \
+    XWIN_SPLAT_SHA256=12b8cd0acbe9d9b2b67ff8d380d50a36b257fd196e8bb56171b7b93407fd72db
+# Writable by any user: cargo-xwin also drops tool symlinks into it at run time.
+RUN mkdir -p /opt/xwin && chmod a+rwx /opt/xwin
 
 # The deterministic bench gate's runner (doc 04 §3; `bench-gate` in docker/task.sh). It must be
-# the same version as the `gungraun` dev-dependency in Cargo.toml, so bump both together. Its own
-# layer, after the xwin cache, so a bump doesn't download the Microsoft files again. The hashes
-# match the upstream .sha256 files; arm64 has no musl build.
+# the same version as the `gungraun` dev-dependency in Cargo.toml, so bump both together. The
+# hashes match the upstream .sha256 files; arm64 has no musl build.
 ARG GUNGRAUN_VERSION=0.20.0
 RUN case "${TARGETARCH}" in \
       amd64) t=x86_64-unknown-linux-musl \

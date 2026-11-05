@@ -34,6 +34,9 @@ jobs:
       - uses: ./.github/actions/toolchain
         with:
           t2: "true"
+      # The MSVC CRT + Windows SDK, from Microsoft at the pinned versions and checked by hash. CI
+      # never stores them (images, caches, artifacts): they aren't redistributable (decision #5).
+      - run: docker compose run --rm xwin
       - run: docker compose run --rm fmt
       - run: docker compose run --rm lint
       - run: docker compose run --rm test
@@ -224,11 +227,13 @@ jobs:
         shell: pwsh
         run: ./.github/scripts/smoke.ps1 -Cli dist/aarch64-pc-windows-msvc/dismpro-cli.exe
 
-  adk-headers:
-    name: ADK headers + WinPE file lists (windows-2025)
-    # dismapi.h ships with the Windows ADK, not the SDK in the toolchain image (decision #22); the
-    # WinPE add-on gives the DLL names behind the pe-compat allowlist. Only derived files leave this
-    # job, as short-lived artifacts; never committed.
+  adk:
+    name: S-03 headers + WinPE file lists (windows-2025)
+    # dismapi.h ships with the Windows ADK (decision #22), so the S-03 header cross-check runs
+    # here: the linux job's t3-tools bring the checks (ffi-check-source), and only pass or fail
+    # leaves this VM, never a Microsoft header. The WinPE add-on gives the DLL names behind the
+    # pe-compat allowlist; only those names leave, as a short-lived artifact.
+    needs: linux
     if: >-
       github.event_name == 'push' || github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch' ||
@@ -249,28 +254,21 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - id: headers
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          path: adk-include
-          key: adk-headers-${{ env.ADK_VERSION }}
+          name: t3-tools
+          path: dist-t3/
+      # Derived names only; the ADK's own files are never cached.
       - id: winpe
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: winpe-files
           key: winpe-files-${{ env.ADK_VERSION }}
-      - name: DISM API headers
-        if: steps.headers.outputs.cache-hit != 'true'
-        run: ./.github/scripts/adk.ps1 -Headers adk-include
+      - name: S-03 header cross-check
+        run: ./.github/scripts/adk.ps1 -Check dist-t3/ffi-check-source.exe
       - name: WinPE file lists
         if: steps.winpe.outputs.cache-hit != 'true'
         run: ./.github/scripts/adk.ps1 -WinPE winpe-files
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: adk-include
-          path: adk-include/
-          if-no-files-found: error
-          retention-days: 1
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: winpe-files
@@ -278,9 +276,9 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  ffi-check:
-    name: S-03 headers + WinPE allowlist (ubuntu)
-    needs: adk-headers
+  winpe-allowlist:
+    name: WinPE allowlist (ubuntu)
+    needs: adk
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -290,15 +288,8 @@ jobs:
       - uses: ./.github/actions/toolchain
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: adk-include
-          path: .adk-include/
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
           name: winpe-files
           path: .winpe-files/
-      - run: docker compose run --rm ffi-check
-        env:
-          DPRO_FFI_INCLUDE: /src/.adk-include
+      # Needs no Windows target, so no CRT/SDK download (the entrypoint skips task.sh).
       - name: WinPE allowlist evidence
-        if: always()
         run: docker compose run --rm --entrypoint cargo ffi-check xtask pe-compat --winpe-files /src/.winpe-files
