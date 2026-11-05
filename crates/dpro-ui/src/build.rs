@@ -129,7 +129,8 @@ impl<M> Cx<'_, M> {
 }
 
 impl<M> Ui<M> {
-    /// Copies what changed from `el` into node `i`: layout changes mark it dirty, looks damage it.
+    /// Copies what changed from `el` into node `i`: layout changes mark it dirty, looks (check
+    /// state, enabled, [`Look`](crate::Look)) damage it.
     fn update(&mut self, i: u32, el: Element<'_, M>) {
         let n = &mut self.nodes[i as usize];
         let mut layout = false;
@@ -149,7 +150,8 @@ impl<M> Ui<M> {
             n.text.push_str(el.text);
             layout = true;
         }
-        let looks = n.check != el.check || n.enabled != el.enabled;
+        let looks = n.check != el.check || n.enabled != el.enabled || n.look != el.look;
+        n.look = el.look;
         n.check = el.check;
         n.msg = el.msg;
         if n.enabled != el.enabled {

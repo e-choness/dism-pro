@@ -21,14 +21,14 @@
 use crate::{
     geom::{Rect, Size},
     style::{Align, Axis, Dim, Justify, clamp},
-    text::{TextMeasure, count},
+    text::{TextSystem, count},
     tree::{NIL, Role},
     ui::{ROOT, Ui},
 };
 
 impl<M> Ui<M> {
     /// Lays out what changed since the last layout, damaging what moved.
-    pub fn layout(&mut self, text: &mut dyn TextMeasure) {
+    pub fn layout(&mut self, text: &mut dyn TextSystem) {
         let window = Rect::new(0.0, 0.0, self.viewport.w, self.viewport.h);
         self.arrange(ROOT, window, text, false);
         // Nodes may have moved, appeared or been enabled under a pointer that stayed still.
@@ -39,7 +39,7 @@ impl<M> Ui<M> {
     }
 
     /// The natural outer size of `i` when `avail` logical pixels of width are available.
-    fn measure(&mut self, i: u32, avail: f32, text: &mut dyn TextMeasure) -> Size {
+    fn measure(&mut self, i: u32, avail: f32, text: &mut dyn TextSystem) -> Size {
         {
             let n = &self.nodes[i as usize];
             if n.cache_valid && n.measured_for.to_bits() == avail.to_bits() {
@@ -100,7 +100,7 @@ impl<M> Ui<M> {
     ///
     /// In a row of a known width, growing children count as the widths `arrange` will give them,
     /// and are measured at those widths, so wrapping text is as tall as it will be.
-    fn measure_children(&mut self, i: u32, inner_w: f32, text: &mut dyn TextMeasure) -> Size {
+    fn measure_children(&mut self, i: u32, inner_w: f32, text: &mut dyn TextSystem) -> Size {
         let (axis, gap, first) = {
             let n = &self.nodes[i as usize];
             (n.style.axis, n.style.gap, n.first)
@@ -142,7 +142,7 @@ impl<M> Ui<M> {
 
     /// Puts `i` at `rect` and lays out its children. `covered`: an ancestor already damaged both
     /// its old and new rectangles, which hold this node's.
-    fn arrange(&mut self, i: u32, rect: Rect, text: &mut dyn TextMeasure, covered: bool) {
+    fn arrange(&mut self, i: u32, rect: Rect, text: &mut dyn TextSystem, covered: bool) {
         let (moved, dirty, old) = {
             let n = &self.nodes[i as usize];
             (n.rect != rect, n.dirty, n.rect)
@@ -169,7 +169,7 @@ impl<M> Ui<M> {
         }
     }
 
-    fn arrange_children(&mut self, i: u32, text: &mut dyn TextMeasure, covered: bool) {
+    fn arrange_children(&mut self, i: u32, text: &mut dyn TextSystem, covered: bool) {
         let (s, inner, first) = {
             let n = &self.nodes[i as usize];
             (n.style, n.rect.inset(n.style.padding), n.first)
@@ -255,7 +255,7 @@ impl<M> Ui<M> {
         axis: Axis,
         align: Align,
         inner: Rect,
-        text: &mut dyn TextMeasure,
+        text: &mut dyn TextSystem,
     ) -> f32 {
         let main = match axis {
             Axis::Row => self.measure(c, inner.w, text).w,
@@ -277,7 +277,7 @@ impl<M> Ui<M> {
         align: Align,
         main: f32,
         inner_cross: f32,
-        text: &mut dyn TextMeasure,
+        text: &mut dyn TextSystem,
     ) -> f32 {
         match axis {
             Axis::Column => self.cross_width(c, align, inner_cross, text),
@@ -298,7 +298,7 @@ impl<M> Ui<M> {
         c: u32,
         align: Align,
         inner_w: f32,
-        text: &mut dyn TextMeasure,
+        text: &mut dyn TextSystem,
     ) -> f32 {
         let s = self.nodes[c as usize].style;
         if align == Align::Stretch && s.width == Dim::Auto {
@@ -609,11 +609,15 @@ mod tests {
     /// Counts measurements.
     struct Counting(u32);
 
-    impl crate::TextMeasure for Counting {
+    impl crate::TextSystem for Counting {
         fn measure(&mut self, text: &str, style: &TextStyle, max_width: f32) -> crate::TextMetrics {
             self.0 += 1;
             FakeText.measure(text, style, max_width)
         }
+
+        fn draw(&mut self, _: &str, _: &TextStyle, _: Rect, _: f32, _: &mut dyn crate::GlyphSink) {}
+
+        fn icon(&mut self, _: crate::Icon, _: Rect, _: f32, _: &mut dyn crate::GlyphSink) {}
     }
 
     #[test]

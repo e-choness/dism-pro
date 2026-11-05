@@ -7,6 +7,7 @@ use crate::{
     geom::{Rect, Size},
     style::Style,
     text::TextStyle,
+    theme::{Tone, tokens::radius},
 };
 
 /// A node's identity among its siblings. Reconciling matches nodes by key, so a key must be
@@ -67,6 +68,62 @@ impl Role {
     }
 }
 
+/// How a node is painted, in theme tokens only (doc 05 §4). Changing it repaints the node; it never
+/// changes layout.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Look {
+    /// The background, if any.
+    pub fill: Option<Tone>,
+    /// A one-pixel border inside the edge, if any.
+    pub border: Option<Tone>,
+    pub radius: Radius,
+    /// The color of the node's text.
+    pub ink: Tone,
+}
+
+impl Look {
+    /// Nothing but primary text.
+    pub const PLAIN: Self = Self {
+        fill: None,
+        border: None,
+        radius: Radius::None,
+        ink: Tone::Text,
+    };
+}
+
+impl Default for Look {
+    fn default() -> Self {
+        Self::PLAIN
+    }
+}
+
+/// A corner radius token.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Radius {
+    #[default]
+    None,
+    /// Badges and check boxes.
+    Small,
+    Control,
+    Card,
+    /// Drawers and dialogs.
+    Drawer,
+}
+
+impl Radius {
+    /// In logical pixels.
+    #[must_use]
+    pub const fn logical(self) -> f32 {
+        match self {
+            Self::None => 0.0,
+            Self::Small => radius::SMALL,
+            Self::Control => radius::CONTROL,
+            Self::Card => radius::CARD,
+            Self::Drawer => radius::DRAWER,
+        }
+    }
+}
+
 /// One node as a view describes it for this frame. Cheap: the text is borrowed from the
 /// view-model and copied only when it changed.
 #[derive(Debug)]
@@ -76,6 +133,7 @@ pub struct Element<'s, M> {
     pub(crate) style: Style,
     pub(crate) text: &'s str,
     pub(crate) text_style: TextStyle,
+    pub(crate) look: Look,
     pub(crate) msg: Option<M>,
     pub(crate) check: Tri,
     pub(crate) enabled: bool,
@@ -89,6 +147,7 @@ impl<'s, M> Element<'s, M> {
             style: Style::default(),
             text,
             text_style: TextStyle::default(),
+            look: Look::PLAIN,
             msg,
             check: Tri::Off,
             enabled: true,
@@ -110,7 +169,13 @@ impl<'s, M> Element<'s, M> {
     /// name.
     #[must_use]
     pub fn button(key: Key, label: &'s str, msg: M) -> Self {
-        Self::new(key, Role::Button, label, Some(msg))
+        Self {
+            look: Look {
+                radius: Radius::Control,
+                ..Look::PLAIN
+            },
+            ..Self::new(key, Role::Button, label, Some(msg))
+        }
     }
 
     #[must_use]
@@ -129,6 +194,11 @@ impl<'s, M> Element<'s, M> {
     #[must_use]
     pub fn text_style(self, text_style: TextStyle) -> Self {
         Self { text_style, ..self }
+    }
+
+    #[must_use]
+    pub fn look(self, look: Look) -> Self {
+        Self { look, ..self }
     }
 
     /// A disabled node takes no input and no focus.
@@ -156,6 +226,7 @@ pub(crate) struct Node<M> {
     /// From the window's [`TextPool`](crate::pool::TextPool), and back to it when freed.
     pub(crate) text: String,
     pub(crate) text_style: TextStyle,
+    pub(crate) look: Look,
     pub(crate) msg: Option<M>,
     pub(crate) check: Tri,
     pub(crate) enabled: bool,
@@ -198,6 +269,7 @@ impl<M> Node<M> {
             style: Style::default(),
             text: String::new(),
             text_style: TextStyle::default(),
+            look: Look::PLAIN,
             msg: None,
             check: Tri::Off,
             enabled: true,
