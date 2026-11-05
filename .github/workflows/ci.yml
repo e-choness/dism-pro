@@ -37,6 +37,8 @@ jobs:
       - run: docker compose run --rm fmt
       - run: docker compose run --rm lint
       - run: docker compose run --rm test
+      # Doc 04 §3's deterministic gate: instruction counts vs benches/baseline.json.
+      - run: docker compose run --rm bench-gate
       - run: docker compose run --rm test-win
       - run: docker compose run --rm deny
       - run: docker compose run --rm build

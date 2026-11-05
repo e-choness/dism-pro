@@ -7,8 +7,11 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
-# std only: keeps the lockfile free of third-party crates until a check really needs one.
+# Third-party crates only where a check really needs one.
 [dependencies]
+# bench-gate reads gungraun's JSON summaries and writes benches/baseline.json. Already in the
+# workspace (dismpro-cli's JSON output).
+serde_json.workspace = true
 
 [lints]
 workspace = true

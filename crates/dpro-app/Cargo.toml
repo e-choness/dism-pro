@@ -12,6 +12,7 @@ dpro-core.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
+gungraun.workspace = true
 
 # TD-0009 §7 U10 and U11: written before the implementation (measure-first).
 [[bench]]
@@ -21,6 +22,13 @@ harness = false
 [[bench]]
 name = "table"
 harness = false
+
+# The same scenarios as instruction counts, for `docker compose run --rm bench-gate` (doc 04 §3).
+# Not part of a plain `cargo bench`: it needs gungraun-runner and valgrind.
+[[bench]]
+name = "ir"
+harness = false
+bench = false
 
 [lints]
 workspace = true
