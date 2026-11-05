@@ -1,0 +1,22 @@
+{
+  "about": "Callgrind instruction counts (Ir) of the gungraun benches, the deterministic gate of doc 04 §3: CI fails a count more than 5 % over its entry here. Rewrite with `docker compose run --rm bench-gate -- --update` and say why in the PR.",
+  "instructions": {
+    "crates/dpro-app/benches/ir.rs palette_1000::keystroke.empty": 203567,
+    "crates/dpro-app/benches/ir.rs palette_1000::keystroke.initials": 1443187,
+    "crates/dpro-app/benches/ir.rs palette_1000::keystroke.keyword": 2100741,
+    "crates/dpro-app/benches/ir.rs palette_1000::keystroke.no_match": 1343970,
+    "crates/dpro-app/benches/ir.rs palette_1000::keystroke.r": 1414175,
+    "crates/dpro-app/benches/ir.rs palette_1000::keystroke.re": 1317437,
+    "crates/dpro-app/benches/ir.rs palette_1000::keystroke.rem": 1405053,
+    "crates/dpro-app/benches/ir.rs palette_1000::keystroke.remove": 1535195,
+    "crates/dpro-app/benches/ir.rs palette_1000::keystroke.remove_p": 1602594,
+    "crates/dpro-app/benches/ir.rs table_100k::apply.sort_and_filter": 3463172,
+    "crates/dpro-app/benches/ir.rs table_100k::filter_index.three_columns": 111586409,
+    "crates/dpro-app/benches/ir.rs table_100k::filter_rows.first_keystroke": 46969701,
+    "crates/dpro-app/benches/ir.rs table_100k::filter_rows.narrow": 4763006,
+    "crates/dpro-app/benches/ir.rs table_100k::filter_rows.two_terms": 21222740,
+    "crates/dpro-app/benches/ir.rs table_100k::sort_again.text": 176171797,
+    "crates/dpro-app/benches/ir.rs table_100k::sort_first.size": 65591746,
+    "crates/dpro-app/benches/ir.rs table_100k::sort_first.text": 256792482
+  }
+}

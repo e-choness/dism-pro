@@ -4,7 +4,7 @@
 # `docker compose run --rm <task> -- <args>` are appended; a leading `--` is dropped.
 set -euo pipefail
 
-task="${1:?usage: task.sh <fmt|lint|test|test-win|bench|deny|build|t3-tools|ffi-check|lock> [args…]}"
+task="${1:?usage: task.sh <fmt|lint|test|test-win|bench|bench-gate|deny|build|t3-tools|ffi-check|lock> [args…]}"
 shift
 if [[ "${1:-}" == "--" ]]; then shift; fi
 
@@ -23,7 +23,9 @@ case "${task}" in
     ;;
   lint)
     # Native (pure crates, xtask) and Windows targets: dpro-sys/dpro-win are cfg(windows).
-    cargo clippy --workspace --all-targets --locked -- -D warnings
+    # --all-targets skips `bench = false` targets, so the `ir` benches (Linux only, like
+    # valgrind) are named.
+    cargo clippy --workspace --all-targets --bench ir --locked -- -D warnings
     for t in "${win_targets[@]}"; do
       cargo xwin clippy --workspace --all-targets --locked --target "${t}" -- -D warnings
     done
@@ -38,7 +40,21 @@ case "${task}" in
     exec cargo xwin test --workspace --locked --target x86_64-pc-windows-msvc "$@"
     ;;
   bench)
+    # criterion, advisory timings. The `ir` benches aren't run by default (bench = false).
     exec cargo bench --workspace --locked "$@"
+    ;;
+  bench-gate)
+    # Doc 04 §3's deterministic gate: the instruction counts of every crate's `ir` bench (gungraun
+    # under Callgrind) against benches/baseline.json. `bench-gate -- --update` rewrites the
+    # baseline from this run instead; a PR that does so says why.
+    # gungraun turns ASLR off with personality(2), which Docker's default seccomp profile refuses.
+    # The counts don't depend on it: Valgrind places the program's memory itself, and repeated
+    # runs gave identical counts (TD-0009 §7).
+    export GUNGRAUN_ALLOW_ASLR=yes
+    summaries=target/gungraun/summaries.jsonl
+    mkdir -p "$(dirname "${summaries}")"
+    cargo bench --workspace --locked --bench ir -- --output-format=json > "${summaries}"
+    exec cargo xtask bench-gate "${summaries}" "$@"
     ;;
   deny)
     exec cargo deny --workspace --locked check "$@"

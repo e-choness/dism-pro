@@ -1,5 +1,5 @@
 # The only entry point for build / lint / test / bench (ADR-0003).
-#   docker compose run --rm <fmt|lint|test|test-win|bench|deny|build> [-- args]
+#   docker compose run --rm <fmt|lint|test|test-win|bench|bench-gate|deny|build> [-- args]
 #
 # The toolchain images build from docker/build.Dockerfile (everything in it is pinned) on
 # first use. CI pulls the same images by digest from GHCR instead (.github/toolchain.lock) and
@@ -55,6 +55,9 @@ services:
   bench:
     <<: *t1
     entrypoint: ["bash", "/src/docker/task.sh", "bench"]
+  bench-gate:
+    <<: *t1
+    entrypoint: ["bash", "/src/docker/task.sh", "bench-gate"]
   deny:
     <<: *t1
     entrypoint: ["bash", "/src/docker/task.sh", "deny"]
