@@ -19,14 +19,19 @@ use dpro_core::{OsError, progress::Progress};
 use dpro_sys::{
     dism::{
         self, DISM_ONLINE_IMAGE, DISM_PROGRESS_CALLBACK, DISM_SESSION_DEFAULT,
-        DISMAPI_S_RELOAD_IMAGE_SESSION_REQUIRED, DismFeature, DismPackage, DismPackageFeatureState,
-        DismReleaseType, DismSession, DismString, ERROR_SUCCESS_REBOOT_REQUIRED,
+        DISMAPI_S_RELOAD_IMAGE_SESSION_REQUIRED, DismDriver, DismDriverPackage,
+        DismDriverSignature, DismFeature, DismPackage, DismPackageFeatureState, DismReleaseType,
+        DismSession, DismString, ERROR_SUCCESS_REBOOT_REQUIRED,
     },
-    types::{HANDLE, HRESULT, PVOID, SYSTEMTIME},
+    types::{HANDLE, HRESULT, PCWSTR, PVOID, SYSTEMTIME},
 };
 
 /// `HRESULT_FROM_WIN32(ERROR_CANCELLED)`: what a call returns after its cancel event is set.
 pub use dpro_sys::dism::HRESULT_ERROR_CANCELLED;
+/// `DriverPackageInfo::signature` values.
+pub use dpro_sys::dism::{
+    DismDriverSignatureSigned, DismDriverSignatureUnknown, DismDriverSignatureUnsigned,
+};
 
 use crate::{
     error::{Error, Result},
@@ -180,6 +185,87 @@ pub struct PackageInfo {
 pub struct FeatureInfo {
     pub name: OsString,
     pub state: DismPackageFeatureState,
+}
+
+/// A driver package (one INF) as reported by `DismGetDrivers` or `DismGetDriverInfo`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DriverPackageInfo {
+    /// `oem<N>.inf` for a third-party package in the store; an inbox package keeps its INF name.
+    pub published_name: OsString,
+    /// The INF's path: its copy in the driver store for a staged package, otherwise the path
+    /// passed to [`Session::driver_info`].
+    pub original_file: OsString,
+    pub inbox: bool,
+    pub catalog_file: OsString,
+    pub class_name: OsString,
+    pub class_guid: OsString,
+    pub class_description: OsString,
+    pub boot_critical: bool,
+    pub signature: DismDriverSignature,
+    pub provider: OsString,
+    /// `DriverVer` date.
+    pub date: SYSTEMTIME,
+    /// `DriverVer` version: major, minor, build, revision.
+    pub version: [u32; 4],
+}
+
+impl DriverPackageInfo {
+    /// Copies a package out of a buffer the API returned.
+    ///
+    /// # Safety
+    /// Every string field of `p` must be null or NUL-terminated, and stay valid for the call.
+    unsafe fn from_raw(p: &DismDriverPackage) -> Result<Self> {
+        // A by-value copy: fields of a packed struct can't be borrowed.
+        let p = *p;
+        // SAFETY: by the caller's guarantee for every string field.
+        let s = |ptr: PCWSTR| unsafe { from_wide_ptr(ptr) };
+        Ok(Self {
+            published_name: s(p.PublishedName)?,
+            original_file: s(p.OriginalFileName)?,
+            inbox: p.InBox != 0,
+            catalog_file: s(p.CatalogFile)?,
+            class_name: s(p.ClassName)?,
+            class_guid: s(p.ClassGuid)?,
+            class_description: s(p.ClassDescription)?,
+            boot_critical: p.BootCritical != 0,
+            signature: p.DriverSignature,
+            provider: s(p.ProviderName)?,
+            date: p.Date,
+            version: [p.MajorVersion, p.MinorVersion, p.Build, p.Revision],
+        })
+    }
+}
+
+/// One device an INF installs (a model line), as reported by `DismGetDriverInfo`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DriverDevice {
+    pub manufacturer: OsString,
+    pub description: OsString,
+    pub hardware_id: OsString,
+    /// `PROCESSOR_ARCHITECTURE_*` of the model section.
+    pub architecture: u32,
+    pub service: OsString,
+    pub compatible_ids: OsString,
+    pub exclude_ids: OsString,
+}
+
+impl DriverDevice {
+    /// # Safety
+    /// As [`DriverPackageInfo::from_raw`].
+    unsafe fn from_raw(d: &DismDriver) -> Result<Self> {
+        let d = *d;
+        // SAFETY: by the caller's guarantee for every string field.
+        let s = |ptr: PCWSTR| unsafe { from_wide_ptr(ptr) };
+        Ok(Self {
+            manufacturer: s(d.ManufacturerName)?,
+            description: s(d.HardwareDescription)?,
+            hardware_id: s(d.HardwareId)?,
+            architecture: d.Architecture,
+            service: s(d.ServiceName)?,
+            compatible_ids: s(d.CompatibleIds)?,
+            exclude_ids: s(d.ExcludeIds)?,
+        })
+    }
 }
 
 impl<'api> Session<'api> {
@@ -454,6 +540,104 @@ impl Session<'_> {
             )
         };
         check(hr, "DismRemovePackage")
+    }
+
+    /// `DismGetDrivers`: the third-party packages in the driver store, and with `all` the
+    /// inbox ones too.
+    ///
+    /// # Errors
+    /// The `HRESULT` with DISM's error message, or a string longer than the OS limit.
+    pub fn drivers(&self, all: bool) -> Result<Vec<DriverPackageInfo>> {
+        let id = self.id()?;
+        let mut ptr: *mut DismDriverPackage = ptr::null_mut();
+        let mut count = 0_u32;
+        // SAFETY: `id` is open; out pointers are valid.
+        let hr = unsafe { dism::DismGetDrivers(id, i32::from(all), &raw mut ptr, &raw mut count) };
+        check(hr, "DismGetDrivers")?;
+        let buf = DismBuf { ptr, count };
+        buf.as_slice()
+            .iter()
+            // SAFETY: DISM returns NUL-terminated (or null) strings, valid until DismDelete
+            // (buf drop).
+            .map(|p| unsafe { DriverPackageInfo::from_raw(p) })
+            .collect()
+    }
+
+    /// `DismGetDriverInfo` for an INF path or a published name (`oem3.inf`): the devices it
+    /// installs and, when DISM reports it, the package.
+    ///
+    /// # Errors
+    /// The `HRESULT` with DISM's error message, or a string longer than the OS limit.
+    pub fn driver_info(
+        &self,
+        inf: &OsStr,
+    ) -> Result<(Vec<DriverDevice>, Option<DriverPackageInfo>)> {
+        let id = self.id()?;
+        let inf = WideCString::new(inf)?;
+        let mut devices: *mut DismDriver = ptr::null_mut();
+        let mut count = 0_u32;
+        let mut package: *mut DismDriverPackage = ptr::null_mut();
+        // SAFETY: `id` is open; `inf` is NUL-terminated and outlives the call; out pointers
+        // are valid.
+        let hr = unsafe {
+            dism::DismGetDriverInfo(
+                id,
+                inf.as_ptr(),
+                &raw mut devices,
+                &raw mut count,
+                &raw mut package,
+            )
+        };
+        // Both buffers are owned (and freed) from here on, even if the call failed.
+        let devices = DismBuf {
+            ptr: devices,
+            count,
+        };
+        let package = DismBuf {
+            ptr: package,
+            count: 1,
+        };
+        check(hr, "DismGetDriverInfo")?;
+        let list = devices
+            .as_slice()
+            .iter()
+            // SAFETY: as in `drivers`.
+            .map(|d| unsafe { DriverDevice::from_raw(d) })
+            .collect::<Result<_>>()?;
+        let package = match package.as_slice().first() {
+            // SAFETY: as in `drivers`.
+            Some(p) => Some(unsafe { DriverPackageInfo::from_raw(p) }?),
+            None => None,
+        };
+        Ok((list, package))
+    }
+
+    /// `DismAddDriver`: stages the package of one INF into the store. `force_unsigned` lets
+    /// an offline image take an unsigned package; DISM ignores it online. The API has no
+    /// cancel event and no progress callback.
+    ///
+    /// # Errors
+    /// The `HRESULT` with DISM's error message.
+    pub fn add_driver(&self, inf: &Path, force_unsigned: bool) -> Result<Completion> {
+        let id = self.id()?;
+        // No `\\?\` prefix: DISM's driver paths aren't documented to take one, and the
+        // store's paths stay short.
+        let inf = WideCString::new(inf)?;
+        // SAFETY: `inf` is NUL-terminated and outlives the call.
+        let hr = unsafe { dism::DismAddDriver(id, inf.as_ptr(), i32::from(force_unsigned)) };
+        check(hr, "DismAddDriver")
+    }
+
+    /// `DismRemoveDriver` by published name (`oem3.inf`). Inbox packages can't be removed.
+    ///
+    /// # Errors
+    /// The `HRESULT` with DISM's error message.
+    pub fn remove_driver(&self, published: &OsStr) -> Result<Completion> {
+        let id = self.id()?;
+        let published = WideCString::new(published)?;
+        // SAFETY: `published` is NUL-terminated and outlives the call.
+        let hr = unsafe { dism::DismRemoveDriver(id, published.as_ptr()) };
+        check(hr, "DismRemoveDriver")
     }
 }
 

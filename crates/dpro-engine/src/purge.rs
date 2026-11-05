@@ -34,7 +34,7 @@ pub enum PurgeError {
 pub fn owned_dirs(volume_root: &Path) -> [PathBuf; 2] {
     [
         paths::state_dir(volume_root),
-        volume_root.join("$DismProQuarantine"),
+        paths::quarantine_root(volume_root),
     ]
 }
 

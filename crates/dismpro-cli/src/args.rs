@@ -63,6 +63,21 @@ pub(crate) enum Command {
         enable: bool,
         names: Vec<String>,
     },
+    /// `drivers list [--all]` (TD-0002 §5.6): third-party packages; `all` adds the inbox ones.
+    DriversList {
+        all: bool,
+    },
+    /// `drivers add <inf|folder>... [--recurse] [--force-unsigned]`.
+    DriversAdd {
+        paths: Vec<PathBuf>,
+        recurse: bool,
+        force_unsigned: bool,
+    },
+    /// `drivers remove <oemN.inf>... [--allow-boot-critical]`.
+    DriversRemove {
+        names: Vec<String>,
+        allow_boot_critical: bool,
+    },
     Health {
         scan: bool,
     },
@@ -124,8 +139,13 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli, Usa
     let mut toolsets: Option<String> = None;
     let mut agent_broker = false;
     let mut user_sid: Option<String> = None;
+    let mut driver_flags: Vec<DriverFlag> = Vec::new();
     while let Some(arg) = p.next()? {
         match arg {
+            Arg::Long("all") => driver_flags.push(DriverFlag::All),
+            Arg::Long("recurse") => driver_flags.push(DriverFlag::Recurse),
+            Arg::Long("force-unsigned") => driver_flags.push(DriverFlag::ForceUnsigned),
+            Arg::Long("allow-boot-critical") => driver_flags.push(DriverFlag::AllowBootCritical),
             Arg::Short('h') | Arg::Long("help") => help = true,
             Arg::Short('V') | Arg::Long("version") => version = true,
             Arg::Long("json") => g.json = true,
@@ -175,7 +195,52 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli, Usa
         };
         *toolsets = Some(parse_toolsets(&list)?);
     }
+    // `drivers add --recurse --help` asks for help, which needs no checking.
+    if !matches!(command, Command::Help | Command::Version) {
+        for flag in driver_flags {
+            flag.apply(&mut command)?;
+        }
+    }
     Ok(Cli { global: g, command })
+}
+
+/// The `drivers` options (TD-0002 §5.6), parsed anywhere on the line like the global ones, then
+/// set on the command they belong to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DriverFlag {
+    All,
+    Recurse,
+    ForceUnsigned,
+    AllowBootCritical,
+}
+
+impl DriverFlag {
+    fn apply(self, command: &mut Command) -> Result<(), UsageError> {
+        match (self, command) {
+            (Self::All, Command::DriversList { all }) => *all = true,
+            (Self::Recurse, Command::DriversAdd { recurse, .. }) => *recurse = true,
+            (Self::ForceUnsigned, Command::DriversAdd { force_unsigned, .. }) => {
+                *force_unsigned = true;
+            }
+            (
+                Self::AllowBootCritical,
+                Command::DriversRemove {
+                    allow_boot_critical,
+                    ..
+                },
+            ) => *allow_boot_critical = true,
+            (flag, _) => {
+                let (name, with) = match flag {
+                    Self::All => ("--all", "drivers list"),
+                    Self::Recurse => ("--recurse", "drivers add"),
+                    Self::ForceUnsigned => ("--force-unsigned", "drivers add"),
+                    Self::AllowBootCritical => ("--allow-boot-critical", "drivers remove"),
+                };
+                return Err(UsageError(format!("{name} goes only with {with}")));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// `core,maintain`: the toolsets an MCP client's configuration asks for (TD-0013 §10).
@@ -245,6 +310,22 @@ fn command(words: &[String]) -> Result<Command, UsageError> {
                 names: rest(2),
             }
         }
+        ["drivers", "list"] | ["drivers"] => Command::DriversList { all: false },
+        ["drivers", "add", ..] => {
+            need(2, "drivers add")?;
+            Command::DriversAdd {
+                paths: words[2..].iter().map(PathBuf::from).collect(),
+                recurse: false,
+                force_unsigned: false,
+            }
+        }
+        ["drivers", "remove", ..] => {
+            need(2, "drivers remove")?;
+            Command::DriversRemove {
+                names: rest(2),
+                allow_boot_critical: false,
+            }
+        }
         ["health", "check"] => Command::Health { scan: false },
         ["health", "scan"] => Command::Health { scan: true },
         ["health", "restore"] => Command::HealthRestore,
@@ -292,6 +373,31 @@ mod tests {
                     names: vec!["X".into()],
                 },
             ),
+            ("drivers", Command::DriversList { all: false }),
+            ("drivers list --all", Command::DriversList { all: true }),
+            (
+                "drivers add D:\\drv\\a.inf --recurse D:\\more --force-unsigned",
+                Command::DriversAdd {
+                    paths: vec!["D:\\drv\\a.inf".into(), "D:\\more".into()],
+                    recurse: true,
+                    force_unsigned: true,
+                },
+            ),
+            (
+                "drivers remove oem3.inf",
+                Command::DriversRemove {
+                    names: vec!["oem3.inf".into()],
+                    allow_boot_critical: false,
+                },
+            ),
+            (
+                "--allow-boot-critical drivers remove oem3.inf oem4.inf",
+                Command::DriversRemove {
+                    names: vec!["oem3.inf".into(), "oem4.inf".into()],
+                    allow_boot_critical: true,
+                },
+            ),
+            ("drivers add x.inf --recurse --help", Command::Help),
             ("health check", Command::Health { scan: false }),
             ("health scan", Command::Health { scan: true }),
             ("health restore", Command::HealthRestore),
@@ -365,6 +471,12 @@ mod tests {
             "--agent-broker",
             "--agent-broker mcp --user-sid S-1-5-18",
             "mcp --user-sid S-1-5-18",
+            "drivers add",
+            "drivers remove",
+            "drivers list --recurse",
+            "drivers remove oem3.inf --all",
+            "drivers add a.inf --allow-boot-critical",
+            "features enable X --force-unsigned",
         ] {
             assert!(p(bad).is_err(), "{bad}");
         }

@@ -94,7 +94,8 @@ impl From<dpro_engine::ops::PlanError> for CliError {
             dpro_engine::ops::PlanError::Unknown { what, name } => {
                 Self::UnknownName(format!("unknown {what}: {name}"))
             }
-            dpro_engine::ops::PlanError::Core(e) => Self::Failed(e.to_string()),
+            // Refusals (unsigned, inbox, boot-critical) and INF paths: already worded.
+            other => Self::Failed(other.to_string()),
         }
     }
 }

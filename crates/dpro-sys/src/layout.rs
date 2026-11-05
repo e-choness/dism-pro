@@ -83,6 +83,77 @@ pub const DISMAPI: Header = Header {
                 ("State", offset_of!(dism::DismFeature, State)),
             ],
         },
+        scalar(
+            "DismDriverSignature",
+            size_of::<dism::DismDriverSignature>(),
+        ),
+        Layout {
+            c_type: "DismDriverPackage",
+            size: size_of::<dism::DismDriverPackage>(),
+            fields: &[
+                (
+                    "PublishedName",
+                    offset_of!(dism::DismDriverPackage, PublishedName),
+                ),
+                (
+                    "OriginalFileName",
+                    offset_of!(dism::DismDriverPackage, OriginalFileName),
+                ),
+                ("InBox", offset_of!(dism::DismDriverPackage, InBox)),
+                (
+                    "CatalogFile",
+                    offset_of!(dism::DismDriverPackage, CatalogFile),
+                ),
+                ("ClassName", offset_of!(dism::DismDriverPackage, ClassName)),
+                ("ClassGuid", offset_of!(dism::DismDriverPackage, ClassGuid)),
+                (
+                    "ClassDescription",
+                    offset_of!(dism::DismDriverPackage, ClassDescription),
+                ),
+                (
+                    "BootCritical",
+                    offset_of!(dism::DismDriverPackage, BootCritical),
+                ),
+                (
+                    "DriverSignature",
+                    offset_of!(dism::DismDriverPackage, DriverSignature),
+                ),
+                (
+                    "ProviderName",
+                    offset_of!(dism::DismDriverPackage, ProviderName),
+                ),
+                ("Date", offset_of!(dism::DismDriverPackage, Date)),
+                (
+                    "MajorVersion",
+                    offset_of!(dism::DismDriverPackage, MajorVersion),
+                ),
+                (
+                    "MinorVersion",
+                    offset_of!(dism::DismDriverPackage, MinorVersion),
+                ),
+                ("Build", offset_of!(dism::DismDriverPackage, Build)),
+                ("Revision", offset_of!(dism::DismDriverPackage, Revision)),
+            ],
+        },
+        Layout {
+            c_type: "DismDriver",
+            size: size_of::<dism::DismDriver>(),
+            fields: &[
+                (
+                    "ManufacturerName",
+                    offset_of!(dism::DismDriver, ManufacturerName),
+                ),
+                (
+                    "HardwareDescription",
+                    offset_of!(dism::DismDriver, HardwareDescription),
+                ),
+                ("HardwareId", offset_of!(dism::DismDriver, HardwareId)),
+                ("Architecture", offset_of!(dism::DismDriver, Architecture)),
+                ("ServiceName", offset_of!(dism::DismDriver, ServiceName)),
+                ("CompatibleIds", offset_of!(dism::DismDriver, CompatibleIds)),
+                ("ExcludeIds", offset_of!(dism::DismDriver, ExcludeIds)),
+            ],
+        },
         Layout {
             c_type: "SYSTEMTIME",
             size: size_of::<types::SYSTEMTIME>(),
@@ -131,6 +202,18 @@ pub const DISMAPI: Header = Header {
         (
             "DismImageNonRepairable",
             dism::DismImageNonRepairable as i64,
+        ),
+        (
+            "DismDriverSignatureUnknown",
+            dism::DismDriverSignatureUnknown as i64,
+        ),
+        (
+            "DismDriverSignatureUnsigned",
+            dism::DismDriverSignatureUnsigned as i64,
+        ),
+        (
+            "DismDriverSignatureSigned",
+            dism::DismDriverSignatureSigned as i64,
         ),
         ("DISM_MOUNT_READWRITE", dism::DISM_MOUNT_READWRITE as i64),
         ("DISM_MOUNT_READONLY", dism::DISM_MOUNT_READONLY as i64),
@@ -240,6 +323,8 @@ mod tests {
         assert_eq!(size_of::<dism::DismString>(), 8);
         assert_eq!(size_of::<dism::DismPackage>(), 32);
         assert_eq!(size_of::<dism::DismFeature>(), 12);
+        assert_eq!(size_of::<dism::DismDriverPackage>(), 100);
+        assert_eq!(size_of::<dism::DismDriver>(), 52);
         assert_eq!(size_of::<types::SYSTEMTIME>(), 16);
     }
 

@@ -10,6 +10,11 @@ cli-help =
       packages remove <identity>...    Plan or apply package removal
       features list                    List optional features
       features enable|disable <name>...  Plan or apply feature changes
+      drivers list [--all]             List third-party driver packages (--all adds the inbox ones)
+      drivers add <inf|folder>...      Plan or apply driver additions to an offline image
+        [--recurse] [--force-unsigned]   (with subfolders; also unsigned packages)
+      drivers remove <oemN.inf>...     Plan or apply driver removals from an offline image
+        [--allow-boot-critical]          (also packages the image needs to start)
       health check|scan                Check component store health (read-only)
       health restore                   Plan or apply a component store repair
       reboot-reasons                   Explain why a reboot is pending
@@ -36,6 +41,7 @@ cli-confirmation-required = Not applied: pass --yes to apply (and --allow-irreve
 cli-applied = Applied: { $applied } of { $count }.
 cli-job-partial = Failed: { $failed }.
 cli-job-failed-change = { $action } { $object }: { $code }
+cli-job-not-removed = { $action } { $object }: DISM reported success, but the package is still listed as { $state } ({ $code }). Another installed package may need it.
 cli-crash-dump = DISM Pro crashed. A crash dump was saved to { $path }.
 cli-cancelled = Cancelled. Changes applied before that stay journaled and can be undone.
 cli-reboot-required = Restart Windows to finish these changes.
@@ -43,6 +49,7 @@ cli-journal-file = Journal: { $path }
 cli-progress = { $percent }%
 cli-progress-step = [{ $step }/{ $total }] { $percent }%
 cli-error = error: { $message }
+cli-note = note: { $message }
 cli-error-failed = { $message }
 cli-error-usage = { $message }. Run dismpro-cli --help.
 cli-error-elevation = This command needs an elevated prompt (Run as administrator).
@@ -70,6 +77,12 @@ col-created = Created
 col-operation = Operation
 col-status = Status
 col-applied = Applied
+col-published = Published
+col-class = Class
+col-provider = Provider
+col-version = Version
+col-date = Date
+col-signature = Signature
 
 badge-undoable = Undoable
 badge-undoable-until = Undoable until { $until }
@@ -121,6 +134,8 @@ fmt-utc = { $date } { $time } UTC
 op-features-enable = Enable Windows features
 op-features-disable = Disable Windows features
 op-packages-remove = Remove packages
+op-drivers-add = Add driver packages
+op-drivers-remove = Remove driver packages
 op-journal-undo = Undo a previous job
 op-health-restore = Repair the component store
 op-purge = Remove all DISM Pro data from this volume
@@ -135,6 +150,16 @@ journal-none = No journaled jobs on this target.
 journal-already-undone = Job { $job } was already undone by job { $by }. To redo it, undo { $by }.
 journal-other-target = Job { $job } belongs to a different Windows installation than the target.
 journal-other-build = Job { $job } was made on build { $then }; the target is now build { $now }, so undo is disabled.
+journal-nothing-to-undo = Job { $job } has nothing to undo: it applied nothing, or every change it applied is permanent or past its undo window.
+
+# Drivers (TD-0002 §5.6)
+signature-signed = Signed
+signature-unsigned = Unsigned
+signature-unknown = Unknown
+drivers-none = No third-party driver packages. Pass --all to list the inbox ones too.
+drivers-reading-all = Reading every driver package (this can take half a minute)...
+drivers-online-refused = Drivers can only be added to or removed from an offline image (--target <folder>) for now: DISM doesn't service the drivers of the running Windows.
+drivers-no-package-info = DISM read no package details from { $inf }.
 
 # Health & Repair (TD-0006 §4)
 col-severity = Severity

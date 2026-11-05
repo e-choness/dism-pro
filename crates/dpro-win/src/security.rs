@@ -34,16 +34,17 @@ use windows_sys::Win32::{
         WinLocalSystemSid,
     },
     Storage::FileSystem::{
-        CreateDirectoryW, DELETE, FILE_APPEND_DATA, FILE_ATTRIBUTE_REPARSE_POINT,
-        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_WRITE_DATA, FILE_WRITE_EA,
-        READ_CONTROL, WRITE_DAC, WRITE_OWNER,
+        CreateDirectoryW, DELETE, FILE_APPEND_DATA, FILE_ATTRIBUTE_HIDDEN,
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_WRITE_DATA, FILE_WRITE_EA, GetFileAttributesW, INVALID_FILE_ATTRIBUTES, READ_CONTROL,
+        SetFileAttributesW, WRITE_DAC, WRITE_OWNER,
     },
 };
 
 use dpro_core::OsError;
 
 use crate::{
-    error::{Error, Result, last_error_if_false, win32},
+    error::{Error, Result, last_error_if_false, last_os_error, win32},
     wide::{WideCString, from_wide_ptr, long_path},
 };
 
@@ -99,6 +100,27 @@ pub fn ensure_admin_only_dir(dir: &Path) -> Result<()> {
     }
     let folder = open_no_follow(dir, READ_CONTROL).map_err(|e| io_error(&e, "CreateFileW"))?;
     check_admin_folder(&folder, dir)
+}
+
+/// [`ensure_admin_only_dir`], plus the hidden attribute: the quarantine root (TD-0001 §5.2) sits
+/// at the top of a volume, where Explorer would otherwise show it.
+///
+/// # Errors
+/// As [`ensure_admin_only_dir`]; OS errors reading or setting the attributes.
+pub fn ensure_hidden_admin_only_dir(dir: &Path) -> Result<()> {
+    ensure_admin_only_dir(dir)?;
+    let path = WideCString::new(long_path(dir))?;
+    // SAFETY: `path` is NUL-terminated and outlives the call.
+    let attributes = unsafe { GetFileAttributesW(path.as_ptr()) };
+    if attributes == INVALID_FILE_ATTRIBUTES {
+        return Err(last_os_error("GetFileAttributesW").into());
+    }
+    if attributes & FILE_ATTRIBUTE_HIDDEN != 0 {
+        return Ok(());
+    }
+    // SAFETY: as above.
+    let ok = unsafe { SetFileAttributesW(path.as_ptr(), attributes | FILE_ATTRIBUTE_HIDDEN) };
+    last_error_if_false(ok, "SetFileAttributesW")
 }
 
 /// Reads a small file that only administrators can change, such as the agent policy (TD-0013

@@ -16,7 +16,9 @@ use dpro_core::{
     plan::{Change, ChangeKind, Reversibility},
 };
 
-use crate::journal::{Done, Intent, JobStatus, JournalError, JournalSink, JournalWriter, Outcome};
+use crate::journal::{
+    Done, Intent, JobStatus, JournalError, JournalSink, JournalWriter, Learned, Outcome,
+};
 
 /// Applies changes to a real or fake target.
 pub trait Backend {
@@ -36,6 +38,13 @@ pub trait Backend {
     /// # Errors
     /// The change failed; it is recorded and the job continues with the next one.
     fn apply(&mut self, change: &Change<String>) -> Result<Applied, OsError>;
+
+    /// The inverse of the change [`Backend::apply`] just applied, when only applying it could
+    /// tell (DISM names an added driver package during the call). Called once after each
+    /// successful apply; the runner journals the answer as a [`Learned`] record.
+    fn learned_inverse(&mut self) -> Option<ChangeKind<String>> {
+        None
+    }
 }
 
 /// How a successfully applied change finished.
@@ -160,8 +169,19 @@ pub fn run<B: Backend, W: JournalSink>(
             let outcome = match failure {
                 Some(code) => Outcome::Failed { code: *code },
                 None => match backend.apply(&changes[i]) {
-                    Ok(Applied::Done) => Outcome::Applied,
-                    Ok(Applied::RebootRequired) => Outcome::AppliedRebootRequired,
+                    Ok(applied) => {
+                        // Before the done record: a reader that sees the outcome also sees it.
+                        if let Some(inverse) = backend.learned_inverse() {
+                            journal.learned(&Learned {
+                                index: index(i),
+                                inverse,
+                            })?;
+                        }
+                        match applied {
+                            Applied::Done => Outcome::Applied,
+                            Applied::RebootRequired => Outcome::AppliedRebootRequired,
+                        }
+                    }
                     Err(e) => Outcome::Failed { code: e.code },
                 },
             };
@@ -420,6 +440,131 @@ mod tests {
         assert_eq!(summary.applied, 1);
         let report = journal::analyze(&journal::read(&bytes).unwrap());
         assert_eq!(report.without_outcome, [1]); // committed, so: never applied
+    }
+
+    /// A driver store: an added INF is staged under a name the store picks (`oem<N>.inf`), so
+    /// only the apply learns the inverse (TD-0002 §5.6).
+    #[derive(Debug, Default)]
+    struct FakeStore {
+        /// Published name → source INF.
+        staged: BTreeMap<String, String>,
+        next: u32,
+        learned: Option<ChangeKind<String>>,
+    }
+
+    impl FakeStore {
+        fn infs(&self) -> Vec<&str> {
+            let mut infs: Vec<&str> = self.staged.values().map(String::as_str).collect();
+            infs.sort_unstable();
+            infs
+        }
+    }
+
+    impl Backend for FakeStore {
+        fn capture_inverse(
+            &mut self,
+            change: &Change<String>,
+        ) -> Result<Option<ChangeKind<String>>, OsError> {
+            Ok(match &change.kind {
+                ChangeKind::DriverAdd { .. } => None,
+                ChangeKind::DriverRemove { published } => self
+                    .staged
+                    .get(published)
+                    .map(|inf| ChangeKind::DriverAdd { inf: inf.clone() }),
+                other => panic!("fake store can't capture {}", other.name()),
+            })
+        }
+
+        fn apply(&mut self, change: &Change<String>) -> Result<Applied, OsError> {
+            match &change.kind {
+                ChangeKind::DriverAdd { inf } => {
+                    let published = format!("oem{}.inf", self.next);
+                    self.next += 1;
+                    self.staged.insert(published.clone(), inf.clone());
+                    self.learned = Some(ChangeKind::DriverRemove { published });
+                }
+                ChangeKind::DriverRemove { published } => {
+                    self.staged.remove(published).ok_or(OsError {
+                        code: 2,
+                        api: "DismRemoveDriver",
+                    })?;
+                }
+                other => panic!("fake store can't apply {}", other.name()),
+            }
+            Ok(Applied::Done)
+        }
+
+        fn learned_inverse(&mut self) -> Option<ChangeKind<String>> {
+            self.learned.take()
+        }
+    }
+
+    fn run_on<B: Backend>(changes: &[Change<String>], backend: &mut B) -> (JobSummary, Vec<u8>) {
+        let journal = JournalWriter::create(Vec::new(), &begin()).unwrap();
+        let clock = StepClock {
+            t: Cell::new(Duration::ZERO),
+            step: Duration::ZERO,
+        };
+        let config = RunConfig::default();
+        run(
+            changes,
+            backend,
+            journal,
+            &CancelToken::new(),
+            &clock,
+            config,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn learned_inverses_undo_and_redo_driver_adds() {
+        let add = |inf: &str| Change {
+            kind: ChangeKind::DriverAdd { inf: inf.into() },
+            reversibility: Reversibility::Reversible,
+            reboot_required: false,
+        };
+        let mut store = FakeStore::default();
+        let (summary, bytes) = run_on(&[add(r"C:\d\a.inf"), add(r"C:\d\b.inf")], &mut store);
+        assert_eq!(summary.applied, 2);
+        // The learned records ride with the done records: begin, one batch, commit.
+        assert_eq!(summary.syncs, 3);
+        assert_eq!(store.infs(), [r"C:\d\a.inf", r"C:\d\b.inf"]);
+
+        let rec = journal::read(&bytes).unwrap();
+        let learned = rec
+            .records
+            .iter()
+            .filter(|r| matches!(r, journal::Record::Learned(_)))
+            .count();
+        assert_eq!(learned, 2);
+        let undo = journal::undo_changes(&rec, &[], UnixMillis(0));
+        let names: Vec<_> = undo.iter().map(|c| c.kind.clone()).collect();
+        assert_eq!(
+            names,
+            [
+                ChangeKind::DriverRemove {
+                    published: "oem1.inf".into()
+                },
+                ChangeKind::DriverRemove {
+                    published: "oem0.inf".into()
+                },
+            ],
+            "newest first"
+        );
+        // A removal's own undo needs the quarantine copy, so it expires with it.
+        assert!(matches!(
+            undo[0].reversibility,
+            Reversibility::ReversibleUntil { until } if until.0 == crate::paths::QUARANTINE_TTL_MS
+        ));
+        let (_, undo_bytes) = run_on(&undo, &mut store);
+        assert!(store.staged.is_empty());
+
+        // Undo the undo: the captured inverses re-add both packages, under new names.
+        let redo = journal::undo_changes(&journal::read(&undo_bytes).unwrap(), &[], UnixMillis(0));
+        run_on(&redo, &mut store);
+        assert_eq!(store.infs(), [r"C:\d\a.inf", r"C:\d\b.inf"]);
+        assert!(store.staged.contains_key("oem2.inf"));
     }
 
     fn arb_changes() -> impl Strategy<Value = Vec<Change<String>>> {

@@ -9,9 +9,9 @@
 
 #![allow(non_snake_case, non_camel_case_types, non_upper_case_globals)]
 
+use crate::types::{BOOL, HRESULT, PCWSTR, PVOID, SYSTEMTIME, UINT};
 #[cfg(windows)]
-use crate::types::{BOOL, DWORD, HANDLE};
-use crate::types::{HRESULT, PCWSTR, PVOID, SYSTEMTIME, UINT};
+use crate::types::{DWORD, HANDLE};
 
 /// Opaque session handle (`typedef UINT DismSession`).
 pub type DismSession = UINT;
@@ -50,6 +50,11 @@ pub type DismImageHealthState = i32;
 pub const DismImageHealthy: DismImageHealthState = 0;
 pub const DismImageRepairable: DismImageHealthState = 1;
 pub const DismImageNonRepairable: DismImageHealthState = 2;
+
+pub type DismDriverSignature = i32;
+pub const DismDriverSignatureUnknown: DismDriverSignature = 0;
+pub const DismDriverSignatureUnsigned: DismDriverSignature = 1;
+pub const DismDriverSignatureSigned: DismDriverSignature = 2;
 
 pub const DISM_MOUNT_READWRITE: u32 = 0x0000_0000;
 pub const DISM_MOUNT_READONLY: u32 = 0x0000_0001;
@@ -91,6 +96,41 @@ pub struct DismPackage {
 pub struct DismFeature {
     pub FeatureName: PCWSTR,
     pub State: DismPackageFeatureState,
+}
+
+/// A driver package (one INF) in the image's driver store, or the INF passed to
+/// `DismGetDriverInfo`.
+#[repr(C, packed(1))]
+#[derive(Debug, Clone, Copy)]
+pub struct DismDriverPackage {
+    pub PublishedName: PCWSTR,
+    pub OriginalFileName: PCWSTR,
+    pub InBox: BOOL,
+    pub CatalogFile: PCWSTR,
+    pub ClassName: PCWSTR,
+    pub ClassGuid: PCWSTR,
+    pub ClassDescription: PCWSTR,
+    pub BootCritical: BOOL,
+    pub DriverSignature: DismDriverSignature,
+    pub ProviderName: PCWSTR,
+    pub Date: SYSTEMTIME,
+    pub MajorVersion: UINT,
+    pub MinorVersion: UINT,
+    pub Build: UINT,
+    pub Revision: UINT,
+}
+
+/// One device an INF can install (a model line of its manufacturer section).
+#[repr(C, packed(1))]
+#[derive(Debug, Clone, Copy)]
+pub struct DismDriver {
+    pub ManufacturerName: PCWSTR,
+    pub HardwareDescription: PCWSTR,
+    pub HardwareId: PCWSTR,
+    pub Architecture: UINT,
+    pub ServiceName: PCWSTR,
+    pub CompatibleIds: PCWSTR,
+    pub ExcludeIds: PCWSTR,
 }
 
 #[cfg(windows)]
@@ -188,6 +228,21 @@ unsafe extern "system" {
         Progress: DISM_PROGRESS_CALLBACK,
         UserData: PVOID,
     ) -> HRESULT;
+    pub fn DismGetDrivers(
+        Session: DismSession,
+        AllDrivers: BOOL,
+        DriverPackage: *mut *mut DismDriverPackage,
+        Count: *mut UINT,
+    ) -> HRESULT;
+    pub fn DismGetDriverInfo(
+        Session: DismSession,
+        DriverPath: PCWSTR,
+        Driver: *mut *mut DismDriver,
+        Count: *mut UINT,
+        DriverPackage: *mut *mut DismDriverPackage,
+    ) -> HRESULT;
+    pub fn DismAddDriver(Session: DismSession, DriverPath: PCWSTR, ForceUnsigned: BOOL) -> HRESULT;
+    pub fn DismRemoveDriver(Session: DismSession, DriverPath: PCWSTR) -> HRESULT;
 }
 
 /// C prototypes of the functions above, for the ffi-check signature test. Keep in the same
@@ -245,5 +300,21 @@ pub const C_PROTOTYPES: &[(&str, &str)] = &[
     (
         "DismUnmountImage",
         "HRESULT (WINAPI *)(PCWSTR, DWORD, HANDLE, DISM_PROGRESS_CALLBACK, PVOID)",
+    ),
+    (
+        "DismGetDrivers",
+        "HRESULT (WINAPI *)(DismSession, BOOL, DismDriverPackage **, UINT *)",
+    ),
+    (
+        "DismGetDriverInfo",
+        "HRESULT (WINAPI *)(DismSession, PCWSTR, DismDriver **, UINT *, DismDriverPackage **)",
+    ),
+    (
+        "DismAddDriver",
+        "HRESULT (WINAPI *)(DismSession, PCWSTR, BOOL)",
+    ),
+    (
+        "DismRemoveDriver",
+        "HRESULT (WINAPI *)(DismSession, PCWSTR)",
     ),
 ];

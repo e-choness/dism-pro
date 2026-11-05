@@ -44,6 +44,34 @@ pub(crate) struct FeatureJson {
     pub(crate) enabled: bool,
 }
 
+/// `drivers list --json` (TD-0002 §5.6).
+#[derive(Debug, Serialize)]
+pub(crate) struct DriversDoc {
+    pub(crate) schema: &'static str,
+    pub(crate) drivers: Vec<DriverJson>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct DriverJson {
+    /// `oem3.inf`; an inbox package keeps its INF name.
+    pub(crate) published: String,
+    /// The INF's copy in the driver store.
+    pub(crate) inf: String,
+    pub(crate) inbox: bool,
+    pub(crate) class: String,
+    pub(crate) class_guid: String,
+    pub(crate) class_description: String,
+    pub(crate) provider: String,
+    /// `a.b.c.d`.
+    pub(crate) version: String,
+    /// `YYYY-MM-DD`.
+    pub(crate) date: String,
+    /// `signed`, `unsigned` or `unknown`.
+    pub(crate) signature: &'static str,
+    pub(crate) boot_critical: bool,
+    pub(crate) catalog: String,
+}
+
 /// Outcome of an apply or the content of a journal (`job.v1`).
 #[derive(Debug, Serialize)]
 pub(crate) struct JobDoc {

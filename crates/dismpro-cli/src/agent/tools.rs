@@ -349,11 +349,11 @@ impl BrokerTools {
                 )));
             }
             let identity = t.identity();
-            let features = || {
+            let probe = |rec: &_, in_doubt: &[u32]| {
                 let session = t.open(dism.api()?)?;
-                run::feature_entries(&session)
+                run::probe_in_doubt(&session, rec, in_doubt)
             };
-            let (plan, _) = run::undo_plan(&t, identity, &path, features, &m).map_err(fail)?;
+            let (plan, _) = run::undo_plan(&t, identity, &path, probe, &m).map_err(fail)?;
             owned(&plan)
         })??;
         self.store(shown, made, policy, Map::new())
