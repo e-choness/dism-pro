@@ -35,7 +35,9 @@ fn interact(c: &mut Criterion) {
     g.throughput(Throughput::Elements(1));
     // Nothing changes: the floor every event pays (view + reconcile compares).
     let outside = Step::Input(Input::PointerMove(Point { x: -1.0, y: -1.0 }));
-    g.bench_function("event_unchanged", |b| b.iter(|| run.step(black_box(outside))));
+    g.bench_function("event_unchanged", |b| {
+        b.iter(|| run.step(black_box(outside)));
+    });
 
     // A keystroke refilters the table: rows move, appear and disappear. Typed, then cleared.
     g.throughput(Throughput::Elements(2));
@@ -57,7 +59,11 @@ fn interact(c: &mut Criterion) {
     // Startup's share: a new Ui, the first build and layout of every node.
     g.throughput(Throughput::Elements(1));
     g.bench_function("first_frame", |b| {
-        b.iter_batched(Shell::new, |s| black_box(Run::with(s)), BatchSize::LargeInput);
+        b.iter_batched(
+            Shell::new,
+            |s| black_box(Run::with(s)),
+            BatchSize::LargeInput,
+        );
     });
     g.finish();
 }

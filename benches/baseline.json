@@ -17,6 +17,11 @@
     "crates/dpro-app/benches/ir.rs table_100k::filter_rows.two_terms": 21222740,
     "crates/dpro-app/benches/ir.rs table_100k::sort_again.text": 176171797,
     "crates/dpro-app/benches/ir.rs table_100k::sort_first.size": 65591746,
-    "crates/dpro-app/benches/ir.rs table_100k::sort_first.text": 256792482
+    "crates/dpro-app/benches/ir.rs table_100k::sort_first.text": 256792482,
+    "crates/dpro-ui/benches/ir.rs interact::event.keystroke": 760127,
+    "crates/dpro-ui/benches/ir.rs interact::event.resize": 314949,
+    "crates/dpro-ui/benches/ir.rs interact::event.unchanged": 98593,
+    "crates/dpro-ui/benches/ir.rs interact::first_frame.shell": 513326,
+    "crates/dpro-ui/benches/ir.rs interact::session.scripted": 14634437
   }
 }

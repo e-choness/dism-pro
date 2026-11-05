@@ -18,7 +18,10 @@ const DATA: usize = 1_000;
 /// The text typed into the filter: 10 keystrokes.
 const TYPED: &str = "contoso up";
 
-pub(crate) const START: Size = Size { w: 1000.0, h: 700.0 };
+pub(crate) const START: Size = Size {
+    w: 1000.0,
+    h: 700.0,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Msg {
@@ -132,10 +135,7 @@ const TITLE: TextStyle = TextStyle {
     weight: 600,
     ..BODY
 };
-const MONO: TextStyle = TextStyle {
-    mono: true,
-    ..BODY
-};
+const MONO: TextStyle = TextStyle { mono: true, ..BODY };
 
 /// The whole page; the root's children.
 pub(crate) fn view(s: &Shell, cx: &mut Cx<'_, Msg>) {
@@ -151,7 +151,11 @@ pub(crate) fn view(s: &Shell, cx: &mut Cx<'_, Msg>) {
             cx.add(Element::text(Key::name("target"), "This PC (online)"));
             cx.add(Element::button(
                 Key::name("drawer"),
-                if s.drawer { "Hide changes" } else { "Review changes" },
+                if s.drawer {
+                    "Hide changes"
+                } else {
+                    "Review changes"
+                },
                 Msg::Drawer,
             ));
         },
@@ -211,12 +215,20 @@ fn content(s: &Shell, cx: &mut Cx<'_, Msg>) {
         }),
         |cx| {
             cx.add_with(Element::stack(Key::name("toolbar")).style(row(8.0)), |cx| {
-                let shown = if s.filter.is_empty() { "Filter" } else { &s.filter };
+                let shown = if s.filter.is_empty() {
+                    "Filter"
+                } else {
+                    &s.filter
+                };
                 cx.add(Element::text(Key::name("filter"), shown).style(Style {
                     width: Dim::Fixed(240.0),
                     ..Style::default()
                 }));
-                let selection = if s.selected.is_some() { "1 selected" } else { "" };
+                let selection = if s.selected.is_some() {
+                    "1 selected"
+                } else {
+                    ""
+                };
                 cx.add(Element::text(Key::name("selection"), selection));
                 for (c, name) in (0..CATEGORIES).zip(NAMES) {
                     let on = if s.categories[usize::from(c)] {
@@ -252,12 +264,12 @@ fn content(s: &Shell, cx: &mut Cx<'_, Msg>) {
                                 for (c, text) in (0..).zip(cells) {
                                     let style = if c == 2 || c == 7 { MONO } else { BODY };
                                     cx.add(
-                                        Element::text(Key::index(c), text)
-                                            .text_style(style)
-                                            .style(Style {
+                                        Element::text(Key::index(c), text).text_style(style).style(
+                                            Style {
                                                 grow: 1.0,
                                                 ..Style::default()
-                                            }),
+                                            },
+                                        ),
                                     );
                                 }
                             },
@@ -361,7 +373,12 @@ impl Run {
     /// characters into the filter, opening and closing the drawer, toggling a category on and off,
     /// and a resize from 1000 to 1400 px and back. It ends where it started, so it can repeat.
     pub(crate) fn session(&self) -> Vec<Step> {
-        let click = |p: Point| [Step::Input(Input::PointerDown(p)), Step::Input(Input::PointerUp(p))];
+        let click = |p: Point| {
+            [
+                Step::Input(Input::PointerDown(p)),
+                Step::Input(Input::PointerUp(p)),
+            ]
+        };
         let key = |code, down| {
             Step::Input(Input::Key(KeyEvent {
                 key: code,
