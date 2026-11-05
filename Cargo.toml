@@ -13,6 +13,7 @@ publish = false
 # New dependencies need a justification in the PR (coding standards §7).
 [workspace.dependencies]
 dpro-core = { path = "crates/dpro-core" }
+dpro-app = { path = "crates/dpro-app" }
 dpro-cli-fmt = { path = "crates/dpro-cli-fmt" }
 dpro-engine = { path = "crates/dpro-engine" }
 dpro-broker = { path = "crates/dpro-broker" }
@@ -52,6 +53,9 @@ criterion = "0.8.2"
 # Bench only: instruction counts under Callgrind, the deterministic gate (doc 04 §3). Apache-2.0 OR
 # MIT. Exact: it must match the gungraun-runner in docker/build.Dockerfile.
 gungraun = "=0.20.0"
+# Test only: counts allocations for the exact zero-allocations-per-frame gate (TD-0009 §7 U8), as a
+# safe global allocator (no `unsafe` outside dpro-sys/dpro-win). MIT, no dependencies.
+stats_alloc = "0.1.10"
 proptest = "1.12.0"
 # Dev only: the reference MCP client for conformance tests (TD-0013 §12), both protocol eras.
 # Apache-2.0; never linked into a shipped binary.
