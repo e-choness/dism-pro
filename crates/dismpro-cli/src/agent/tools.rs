@@ -10,7 +10,7 @@ use std::{
     convert::Infallible,
     fmt::Write as _,
     fs::File,
-    io::{self, BufRead, BufReader},
+    io::{self, BufReader},
     path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard, PoisonError},
 };
@@ -68,6 +68,11 @@ const NEXT_REPAIRABLE: &str =
     "health_diagnose shows what's wrong; health_repair_plan plans a repair.";
 const NEXT_NOT_REPAIRABLE: &str = "health_diagnose shows what's wrong. A repair needs a source the \
     store can't provide: health_repair_plan with sources (install.wim of the same build).";
+const NOTE_UNEXPLAINED: &str = "No log line explains this state: a quick check only reads the \
+    store's corruption flag. A full scan (dismpro-cli health scan, several minutes) logs the cause.";
+const NOTE_HOST_DISM_LOG: &str = "An offline image's servicing stack logs to this computer's DISM \
+    log, which every DISM session here shares: a line may be about another image or the running \
+    Windows. The image's own Windows\\Logs\\CBS\\CBS.log, if any, is from when it last ran.";
 const NOT_AVAILABLE: &str = "not_available: this version can't apply plans for agents. Applying \
     arrives with DISM Pro's approval card; until then the user can make the change with \
     dismpro-cli.";
@@ -259,16 +264,20 @@ impl BrokerTools {
             let t = Resolved::new(&target.sel).map_err(fail)?;
             let api = dism.api().map_err(fail)?;
             let session = t.open(api).map_err(fail)?;
-            let (state, rows) =
-                run::check_health(&session, &t.windows_dir, false, quiet(), &m).map_err(fail)?;
+            let (state, log, rows) =
+                run::check_health(&session, &t, false, quiet(), &m).map_err(fail)?;
             let preview = preview(&rows)?;
             let mut v = json!({
                 "target": target.shown,
                 "health": state,
+                "log": log.display().to_string(),
                 "findings": preview.items,
             });
             if preview.next_cursor.is_some() {
                 v["more_findings"] = json!(preview.matched);
+            }
+            if rows.is_empty() && state != ImageHealth::Healthy {
+                v["note"] = json!(NOTE_UNEXPLAINED);
             }
             if let Some(next) = health_next(state) {
                 v["next"] = json!(next);
@@ -277,20 +286,21 @@ impl BrokerTools {
         })?
     }
 
-    /// Findings in the end of the target's CBS.log, newest first.
+    /// Findings in the end of the log a health check of the target writes to
+    /// ([`run::health_log`]), newest first.
     fn diagnose(&self, target: &Target, list: &ListArgs) -> Result<Value, CallError> {
-        let t = Resolved::new(&target.sel).map_err(|e| failed(&e, &self.m))?;
-        let log = t.windows_dir.join("Logs").join("CBS").join("CBS.log");
-        let read = recent_findings(&log, DIAGNOSE_WINDOW)
-            .map_err(|e| failed(&CliError::io_at(&log, &e), &self.m))?;
+        let fail = |e: &CliError| failed(e, &self.m);
+        let t = Resolved::new(&target.sel).map_err(|e| fail(&e))?;
+        let (log, file) = run::health_log(&t).map_err(|e| fail(&e))?;
+        let read = recent_findings(&log, file, DIAGNOSE_WINDOW)
+            .map_err(|e| fail(&CliError::io_at(&log, &e)))?;
         let Some((mut findings, from_line)) = read else {
             return Ok(json!({
                 "target": target.shown,
                 "log": Value::Null,
                 "items": [],
                 "matched": 0,
-                "note": "This target has no CBS.log. An offline Windows keeps it only when it \
-                         was serviced while running.",
+                "note": format!("{} doesn't exist: nothing has been serviced here yet.", log.display()),
             }));
         };
         findings.reverse();
@@ -299,6 +309,9 @@ impl BrokerTools {
         v.insert("target".into(), json!(target.shown));
         v.insert("log".into(), json!(log.display().to_string()));
         v.insert("from_line".into(), json!(from_line));
+        if file == LogFile::Dism {
+            v.insert("note".into(), json!(NOTE_HOST_DISM_LOG));
+        }
         Ok(Value::Object(v))
     }
 
@@ -553,50 +566,17 @@ fn owned(plan: &Plan) -> Result<Made, CallError> {
 /// the file, and the first line read. `None` when the log doesn't exist.
 fn recent_findings(
     log: &Path,
+    file: LogFile,
     window: u64,
 ) -> io::Result<Option<(Vec<dpro_core::health::Finding>, u64)>> {
-    let file = match File::open(log) {
+    let f = match File::open(log) {
         Ok(f) => f,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e),
     };
-    let start = file.metadata()?.len().saturating_sub(window);
-    let mut reader = BufReader::with_capacity(64 << 10, file);
-    let mut lines_before = skip_bytes(&mut reader, start)?;
-    if start > 0 {
-        // Finish the line the window starts in, unless it starts on a line boundary.
-        let mut partial = Vec::new();
-        if reader.read_until(b'\n', &mut partial)? > 0 && partial.ends_with(b"\n") {
-            lines_before += 1;
-        }
-    }
-    let mut findings = logs::scan(reader, LogFile::Cbs)?;
-    for f in &mut findings {
-        f.source.first_line += lines_before;
-        f.source.last_line += lines_before;
-    }
-    Ok(Some((findings, lines_before + 1)))
-}
-
-/// Discards `n` bytes, counting the lines that end in them.
-fn skip_bytes(reader: &mut impl BufRead, mut n: u64) -> io::Result<u64> {
-    let mut lines = 0_u64;
-    while n > 0 {
-        let buf = reader.fill_buf()?;
-        if buf.is_empty() {
-            break;
-        }
-        let take = buf.len().min(usize::try_from(n).unwrap_or(usize::MAX));
-        #[expect(
-            clippy::naive_bytecount,
-            reason = "the compiler vectorizes this loop; not worth a dependency"
-        )]
-        let ends = buf[..take].iter().filter(|&&b| b == b'\n').count();
-        lines += u64::try_from(ends).unwrap_or(u64::MAX);
-        reader.consume(take);
-        n -= u64::try_from(take).unwrap_or(n);
-    }
-    Ok(lines)
+    let start = f.metadata()?.len().saturating_sub(window);
+    let reader = BufReader::with_capacity(64 << 10, f);
+    logs::scan_after(reader, start, file).map(Some)
 }
 
 /// How an agent reads a `CliError`: the same words the CLI prints. A usage error is the
@@ -660,20 +640,7 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
-
     use super::*;
-
-    #[test]
-    fn skipping_counts_whole_lines() {
-        let mut r = Cursor::new(b"a\nbb\nccc\n".to_vec());
-        assert_eq!(skip_bytes(&mut r, 5).unwrap(), 2);
-        let mut rest = String::new();
-        io::Read::read_to_string(&mut r, &mut rest).unwrap();
-        assert_eq!(rest, "ccc\n");
-        let mut r = Cursor::new(b"a\nb".to_vec());
-        assert_eq!(skip_bytes(&mut r, 100).unwrap(), 1);
-    }
 
     #[test]
     fn list_args_drop_the_target() {

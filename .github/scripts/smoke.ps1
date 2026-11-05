@@ -5,6 +5,9 @@ job, so this makes a real feature change and undoes it. Without -Target it servi
 from .github/scripts/offline-image.ps1. Spike S-02 found DISM can't service images inside a container,
 so T3 runs on the VM.
 
+With -Health it runs the Health & Repair checks instead (roadmap 2.6, TD-0006 §10): the full scan and,
+on an offline image, the repair. They take minutes, so CI runs them in a job of their own.
+
 Each check is reported in the log, in the job summary, and as one annotation (readable without signing
 in). Exits 1 if any check fails.
 #>
@@ -13,7 +16,8 @@ param(
     # Offline Windows root passed as --target; empty for the online OS.
     [string] $Target,
     # A small optional feature whose payload ships with Windows Server; no restart needed.
-    [string] $Feature = 'TelnetClient'
+    [string] $Feature = 'TelnetClient',
+    [switch] $Health
 )
 
 $ErrorActionPreference = 'Stop'
@@ -81,6 +85,139 @@ function Test-Step([string] $Name, [scriptblock] $Body) {
 }
 
 function Format-Annotation([string] $Text) { $Text.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A') }
+
+# Reports the results in the job summary and as one annotation, then exits 1 if any check failed.
+function Complete-Run([string] $Suite) {
+    $report = $results -join "`n"
+    $arch = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture
+    if ($env:GITHUB_STEP_SUMMARY) {
+        "### dismpro-cli $Suite ($arch runner VM, $targetName)`n``````n$report`n``````" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+    }
+    $kind = if ($failures) { 'error' } else { 'notice' }
+    Write-Host "::$kind title=dismpro-cli $Suite $arch $targetName ($failures failed)::$(Format-Annotation $report)"
+    exit [int] [bool] $failures
+}
+
+function Format-Duration([Diagnostics.Stopwatch] $Watch) { '{0:N1} min' -f $Watch.Elapsed.TotalMinutes }
+
+if ($Health) {
+    # Where a check explains itself (TD-0006 §7): online, the running Windows's CBS.log; offline, the
+    # runner's dism.log, because DISM runs the image's servicing stack in its own process and the
+    # image's CBS.log stays untouched (run 41670190046 found the CSI line there).
+    $logs = [ordered] @{
+        'runner CBS.log' = Join-Path $env:SystemRoot 'Logs\CBS\CBS.log'
+        'runner dism.log' = Join-Path $env:SystemRoot 'Logs\DISM\dism.log'
+    }
+    $explains = if ($Target) { $logs['runner dism.log'] } else { $logs['runner CBS.log'] }
+    function Get-LogSize([string] $Path) { if (Test-Path $Path) { (Get-Item $Path).Length } else { -1 } }
+
+    # What a log gained past $From bytes, for the annotation when a scan goes unexplained.
+    function Get-LogTail([string] $Path, [long] $From) {
+        if ((Get-LogSize $Path) -le $From) { return '(nothing)' }
+        $s = [IO.File]::Open($Path, 'Open', 'Read', 'ReadWrite, Delete')
+        try {
+            $null = $s.Seek([math]::Max($From, 0), 'Begin')
+            ([IO.StreamReader]::new($s)).ReadToEnd().TrimEnd()
+        } finally { $s.Dispose() }
+    }
+
+    function Format-Health($Doc) {
+        $kinds = @($Doc.findings | Group-Object diagnosis | ForEach-Object { "$($_.Name) x$($_.Count)" }) -join ', '
+        "$($Doc.state), $(@($Doc.findings).Count) finding(s) [$kinds]"
+    }
+
+    # Checks a health.v1 document: findings read from the right log, and no damage reported on a
+    # healthy store (a bare "Payload Corrupt" pattern read the scan summary's zero counts as damage,
+    # run 41670190046). Returns whether a state that isn't healthy went unexplained.
+    function Test-Health($Doc, [string] $Summary) {
+        if ($Doc.log -ne $explains) { throw "findings read from $($Doc.log), expected $explains; $Summary" }
+        $damage = @($Doc.findings | Where-Object diagnosis -In 'health-finding-payload-corrupt', 'health-finding-store-corrupt')
+        if ($Doc.state -eq 'healthy' -and $damage.Count) { throw "healthy, yet $($damage.Count) damage finding(s): $Summary" }
+        $Doc.state -ne 'healthy' -and -not @($Doc.findings).Count
+    }
+
+    # A quick check reads only the store's flag, so it may go unexplained; the text output then says
+    # to run a scan.
+    Test-Step 'health check' {
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        $d = Get-Doc (Invoke-Cli 'health', 'check') 'health.v1'
+        $summary = "$(Format-Health $d), $(Format-Duration $sw)"
+        if (Test-Health $d $summary) {
+            $text = (& $Cli 'health', 'check' @targetArgs 2> $errFile) -join "`n"
+            if ($LASTEXITCODE -ne 0 -or $text -notmatch '"health scan"') {
+                throw "unexplained, and the text output (exit $LASTEXITCODE) doesn't suggest a scan: $text"
+            }
+            $summary += '; unexplained, and the text output suggests "health scan"'
+        }
+        $summary
+    }
+
+    $script:scanState = $null
+    Test-Step 'health scan' {
+        $before = @{}; foreach ($k in $logs.Keys) { $before[$k] = Get-LogSize $logs[$k] }
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        $d = Get-Doc (Invoke-Cli 'health', 'scan') 'health.v1'
+        $took = Format-Duration $sw
+        $growth = foreach ($k in $logs.Keys) {
+            $after = Get-LogSize $logs[$k]
+            if ($after -lt 0) { "$k missing" } else { "$k +$($after - [math]::Max($before[$k], 0)) B" }
+        }
+        $script:scanState = $d.state
+        $summary = "$(Format-Health $d), $took; $($growth -join ', ')"
+        # Any state is the store's business (a container base layer is trimmed, so it can be
+        # repairable); a state that isn't healthy and that no finding explains is ours (TD-0006 §5.2).
+        if (Test-Health $d $summary) {
+            $key = if ($Target) { 'runner dism.log' } else { 'runner CBS.log' }
+            Write-Host "::notice title=unexplained health scan ($targetName)::$(Format-Annotation (Get-LogTail $explains $before[$key]))"
+            throw "nothing explains it: $summary"
+        }
+        $summary
+    }
+    if ($Target) {
+        $script:repaired = $false
+        # A restore either repairs the store or, without a usable source, fails with 0x800f0915 ("The
+        # repair content could not be found anywhere") as one failed change in a recorded job.
+        function Invoke-Restore([string[]] $Extra) {
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            $docs = Invoke-Cli (@('health', 'restore', '--limit-access', '--yes', '--allow-irreversible') + $Extra) -Expect 0, 1
+            $took = Format-Duration $sw
+            $job = Get-Doc $docs 'job.v1'
+            $codes = @($job.failed | ForEach-Object code)
+            $shape = "job $($job.job) $($job.status), applied $(@($job.applied).Count), failed [$($codes -join ', ')], exit $script:lastExit, $took"
+            if ($job.status -ne 'completed') { throw $shape }
+            if ($script:lastExit -eq 0 -and @($job.applied).Count -eq 1 -and -not $codes.Count) {
+                $script:repaired = $true
+                return "repaired, reboot_required=$($job.reboot_required): $shape"
+            }
+            if ($script:lastExit -eq 1 -and $codes.Count -eq 1 -and $codes[0] -eq '0x800f0915') {
+                return "no usable repair source: $shape"
+            }
+            throw $shape
+        }
+        Test-Step 'health restore needs --allow-irreversible' {
+            $plan = Get-Doc (Invoke-Cli 'health', 'restore', '--limit-access', '--yes' -Expect 3) 'plan.v1'
+            if ($plan.summary.irreversible -ne 1) { throw "summary $($plan.summary | ConvertTo-Json -Compress)" }
+            "exit 3, $($plan.summary.changes) change(s) planned, $($plan.summary.irreversible) permanent"
+        }
+        Test-Step 'health restore --limit-access' { Invoke-Restore @() }
+        if (-not $script:repaired) {
+            # The runner's own Windows as the source: it repairs only if its build matches the image's.
+            Test-Step 'health restore --source <runner Windows>' { Invoke-Restore @('--source', $env:SystemRoot) }
+        }
+        Test-Step 'journal list (restore)' {
+            $last = @((Get-Doc (Invoke-Cli 'journal', 'list') 'journals.v1').jobs)[-1]
+            if ($last.op -ne 'health.restore' -or $last.status -ne 'completed') { throw ($last | ConvertTo-Json -Compress) }
+            "last job: $($last.op), $($last.status)"
+        }
+        Test-Step 'health check after restore' {
+            $d = Get-Doc (Invoke-Cli 'health', 'check') 'health.v1'
+            $want = if ($script:repaired) { 'healthy' } else { $script:scanState }
+            if ($want -and $d.state -ne $want) { throw "state $($d.state), expected $want" }
+            "$($d.state) (repaired=$script:repaired, scan said $script:scanState)"
+        }
+    }
+    Complete-Run 'health'
+}
 
 Test-Step 'targets list' {
     $d = Get-Doc (Invoke-Cli 'targets', 'list') 'targets.v1'
@@ -395,11 +532,4 @@ Test-Step 'purge' {
     "removed $(@((Get-Doc $docs 'plan.v1').changes).Count) item(s)"
 }
 
-$report = $results -join "`n"
-$arch = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture
-if ($env:GITHUB_STEP_SUMMARY) {
-    "### dismpro-cli smoke ($arch runner VM, $targetName)`n``````n$report`n``````" | Out-File $env:GITHUB_STEP_SUMMARY -Append
-}
-$kind = if ($failures) { 'error' } else { 'notice' }
-Write-Host "::$kind title=dismpro-cli smoke $arch $targetName ($failures failed)::$(Format-Annotation $report)"
-exit [int] [bool] $failures
+Complete-Run 'smoke'

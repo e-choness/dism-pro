@@ -17,6 +17,10 @@
     "scanned": {
       "type": "boolean"
     },
+    "log": {
+      "description": "The log the findings' line numbers refer to: the running Windows's CBS.log, or for an offline image the servicing host's dism.log.",
+      "type": "string"
+    },
     "findings": {
       "type": "array",
       "items": {

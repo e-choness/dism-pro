@@ -2,6 +2,10 @@
 //! panics: logs are untrusted input read by an elevated process (fuzz targets in Phase 6).
 //!
 //! Line shape (undocumented, tolerant parsing): `2026-10-01 12:00:00, Info  CBS  message`.
+//!
+//! In dism.log only the servicing stack's own lines count (timestamped, component `CBS` or
+//! `CSI`): DISM writes them there when it services an offline image, while its
+//! `[pid.tid] [hr] Function:(line)` probe lines are noise (TD-0006 §7, run 41670190046).
 
 use std::io::BufRead;
 
@@ -69,10 +73,10 @@ fn looks_like_timestamp(s: &str) -> bool {
         })
 }
 
-/// The first `HRESULT = 0x…` / `hr = 0x…` code in `text`.
+/// The first `HRESULT = 0x…` / `hr = 0x…` / `(hr:0x…)` / `gle=0x…` code in `text`.
 #[must_use]
 pub fn hresult_in(text: &str) -> Option<i32> {
-    for marker in ["HRESULT = 0x", "hr = 0x", "hr: 0x"] {
+    for marker in ["HRESULT = 0x", "hr = 0x", "hr: 0x", "(hr:0x", "[gle=0x"] {
         if let Some(pos) = find_ignore_case(text, marker) {
             let digits = text.get(pos + marker.len()..)?.get(..8)?;
             let value = u32::from_str_radix(digits, 16).ok()?;
@@ -110,12 +114,30 @@ const DECODE: &[(u32, &str, Severity)] = &[
     (0x8007_0005, "health-finding-access-denied", Severity::Error),
 ];
 
-/// Text patterns without an HRESULT (verify on real logs).
-const PATTERNS: &[(&str, &str, Severity)] = &[(
-    "Payload Corrupt",
-    "health-finding-payload-corrupt",
-    Severity::Warning,
-)];
+/// Text patterns: every needle must appear in the line; the first matching row wins. They
+/// stay narrow on purpose: CBS's end-of-scan summary (`CSI Payload Corruption:\t0`) names
+/// the same things with a count of zero, and a bare `Payload Corrupt` matched it on a healthy
+/// image (run 41670190046).
+const PATTERNS: &[(&[&str], &str, Severity)] = &[
+    // CSI marking the store corrupt, as an offline scan logs it to dism.log (run 41670190046):
+    // `(F) Attempting to mark store corrupt with category [l:18 ml:19]'CorruptPayloadFile'[gle=…]`.
+    (
+        &["mark store corrupt", "'CorruptPayloadFile'"],
+        "health-finding-payload-corrupt",
+        Severity::Error,
+    ),
+    (
+        &["mark store corrupt"],
+        "health-finding-store-corrupt",
+        Severity::Error,
+    ),
+    // One damaged file in the scan's detail list: `(p)\tCSI Payload Corrupt\t\t\t<component>`.
+    (
+        &["(p)", "CSI Payload Corrupt"],
+        "health-finding-payload-corrupt",
+        Severity::Warning,
+    ),
+];
 
 /// The diagnosis (a Fluent id that names the next step) and severity of a known HRESULT, as
 /// findings use them; `None` for a code the table doesn't know.
@@ -127,27 +149,44 @@ pub fn diagnosis_for(code: u32) -> Option<(&'static str, Severity)> {
         .map(|(_, id, sev)| (*id, *sev))
 }
 
-fn classify(line: &LogLine<'_>) -> Option<(&'static str, Severity, Option<i32>)> {
-    let code = hresult_in(line.text);
-    if let Some(c) = code {
-        let bits = u32::from_ne_bytes(c.to_ne_bytes());
-        if let Some((id, sev)) = diagnosis_for(bits) {
-            return Some((id, sev, code));
-        }
-        // An unknown failure code on an error line is still worth showing.
-        let is_error = line.level.is_some_and(|l| l.eq_ignore_ascii_case("Error"));
-        if is_error && bits & 0x8000_0000 != 0 {
-            return Some(("health-finding-unknown-error", Severity::Error, code));
+/// Whether a line of `file` can be a finding at all: in dism.log, only the servicing stack's
+/// timestamped CBS and CSI lines.
+fn counts(file: LogFile, line: &LogLine<'_>) -> bool {
+    match file {
+        LogFile::Cbs => true,
+        LogFile::Dism => {
+            line.timestamp.is_some()
+                && line
+                    .component
+                    .is_some_and(|c| c.eq_ignore_ascii_case("CBS") || c.eq_ignore_ascii_case("CSI"))
         }
     }
-    PATTERNS
-        .iter()
-        .find(|(p, ..)| find_ignore_case(line.text, p).is_some())
-        .map(|(_, id, sev)| (*id, *sev, code))
+}
+
+/// A known code first, then a pattern (carrying the line's code, if any), then an unknown
+/// failure code on an error line.
+fn classify(line: &LogLine<'_>) -> Option<(&'static str, Severity, Option<i32>)> {
+    let code = hresult_in(line.text);
+    let bits = code.map(|c| u32::from_ne_bytes(c.to_ne_bytes()));
+    if let Some((id, sev)) = bits.and_then(diagnosis_for) {
+        return Some((id, sev, code));
+    }
+    if let Some((_, id, sev)) = PATTERNS.iter().find(|(needles, ..)| {
+        needles
+            .iter()
+            .all(|n| find_ignore_case(line.text, n).is_some())
+    }) {
+        return Some((id, *sev, code));
+    }
+    // An unknown failure code on an error line is still worth showing.
+    let is_error = line.level.is_some_and(|l| l.eq_ignore_ascii_case("Error"));
+    bits.filter(|b| is_error && b & 0x8000_0000 != 0)
+        .map(|_| ("health-finding-unknown-error", Severity::Error, code))
 }
 
 /// Scans a whole log. Consecutive lines with the same diagnosis and code collapse into one
-/// finding spanning their line range.
+/// finding spanning their line range. `file` says which log it is: a dism.log counts only the
+/// servicing stack's lines (see the module docs).
 ///
 /// # Errors
 /// I/O errors from `reader`.
@@ -163,6 +202,9 @@ pub fn scan<R: BufRead>(mut reader: R, file: LogFile) -> std::io::Result<Vec<Fin
         line_no += 1;
         let text = String::from_utf8_lossy(&buf);
         let line = parse_line(text.trim_end_matches(['\r', '\n']));
+        if !counts(file, &line) {
+            continue;
+        }
         let Some((diagnosis, severity, code)) = classify(&line) else {
             continue;
         };
@@ -190,6 +232,56 @@ pub fn scan<R: BufRead>(mut reader: R, file: LogFile) -> std::io::Result<Vec<Fin
         });
     }
     Ok(findings)
+}
+
+/// Scans a log after its first `skip` bytes, numbering lines from the start of the log; the
+/// bytes before are read only to count their lines. A `skip` inside a line drops the rest of
+/// that line, since it can't be parsed. Returns the findings and the number of the first line
+/// scanned.
+///
+/// # Errors
+/// I/O errors from `reader`.
+pub fn scan_after<R: BufRead>(
+    mut reader: R,
+    skip: u64,
+    file: LogFile,
+) -> std::io::Result<(Vec<Finding>, u64)> {
+    let (mut lines_before, mid_line) = skip_counting_lines(&mut reader, skip)?;
+    if mid_line {
+        let mut rest = Vec::new();
+        if read_bounded_line(&mut reader, &mut rest)? > 0 {
+            lines_before += 1;
+        }
+    }
+    let mut findings = scan(reader, file)?;
+    for f in &mut findings {
+        f.source.first_line += lines_before;
+        f.source.last_line += lines_before;
+    }
+    Ok((findings, lines_before + 1))
+}
+
+/// Discards up to `n` bytes, counting the lines that end in them. Also says whether it
+/// stopped inside a line.
+fn skip_counting_lines<R: BufRead>(reader: &mut R, mut n: u64) -> std::io::Result<(u64, bool)> {
+    let (mut lines, mut mid_line) = (0_u64, false);
+    while n > 0 {
+        let buf = reader.fill_buf()?;
+        if buf.is_empty() {
+            break;
+        }
+        let take = buf.len().min(usize::try_from(n).unwrap_or(usize::MAX));
+        #[expect(
+            clippy::naive_bytecount,
+            reason = "the compiler vectorizes this loop; not worth a dependency"
+        )]
+        let ends = buf[..take].iter().filter(|&&b| b == b'\n').count();
+        lines += u64::try_from(ends).unwrap_or(u64::MAX);
+        mid_line = buf[take - 1] != b'\n';
+        reader.consume(take);
+        n -= u64::try_from(take).unwrap_or(n);
+    }
+    Ok((lines, mid_line))
 }
 
 /// Reads up to and including `\n`, keeping at most [`MAX_LINE`] bytes (the rest of an
@@ -241,7 +333,7 @@ mod tests {
 2026-10-01 12:00:01, Error                 CBS    Failed to resolve package [HRESULT = 0x800f081f - CBS_E_SOURCE_MISSING]
 2026-10-01 12:00:01, Error                 CBS    Failed again [HRESULT = 0x800f081f - CBS_E_SOURCE_MISSING]
 2026-10-01 12:00:02, Error                 CBS    Something else [HRESULT = 0x80041234 - UNKNOWN]
-2026-10-01 12:00:03, Info                  CSI    (p)	CSI Payload Corrupt  amd64_foo
+2026-10-01 12:00:03, Info                  CSI    (p)	CSI Payload Corrupt			amd64_foo
 ";
         let f = scan(log.as_bytes(), LogFile::Cbs).unwrap();
         assert_eq!(f.len(), 3, "{f:?}");
@@ -265,6 +357,118 @@ mod tests {
         let f = scan(log.as_slice(), LogFile::Cbs).unwrap();
         assert_eq!(f.len(), 1);
         assert_eq!(f[0].source.first_line, 2);
+    }
+
+    /// The runner's dism.log, written during an offline scan of a container base layer
+    /// (run 41670190046): one CSI line explains the repairable state; the probe lines and
+    /// DISM's own lines don't count.
+    #[test]
+    fn an_offline_scan_is_explained_by_dism_log() {
+        let log = "\
+[7440.8596] [0x80070002] FIOReadFileIntoBuffer:(1454): The system cannot find the file specified.
+[7440.8596] [0xc142011c] UnmarshallImageHandleFromDirectory:(641)
+[7440.8596] [0xc142011c] WIMGetMountedImageHandle:(2910)
+2026-11-03 16:25:01, Error                 CSI    000000b2@2026/11/3:16:25:01.867 (F) Attempting to mark store corrupt with category [l:18 ml:19]'CorruptPayloadFile'[gle=0x80004005]
+2026-11-03 16:25:09, Info                  DISM   PID=7440 TID=2192 Scratch directory set to 'C:\\Users\\RUNNER~1\\AppData\\Local\\Temp\\'. - CDISMManager::put_ScratchDir
+2026-11-03 16:25:10, Error                 DISM   DISM Package Manager: PID=7440 TID=2192 Failed to restore. - CDISMPackageManager::RestoreHealth(hr:0x800f081f)
+";
+        let f = scan(log.as_bytes(), LogFile::Dism).unwrap();
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!(f[0].diagnosis, "health-finding-payload-corrupt");
+        assert_eq!(f[0].severity, Severity::Error);
+        let e_fail = i32::from_ne_bytes(0x8000_4005_u32.to_ne_bytes());
+        assert_eq!(f[0].code.map(|c| c.code), Some(e_fail));
+        assert_eq!(
+            f[0].source,
+            LogRef {
+                file: LogFile::Dism,
+                first_line: 4,
+                last_line: 4
+            }
+        );
+        // The same lines in a CBS.log all count, DISM's `hr:` included.
+        let all = scan(log.as_bytes(), LogFile::Cbs).unwrap();
+        assert_eq!(all.len(), 2, "{all:?}");
+        assert_eq!(all[1].diagnosis, "health-finding-source-missing");
+    }
+
+    /// CBS's summary at the end of a scan that found nothing, from the healthy online runner
+    /// (run 41670190046): a bare `Payload Corrupt` pattern reported it as damage.
+    #[test]
+    fn a_clean_scan_summary_is_not_a_finding() {
+        let log = "\
+2026-11-03 16:15:40, Info                  CSI    0000000a@2026/11/3:16:15:40.666 Corruption detection complete. numCorruptions = 0, Disp = 1.
+2026-11-03 16:15:47, Info                  CBS    Summary:
+2026-11-03 16:15:47, Info                  CBS    Total Detected Corruption:\t0
+2026-11-03 16:15:47, Info                  CBS    \tCSI Manifest Corruption:\t0
+2026-11-03 16:15:47, Info                  CBS    \tCSI Metadata Corruption:\t0
+2026-11-03 16:15:47, Info                  CBS    \tCSI Payload Corruption:\t0
+2026-11-03 16:15:47, Info                  CBS    Total Repaired Corruption:\t0
+2026-10-30 07:18:29, Info                  CBS    CbsCoreStopIdleProcessing is not implemented. [HRESULT = 0x80004001 - E_NOTIMPL]
+";
+        assert_eq!(scan(log.as_bytes(), LogFile::Cbs).unwrap(), Vec::new());
+        assert_eq!(scan(log.as_bytes(), LogFile::Dism).unwrap(), Vec::new());
+    }
+
+    #[test]
+    fn skipping_counts_whole_lines() {
+        let mut r = std::io::Cursor::new(b"a\nbb\nccc\n".to_vec());
+        assert_eq!(skip_counting_lines(&mut r, 5).unwrap(), (2, false));
+        let mut rest = String::new();
+        std::io::Read::read_to_string(&mut r, &mut rest).unwrap();
+        assert_eq!(rest, "ccc\n");
+        let mut r = std::io::Cursor::new(b"a\nbb\nccc\n".to_vec());
+        assert_eq!(skip_counting_lines(&mut r, 4).unwrap(), (1, true));
+        let mut r = std::io::Cursor::new(b"a\nb".to_vec());
+        assert_eq!(skip_counting_lines(&mut r, 100).unwrap(), (1, true));
+    }
+
+    #[test]
+    fn scanning_after_a_point_numbers_lines_from_the_top() {
+        let log = "\
+2026-10-01 12:00:00, Error                 CBS    old [HRESULT = 0x800f081f]
+2026-10-01 12:00:01, Info                  CBS    old
+2026-10-01 12:00:02, Error                 CBS    new [HRESULT = 0x80070005]
+";
+        let boundary = u64::try_from(log.find("2026-10-01 12:00:02").unwrap()).unwrap();
+        let (f, first) = scan_after(log.as_bytes(), boundary, LogFile::Cbs).unwrap();
+        assert_eq!(first, 3);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!(f[0].diagnosis, "health-finding-access-denied");
+        assert_eq!((f[0].source.first_line, f[0].source.last_line), (3, 3));
+        // Inside the first line: its rest is dropped, and the old line 1 isn't a finding.
+        let (f, first) = scan_after(log.as_bytes(), 5, LogFile::Cbs).unwrap();
+        assert_eq!((first, f.len()), (2, 1));
+        assert_eq!(f[0].source.first_line, 3);
+        // Nothing to skip, and a skip past the end.
+        assert_eq!(
+            scan_after(log.as_bytes(), 0, LogFile::Cbs).unwrap().0.len(),
+            2
+        );
+        assert_eq!(
+            scan_after(log.as_bytes(), 1 << 20, LogFile::Cbs).unwrap(),
+            (Vec::new(), 4)
+        );
+    }
+
+    #[test]
+    fn marking_the_store_corrupt_names_the_category() {
+        let line = |category: &str| {
+            format!(
+                "2026-11-03 16:25:01, Error                 CSI    000000b2 (F) Attempting to \
+                 mark store corrupt with category [l:18 ml:19]'{category}'[gle=0x80004005]\n"
+            )
+        };
+        let payload = scan(line("CorruptPayloadFile").as_bytes(), LogFile::Dism).unwrap();
+        assert_eq!(payload[0].diagnosis, "health-finding-payload-corrupt");
+        let other = scan(line("CorruptComponentValue").as_bytes(), LogFile::Dism).unwrap();
+        assert_eq!(other[0].diagnosis, "health-finding-store-corrupt");
+        let detail = "(p)\tCSI Payload Corrupt\t\t\tamd64_foo_31bf3856ad364e35\\foo.dll\n";
+        let listed = scan(detail.as_bytes(), LogFile::Cbs).unwrap();
+        assert_eq!(listed[0].diagnosis, "health-finding-payload-corrupt");
+        assert_eq!(listed[0].severity, Severity::Warning);
+        let not_found = i32::from_ne_bytes(0x8007_0002_u32.to_ne_bytes());
+        assert_eq!(hresult_in("x [gle=0x80070002]"), Some(not_found));
     }
 
     proptest! {
