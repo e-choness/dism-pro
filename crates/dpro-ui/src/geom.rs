@@ -89,6 +89,19 @@ impl Rect {
             y1: px((self.bottom() * scale).ceil()),
         }
     }
+
+    /// The physical pixels painting fills for this rectangle at `scale`: each edge rounded to the
+    /// nearest pixel boundary, so fills and hairlines are crisp. Always inside [`Rect::to_px`],
+    /// which damage uses.
+    #[must_use]
+    pub fn snap(&self, scale: f32) -> RectPx {
+        RectPx {
+            x0: px((self.x * scale).round()),
+            y0: px((self.y * scale).round()),
+            x1: px((self.right() * scale).round()),
+            y1: px((self.bottom() * scale).round()),
+        }
+    }
 }
 
 /// `as` from a float saturates at the integer's bounds and maps NaN to 0, which is what a pixel
@@ -152,6 +165,12 @@ impl RectPx {
                 && other.y0 >= self.y0
                 && other.x1 <= self.x1
                 && other.y1 <= self.y1)
+    }
+
+    /// Whether pixel `(x, y)` is inside.
+    #[must_use]
+    pub fn contains_px(&self, x: i32, y: i32) -> bool {
+        x >= self.x0 && x < self.x1 && y >= self.y0 && y < self.y1
     }
 
     /// Area in pixels; 0 when empty.
@@ -234,6 +253,30 @@ mod tests {
         let huge = Rect::new(0.0, 0.0, f32::INFINITY, f32::NAN);
         assert_eq!(huge.to_px(1.0).x1, i32::MAX);
         assert_eq!(huge.to_px(1.0).y1, 0);
+    }
+
+    #[test]
+    fn snapping_rounds_edges_inside_the_damage() {
+        let r = Rect::new(10.25, 5.5, 20.0, 10.0);
+        assert_eq!(
+            r.snap(1.5),
+            RectPx {
+                x0: 15,
+                y0: 8,
+                x1: 45,
+                y1: 23
+            }
+        );
+        for scale in [1.0, 1.25, 1.5, 1.75, 2.0] {
+            assert!(r.to_px(scale).contains(r.snap(scale)), "{scale}");
+        }
+        let px = RectPx {
+            x0: 0,
+            y0: 0,
+            x1: 2,
+            y1: 2,
+        };
+        assert!(px.contains_px(1, 0) && !px.contains_px(2, 0));
     }
 
     #[test]

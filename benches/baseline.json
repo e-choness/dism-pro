@@ -18,10 +18,17 @@
     "crates/dpro-app/benches/ir.rs table_100k::sort_again.text": 176171797,
     "crates/dpro-app/benches/ir.rs table_100k::sort_first.size": 65591746,
     "crates/dpro-app/benches/ir.rs table_100k::sort_first.text": 256792482,
-    "crates/dpro-ui/benches/ir.rs interact::event.keystroke": 760127,
-    "crates/dpro-ui/benches/ir.rs interact::event.resize": 314949,
-    "crates/dpro-ui/benches/ir.rs interact::event.unchanged": 98593,
-    "crates/dpro-ui/benches/ir.rs interact::first_frame.shell": 513326,
-    "crates/dpro-ui/benches/ir.rs interact::session.scripted": 14634437
+    "crates/dpro-ui/benches/ir.rs interact::event.keystroke": 777360,
+    "crates/dpro-ui/benches/ir.rs interact::event.resize": 328487,
+    "crates/dpro-ui/benches/ir.rs interact::event.unchanged": 112138,
+    "crates/dpro-ui/benches/ir.rs interact::first_frame.shell": 528556,
+    "crates/dpro-ui/benches/ir.rs interact::session.scripted": 15708613,
+    "crates/dpro-ui/benches/ir.rs paint::painted_event.keystroke": 3386301,
+    "crates/dpro-ui/benches/ir.rs paint::painted_event.resize": 4252615,
+    "crates/dpro-ui/benches/ir.rs paint::painted_event.unchanged": 147951,
+    "crates/dpro-ui/benches/ir.rs paint::painted_first_frame.shell": 3833660,
+    "crates/dpro-ui/benches/ir.rs paint::painted_session.scripted": 66200900,
+    "crates/dpro-ui/benches/ir.rs paint::repaint_all.dark_150": 5773110,
+    "crates/dpro-ui/benches/ir.rs paint::repaint_all.light_100": 3263709
   }
 }

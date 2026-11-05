@@ -6,17 +6,19 @@
 //!
 //! The toolkit core is a retained, keyed element tree that views rebuild cheaply each frame, with
 //! flexbox-subset layout, pointer and keyboard input, focus, damage tracking and an animation
-//! clock. It is platform-free, has no `unsafe`, and runs in T1 against [`FakeText`]. Painting, the
-//! accessibility tree and the Win32 platform build on it in later slices (TD-0009 §11).
+//! clock, and paints on a software [`Canvas`] in [`Theme`] colors. It is platform-free, has no `unsafe`,
+//! and runs in T1 against [`FakeText`]. The accessibility tree and the Win32 platform build on it
+//! in later slices (TD-0009 §11).
 //!
 //! A frame, on the UI thread:
 //! 1. [`Ui::dispatch`] turns input into the view's messages, and the app updates its view-model.
 //! 2. [`Ui::build`] reconciles the view's description of the page with the retained tree.
 //! 3. [`Ui::layout`] lays out what changed and records the damage.
-//! 4. The presenter repaints [`Ui::damage`] and calls [`Ui::clear_damage`].
+//! 4. [`Ui::paint`] repaints [`Ui::damage`] into the canvas; the presenter shows it and calls
+//!    [`Ui::clear_damage`].
 //!
 //! ```
-//! use dpro_ui::{Element, FakeText, Input, Key, Motion, Size, Ui};
+//! use dpro_ui::{Canvas, Element, FakeText, Input, Key, Motion, Size, Theme, Ui};
 //!
 //! #[derive(Clone, Debug, PartialEq)]
 //! enum Msg {
@@ -29,6 +31,14 @@
 //! });
 //! ui.layout(&mut FakeText);
 //!
+//! // Paint the frame, in the light theme, into window-sized pixels; a presenter would show the
+//! // damage, then clear it.
+//! let (w, h) = ui.pixel_size();
+//! let mut pixels = vec![0; (w * h) as usize];
+//! let mut canvas = Canvas::new(&mut pixels, w, h).unwrap();
+//! ui.paint(&mut canvas, &mut FakeText, &Theme::LIGHT);
+//! ui.clear_damage();
+//!
 //! let save = ui.find(&[Key::name("save")]).and_then(|id| ui.info(id)).unwrap();
 //! let at = save.rect.center();
 //! let mut msgs = Vec::new();
@@ -40,21 +50,26 @@
 #![forbid(unsafe_code)]
 
 mod build;
+mod canvas;
 mod damage;
 mod geom;
 mod input;
 mod layout;
+mod paint;
 mod pool;
 mod style;
 mod text;
+mod theme;
 mod tree;
 mod ui;
 
 pub use build::Cx;
+pub use canvas::Canvas;
 pub use dpro_app::table::Tri;
 pub use geom::{Insets, Point, Rect, RectPx, Size};
 pub use input::{Input, KeyCode, KeyEvent, Mods};
 pub use style::{Align, Axis, Dim, Justify, Style};
-pub use text::{FakeText, TextMeasure, TextMetrics, TextStyle};
-pub use tree::{Element, Key, NodeId, NodeInfo, Role};
+pub use text::{FakeText, GlyphSink, Icon, TextMetrics, TextStyle, TextSystem};
+pub use theme::{Color, Scheme, Theme, Tone, tokens};
+pub use tree::{Element, Key, Look, NodeId, NodeInfo, Radius, Role};
 pub use ui::{Motion, Ui};
