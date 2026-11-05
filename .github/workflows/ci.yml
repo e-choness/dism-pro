@@ -122,6 +122,13 @@ jobs:
             Write-Host "::$kind title=$($run.Title) (real Windows, exit $code)::$text"
           }
           exit $failed
+      - name: G1 UI gates (startup, idle)
+        # TD-0009 §7 against bare_window in this job: U4 startup <= 3x, U6 no timer or paint once
+        # settled, U7 idle working set <= 40 MiB.
+        if: ${{ !cancelled() }}
+        timeout-minutes: 10
+        shell: pwsh
+        run: ./.github/scripts/ui-gates.ps1 -Bin dist-t3 -Out ui-gates
       - name: T3 WIMGAPI (wim_t3 probe)
         # Wine has no wimgapi.dll: WimFile against WIMs and an ESD that dism.exe captures (roadmap 2.3).
         if: ${{ !cancelled() }}

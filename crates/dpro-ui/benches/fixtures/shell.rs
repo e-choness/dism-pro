@@ -16,7 +16,7 @@
 use dpro_ui::{
     Align, Axis, Canvas, Cx, Dim, Element, FakeText, Input, Insets, Justify, Key, KeyCode,
     KeyEvent, Look, Mods, Motion, Point, Radius, Size, Style, TextStyle, Theme, Tone, Tri, Ui,
-    accesskit::TreeUpdate,
+    accesskit::TreeUpdate, tokens,
 };
 
 const RAIL: u8 = 12;
@@ -492,7 +492,13 @@ impl Run {
 
     fn new(shell: Shell, scale: f32, theme: Option<Theme>) -> Self {
         let mut run = Self {
-            ui: Ui::new(START, scale, Motion { hover_ms: 120 }),
+            ui: Ui::new(
+                START,
+                scale,
+                Motion {
+                    hover_ms: tokens::motion::HOVER_MS,
+                },
+            ),
             shell,
             text: FakeText,
             msgs: Vec::with_capacity(4),

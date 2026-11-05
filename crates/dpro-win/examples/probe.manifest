@@ -1,7 +1,9 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<!-- Embedded in the dpro-win examples (the T3 probes) by build.rs, for the reason
+<!-- Embedded in the dpro-win examples (the T3 probes and bare_window) by build.rs, for the reason
      dismpro-cli.manifest gives: without supportedOS, Windows answers version queries as
-     Windows 8, and DISM refuses a Windows 10+ offline image with 0x80070032. -->
+     Windows 8, and DISM refuses a Windows 10+ offline image with 0x80070032.
+     Per-monitor DPI awareness (v2) is for bare_window, which must create its window the way the
+     GUI does (TD-0009 §5.1); the console probes create none. -->
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
   <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
     <application>
@@ -19,6 +21,8 @@
   <application xmlns="urn:schemas-microsoft-com:asm.v3">
     <windowsSettings>
       <longPathAware xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">true</longPathAware>
+      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/pm</dpiAware>
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2, PerMonitor</dpiAwareness>
     </windowsSettings>
   </application>
 </assembly>

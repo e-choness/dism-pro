@@ -1,5 +1,6 @@
 //! Safe wrappers over Windows APIs: DISM session, WIM handle, registry, VSS, BCD, WUA, MSI,
-//! ETW, SCM, tasks, firewall, security tokens. Every OS handle has a RAII owner.
+//! ETW, SCM, tasks, firewall, security tokens. Every OS handle has a RAII owner. With the `gui`
+//! feature, also the GUI's window, message loop and presenter ([`gui`], TD-0009 §5.1).
 //!
 //! Layer: platform. One of the two crates allowed `unsafe`; every block needs a `// SAFETY:` comment.
 //! Allowed workspace dependencies: `dpro-core`, `dpro-sys`.
@@ -17,6 +18,8 @@ pub mod dism;
 pub mod elevate;
 pub mod error;
 pub mod event;
+#[cfg(feature = "gui")]
+pub mod gui;
 pub mod pipe;
 pub mod privilege;
 pub mod reg;
