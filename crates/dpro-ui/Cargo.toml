@@ -7,5 +7,24 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[dependencies]
+dpro-app.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+gungraun.workspace = true
+stats_alloc.workspace = true
+
+# TD-0009 §7 U2: written before the toolkit core (measure-first).
+[[bench]]
+name = "interact"
+harness = false
+
+# U2 as instruction counts, for `docker compose run --rm bench-gate` (doc 04 §3).
+[[bench]]
+name = "ir"
+harness = false
+bench = false
+
 [lints]
 workspace = true
