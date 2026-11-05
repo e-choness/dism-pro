@@ -6,7 +6,7 @@
 #   t2 — t1 + Wine, for `cargo xwin test` of dpro-win logic
 #
 # Everything is pinned: the base image by digest, Debian packages through a dated
-# snapshot.debian.org archive, and the cargo tools by version + SHA-256.
+# snapshot.debian.org index, and the cargo tools by version + SHA-256.
 # Changing any pin is its own PR: `build(docker): …`. A new rustc, glibc or valgrind can move
 # the bench gate's instruction counts; that PR runs `bench-gate -- --update` and says by how much.
 
@@ -15,7 +15,15 @@ ARG RUST_IMAGE=docker.io/library/rust:1.99.1-slim-trixie@sha256:f938561c139ff3f8
 
 FROM ${RUST_IMAGE} AS t1
 
-# Debian archive state that every `apt-get install` resolves against.
+# Debian archive state that every `apt-get install` resolves against. The package index comes
+# only from snapshot.debian.org; `--error-on=any` fails the build if any part of it doesn't load,
+# so nothing resolves against a partial index.
+#
+# Package files come from the snapshot too, and from deb.debian.org for any the snapshot can't
+# serve: it 404s and 504s pool files under load (every toolchain build failed on 2026-11-05).
+# apt checks each file against the snapshot index's SHA-256 whichever mirror served it, so the
+# installed bytes are the pinned ones either way. deb.debian.org drops a version once Debian
+# supersedes it, so the fallback only helps while the pin is recent.
 ARG DEBIAN_SNAPSHOT=20261020T000000Z
 # Owner decision #5: the Microsoft CRT/SDK license is accepted for Docker builds.
 # cargo-xwin accepts it implicitly, so we gate on an explicit opt-in instead.
@@ -30,12 +38,19 @@ ARG CARGO_NEXTEST_VERSION=0.9.149
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 
 RUN rm -f /etc/apt/sources.list.d/debian.sources \
+ && mkdir -p /etc/apt/mirrors \
+ && for archive in debian debian-security; do \
+      printf '%s\tpriority:1\n%s\tpriority:2\ttype:deb\n' \
+        "http://snapshot.debian.org/archive/${archive}/${DEBIAN_SNAPSHOT}/" \
+        "http://deb.debian.org/${archive}/" \
+        > "/etc/apt/mirrors/${archive}.list"; \
+    done \
  && printf '%s\n' \
-      "deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT} trixie main" \
-      "deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT} trixie-updates main" \
-      "deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/${DEBIAN_SNAPSHOT} trixie-security main" \
+      "deb [check-valid-until=no] mirror+file:/etc/apt/mirrors/debian.list trixie main" \
+      "deb [check-valid-until=no] mirror+file:/etc/apt/mirrors/debian.list trixie-updates main" \
+      "deb [check-valid-until=no] mirror+file:/etc/apt/mirrors/debian-security.list trixie-security main" \
       > /etc/apt/sources.list \
- && apt-get update \
+ && apt-get update --error-on=any \
  && apt-get install -y --no-install-recommends \
       ca-certificates curl git xz-utils \
       clang lld llvm \
@@ -113,8 +128,8 @@ WORKDIR /src
 
 FROM t1 AS t2
 # 64-bit Wine only: T2 runs x86_64 test binaries; there are no 32-bit targets.
-# apt resolves against the snapshot sources inherited from t1.
-RUN apt-get update \
+# apt resolves against the snapshot index, with the package-file fallback, inherited from t1.
+RUN apt-get update --error-on=any \
  && apt-get install -y --no-install-recommends wine wine64 \
  && rm -rf /var/lib/apt/lists/*
 # mscoree/mshtml disabled: stops the headless prefix from trying to fetch Mono/Gecko.
