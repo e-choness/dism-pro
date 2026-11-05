@@ -235,4 +235,101 @@ $ok = $checks.Count -gt 0 -and -not ($checks.Values -contains $false)
 Publish 'U12 UI Automation' $lines $ok
 if (-not $ok) { $failed++ }
 
+# Live theme switch (TD-0009 §5.2, §8) -------------------------------------------------------------
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class ThemeGateWin32 {
+    [StructLayout(LayoutKind.Sequential)]
+    public struct RECT { public int Left, Top, Right, Bottom; }
+    [DllImport("user32.dll")] public static extern IntPtr GetDC(IntPtr hwnd);
+    [DllImport("user32.dll")] public static extern int ReleaseDC(IntPtr hwnd, IntPtr hdc);
+    [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr hwnd, out RECT r);
+    [DllImport("gdi32.dll")] public static extern uint GetPixel(IntPtr hdc, int x, int y);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern IntPtr SendMessageTimeoutW(IntPtr hwnd, uint msg, IntPtr wp, string lp, uint flags, uint ms, out IntPtr result);
+
+    // The mean brightness (0..1, Rec. 709 weights over sRGB) of a 16 x 10 grid over the client
+    // area; -1 if unreadable.
+    public static double Luminance(IntPtr hwnd) {
+        RECT r;
+        if (!GetClientRect(hwnd, out r) || r.Right < 16 || r.Bottom < 10) return -1;
+        IntPtr dc = GetDC(hwnd);
+        if (dc == IntPtr.Zero) return -1;
+        double sum = 0;
+        int n = 0;
+        try {
+            for (int i = 0; i < 16; i++) {
+                for (int j = 0; j < 10; j++) {
+                    uint c = GetPixel(dc, (2 * i + 1) * r.Right / 32, (2 * j + 1) * r.Bottom / 20);
+                    if (c == 0xFFFFFFFF) return -1;
+                    sum += 0.2126 * ((c & 0xFF) / 255.0) + 0.7152 * (((c >> 8) & 0xFF) / 255.0) + 0.0722 * (((c >> 16) & 0xFF) / 255.0);
+                    n++;
+                }
+            }
+        } finally { ReleaseDC(hwnd, dc); }
+        return sum / n;
+    }
+}
+'@
+# The window follows Windows' app mode live: the runner's `AppsUseLightTheme` is set to dark and
+# `WM_SETTINGCHANGE "ImmersiveColorSet"` sent to the shell's window (as Settings broadcasts it), then
+# back to light. Gate: the client area turns dark, then light again, within 2 s each; the time is
+# advisory (one frame is the design, TD-0009 §8). The runner's value is restored.
+$personalize = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize'
+$hadKey = Test-Path $personalize
+$was = if ($hadKey) { (Get-ItemProperty $personalize -ErrorAction SilentlyContinue).AppsUseLightTheme } else { $null }
+function Set-AppMode([int] $Light, [IntPtr] $Hwnd) {
+    if (-not (Test-Path $personalize)) { $null = New-Item -Path $personalize -Force }
+    Set-ItemProperty -Path $personalize -Name AppsUseLightTheme -Value $Light -Type DWord
+    $result = [IntPtr]::Zero
+    # SMTO_ABORTIFHUNG; our window only, so the runner's other windows aren't involved.
+    [void][ThemeGateWin32]::SendMessageTimeoutW($Hwnd, 0x001A, [IntPtr]::Zero, 'ImmersiveColorSet', 2, 2000, [ref] $result)
+}
+$lines = @("live theme switch on the shell at $Size, by mean brightness (gates: dark, then light again, each within 2 s; advisory: <= 100 ms)")
+$checks = [ordered]@{}
+$p = $null
+$hwnd = [IntPtr]::Zero
+try {
+    Set-ItemProperty -Path $personalize -Name AppsUseLightTheme -Value 1 -Type DWord -ErrorAction SilentlyContinue
+    $p = Start-Process -FilePath $exe.shell -ArgumentList @('--size', $Size) -PassThru
+    $null = $p.Handle
+    $shown = Wait-Until {
+        $script:hwnd = [UiaGateWin32]::FindWindowW('dismpro.window', 'DISM Pro shell probe')
+        $script:hwnd -ne [IntPtr]::Zero -and [UiaGateWin32]::IsWindowVisible($script:hwnd)
+    } 30000
+    if (-not $shown) { throw "the shell showed no window in 30 s (exited: $($p.HasExited))" }
+    $checks['starts light'] = Wait-Until { [ThemeGateWin32]::Luminance($hwnd) -gt 0.5 } 5000
+    foreach ($step in @(@{ Name = 'dark'; Light = 0 }, @{ Name = 'light again'; Light = 1 })) {
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        Set-AppMode $step.Light $hwnd
+        $switched = Wait-Until {
+            $l = [ThemeGateWin32]::Luminance($hwnd)
+            $l -ge 0 -and (($step.Light -eq 0 -and $l -lt 0.5) -or ($step.Light -eq 1 -and $l -gt 0.5))
+        } 2000
+        $ms = $sw.Elapsed.TotalMilliseconds
+        $lines += '{0,-12} {1}  luminance {2:N2}{3}' -f $step.Name, $(if ($switched) { '{0,7:N1} ms' -f $ms } else { 'NOT in 2 s' }), [ThemeGateWin32]::Luminance($hwnd), $(if ($switched -and $ms -gt 100) { ' (advisory: over 100 ms)' } else { '' })
+        $checks["turns $($step.Name)"] = $switched
+    }
+} catch {
+    $lines += "theme switch FAILED: $($_.Exception.Message)"
+    $checks['client'] = $false
+} finally {
+    if ($null -ne $was) {
+        Set-ItemProperty -Path $personalize -Name AppsUseLightTheme -Value $was -Type DWord
+    } elseif ($hadKey) {
+        Remove-ItemProperty -Path $personalize -Name AppsUseLightTheme -ErrorAction SilentlyContinue
+    } else {
+        Remove-Item -Path $personalize -ErrorAction SilentlyContinue
+    }
+    if ($p -and -not $p.HasExited) {
+        if ($hwnd -ne [IntPtr]::Zero) { [void][UiaGateWin32]::PostMessageW($hwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) } # WM_CLOSE
+        if (-not $p.WaitForExit(5000)) { $p.Kill(); $lines += 'the shell did not close on WM_CLOSE'; $checks['closes'] = $false }
+    }
+}
+foreach ($k in $checks.Keys) { $lines += '{0,-44} {1}' -f $k, (Format-Verdict $checks[$k]) }
+$ok = $checks.Count -gt 0 -and -not ($checks.Values -contains $false)
+Publish 'Live theme switch' $lines $ok
+if (-not $ok) { $failed++ }
+
 exit $failed
