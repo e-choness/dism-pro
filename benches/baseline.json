@@ -22,7 +22,7 @@
     "crates/dpro-ui/benches/ir.rs a11y::a11y_update.page_away": 31755,
     "crates/dpro-ui/benches/ir.rs a11y::a11y_update.page_back": 382271,
     "crates/dpro-ui/benches/ir.rs a11y::a11y_update.progress": 1705,
-    "crates/dpro-ui/benches/ir.rs a11y::a11y_update.row_selection": 1655,
+    "crates/dpro-ui/benches/ir.rs a11y::a11y_update.row_selection": 3038,
     "crates/dpro-ui/benches/ir.rs a11y::a11y_update.unchanged": 173,
     "crates/dpro-ui/benches/ir.rs interact::event.caret_left": 116446,
     "crates/dpro-ui/benches/ir.rs interact::event.hold_tick": 139961,

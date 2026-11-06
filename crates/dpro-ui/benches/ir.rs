@@ -223,7 +223,7 @@ fn a11y_tree(mut run: Run) -> (TreeUpdate, Run) {
 
 #[library_benchmark]
 #[bench::unchanged(args = (None, Step::Input(Input::PointerMove(Point { x: -1.0, y: -1.0 }))), setup = accessible_after)]
-#[bench::row_selection(args = (None, Step::Update(Msg::Row(3))), setup = accessible_after)]
+#[bench::row_selection(args = (None, Step::Update(Msg::Row(5))), setup = accessible_after)]
 #[bench::page_away(args = (None, Step::Update(Msg::Page(1))), setup = accessible_after)]
 #[bench::page_back(args = (Some(Step::Update(Msg::Page(1))), Step::Update(Msg::Page(0))), setup = accessible_after)]
 #[bench::progress(args = (Some(Step::Update(Msg::Drawer)), Step::Update(Msg::Progress(41))), setup = accessible_after)]

@@ -66,7 +66,7 @@ fn a11y(c: &mut Criterion) {
         ),
         (
             "update_row_selection",
-            after(None, Step::Update(Msg::Row(3))),
+            after(None, Step::Update(Msg::Row(5))),
         ),
         ("update_page_away", after(None, away.clone())),
         (

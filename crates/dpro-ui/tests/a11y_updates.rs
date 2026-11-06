@@ -113,6 +113,8 @@ fn incremental_updates_keep_a_copy_equal_to_the_whole_tree() {
     let mut steps = run.session();
     steps.extend([
         Step::Update(Msg::Row(2)),
+        // A row the tab shows, then one it hides (a Store app).
+        Step::Update(Msg::Row(5)),
         Step::Update(Msg::Row(3)),
         tab(true),
         tab(false),
