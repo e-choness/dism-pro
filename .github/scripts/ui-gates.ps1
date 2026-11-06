@@ -63,7 +63,9 @@ raw-API baseline, measured in this job, so it holds on whatever machine the runn
       they were; with a row focused, Ctrl+End shows the last row and Ctrl+Home the first again;
       UIA's SetFocus on the last row, out of view, scrolls it into view. Each is read back as
       the rows' BoundingRectangle within 2 s; the times are advisory (U3: 50 ms), and Windows'
-      wheel lines are reported.
+      wheel lines are reported. So is "Automatically hide scroll bars", for A2.3's verify:
+      DynamicScrollbars, which the shell reads, beside UISettings.AutoHideScrollBars, with the
+      value written both ways (no broadcast, before the shell starts) and put back.
 
 The probe target is dpro-ui's `shell` example until roadmap 3.2 gives dismpro.exe its shell.
 Results go to annotations and the job summary; the raw reports and screenshots go to -Out, which
@@ -1341,6 +1343,38 @@ function Test-Inside($Inner, $Outer) {
 }
 
 $lines = @("Scrolling in the shell at $Size (the checks are gates; the times are advisory, U3: 50 ms)")
+
+# "Automatically hide scroll bars" (A2.3's verify, advisory): no Microsoft page says the value
+# behind it is DynamicScrollbars, which the shell's Env reads. UISettings is WinRT, read through
+# Windows PowerShell 5.1 as for the text size.
+function Get-UISettingsAutoHide {
+    $read = '[void][Windows.UI.ViewManagement.UISettings,Windows.UI.ViewManagement,ContentType=WindowsRuntime]; (New-Object Windows.UI.ViewManagement.UISettings).AutoHideScrollBars'
+    try { (& powershell.exe -NoProfile -NonInteractive -Command $read 2>&1 | Out-String).Trim() } catch { "unreadable: $($_.Exception.Message)" }
+}
+$cpaKey = 'HKCU:\Control Panel\Accessibility'
+$hadCpaKey = Test-Path $cpaKey
+$savedDynamic = if ($hadCpaKey) { (Get-ItemProperty -Path $cpaKey -Name DynamicScrollbars -ErrorAction SilentlyContinue).DynamicScrollbars } else { $null }
+# Env takes only a REG_DWORD 0 as "show them", so the kind is reported and kept.
+$savedKind = if ($null -ne $savedDynamic) { (Get-Item -Path $cpaKey).GetValueKind('DynamicScrollbars') } else { $null }
+$lines += 'auto-hide scroll bars: DynamicScrollbars {0}, UISettings.AutoHideScrollBars {1}' -f $(if ($null -eq $savedDynamic) { 'missing' } else { "$savedDynamic ($savedKind)" }), (Get-UISettingsAutoHide)
+try {
+    if (-not $hadCpaKey) { $null = New-Item -Path $cpaKey -Force }
+    foreach ($v in 0, 1) {
+        Set-ItemProperty -Path $cpaKey -Name DynamicScrollbars -Value $v -Type DWord
+        $lines += '  DynamicScrollbars written {0}: UISettings.AutoHideScrollBars {1}' -f $v, (Get-UISettingsAutoHide)
+    }
+} catch {
+    $lines += "  writing DynamicScrollbars FAILED: $($_.Exception.Message)"
+} finally {
+    if ($null -ne $savedDynamic) {
+        Set-ItemProperty -Path $cpaKey -Name DynamicScrollbars -Value $savedDynamic -Type $savedKind
+    } elseif ($hadCpaKey) {
+        Remove-ItemProperty -Path $cpaKey -Name DynamicScrollbars -ErrorAction SilentlyContinue
+    } else {
+        Remove-Item -Path $cpaKey -ErrorAction SilentlyContinue
+    }
+}
+
 $checks = [ordered]@{}
 $hwnd = [IntPtr]::Zero
 $p = Start-Process -FilePath $exe.shell -ArgumentList @('--size', $Size) -PassThru
