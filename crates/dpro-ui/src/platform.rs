@@ -209,7 +209,8 @@ impl<P: Model> Host<P> {
         &self.theme
     }
 
-    /// Windows' settings changed (or arrived): the motion follows, and the look.
+    /// Windows' settings changed (or arrived): the motion, the caret and the text size follow,
+    /// and the look.
     fn set_env(&mut self, env: gui::env::Env) -> Restyle {
         self.env = Some(env);
         self.ui.set_motion(Motion::system(env.animations));
@@ -217,6 +218,8 @@ impl<P: Model> Host<P> {
             width: env.caret_width.max(1),
             blink_ms: env.caret_blink_ms,
         });
+        // Percent to a factor; `Env`'s default, 0, is clamped to 1.
+        self.ui.set_text_scale(f32::from(env.text_scale) / 100.0);
         self.restyle()
     }
 
@@ -721,6 +724,21 @@ mod tests {
         assert_eq!(host.set_env(calm), Restyle::default());
         assert_eq!(host.ui.motion(), Motion::REDUCED);
         assert_eq!(host.ui.damage().len(), 0);
+        // The text size (§12 item 7), in percent: a new size repaints, the same one doesn't, and
+        // an unread one (0) is 100 %.
+        let large = gui::env::Env {
+            text_scale: 175,
+            ..calm
+        };
+        assert_eq!(host.set_env(large), Restyle::default());
+        assert!((host.ui.text_scale() - 1.75).abs() < 1e-6);
+        assert_ne!(host.ui.damage().len(), 0);
+        host.ui.clear_damage();
+        host.set_env(large);
+        assert_eq!(host.ui.damage().len(), 0);
+        host.set_env(calm);
+        assert!((host.ui.text_scale() - 1.0).abs() < 1e-6);
+        host.ui.clear_damage();
         // High contrast: the system's colors, whatever the app mode.
         let hc = gui::env::Env {
             high_contrast: true,

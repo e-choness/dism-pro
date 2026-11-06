@@ -19,10 +19,18 @@
 //!   sends `WM_SETTINGCHANGE`; the thickness does.)*
 //! - **battery saver:** `GetSystemPowerStatus`'s `SystemStatusFlag`; the window subscribes to
 //!   `GUID_POWER_SAVING_STATUS`. *(verify on Windows 11 24H2+, whose Energy saver replaced it.)*
+//! - **text size:** `TextScaleFactor` under `HKCU\Software\Microsoft\Accessibility`, a percent
+//!   from 100 to 225 (Settings › Accessibility › Text size; missing is 100), the value behind
+//!   `UISettings.TextScaleFactor`. No broadcast is known to reach a Win32 window when it changes,
+//!   so a [`Watch`] thread waits on the key's change notification and wakes the window.
 //! - **winpe:** `HKLM\SYSTEM\CurrentControlSet\Control\MiniNT` exists; **build:**
 //!   `CurrentBuildNumber`. Neither changes while the process runs, so they're read once.
 
-use std::{ffi::c_void, sync::OnceLock};
+use std::{
+    ffi::c_void,
+    sync::{Arc, OnceLock},
+    thread::{self, JoinHandle},
+};
 
 use windows::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
 use windows_sys::{
@@ -33,23 +41,36 @@ use windows_sys::{
         },
         System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS},
         UI::WindowsAndMessaging::{
-            GetCaretBlinkTime, GetSystemMetrics, SM_REMOTESESSION, SPI_GETCARETWIDTH,
-            SPI_GETCLIENTAREAANIMATION, SPI_GETHIGHCONTRAST, SystemParametersInfoW,
+            GetCaretBlinkTime, GetSystemMetrics, PostMessageW, SM_REMOTESESSION, SPI_GETCARETWIDTH,
+            SPI_GETCLIENTAREAANIMATION, SPI_GETHIGHCONTRAST, SystemParametersInfoW, WM_APP,
         },
     },
     core::{BOOL, GUID},
 };
 
-use crate::reg::{Access, RegKey, RegValue};
+use crate::{
+    event::Event,
+    reg::{Access, Notify, RegKey, RegValue},
+};
 
 /// `WinNT.h`'s `GUID_POWER_SAVING_STATUS`: battery saver turned on or off. windows-sys files it
 /// under `Win32_System_SystemServices`, a large feature for one constant.
 pub(super) static GUID_POWER_SAVING_STATUS: GUID =
     GUID::from_u128(0xe00958c0_c213_4ace_ac77_fecced2eeea5);
 
+/// Posted by a [`Watch`]: a setting Windows doesn't broadcast changed, and the window reads them
+/// all again.
+pub(super) const WM_APP_ENV: u32 = WM_APP + 2;
+
 const PERSONALIZE: &str = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize";
+const ACCESSIBILITY: &str = r"Software\Microsoft\Accessibility";
+/// [`ACCESSIBILITY`]'s parent, watched while it doesn't exist.
+const MICROSOFT: &str = r"Software\Microsoft";
 const MININT: &str = r"SYSTEM\CurrentControlSet\Control\MiniNT";
 const CURRENT_VERSION: &str = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion";
+
+/// Windows' text sizes, in percent.
+const TEXT_SCALES: std::ops::RangeInclusive<u32> = 100..=225;
 
 /// The system colors high contrast shows, as `0xRRGGBB`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -90,6 +111,9 @@ pub struct Env {
     pub caret_blink_ms: u32,
     /// The caret's width in pixels at 100 %; at least 1.
     pub caret_width: u32,
+    /// Windows' text size in percent, 100 to 225 (Settings › Accessibility › Text size). `Env`'s
+    /// default, 0, is taken as 100.
+    pub text_scale: u16,
 }
 
 impl Env {
@@ -117,8 +141,100 @@ impl Env {
             battery_saver: battery_saver(),
             caret_blink_ms: caret_blink_ms(),
             caret_width: caret_width(),
+            text_scale: text_scale(),
         }
     }
+}
+
+/// `TextScaleFactor`, clamped to Windows' range; 100 if it's missing or not a `DWORD`.
+fn text_scale() -> u16 {
+    let percent = RegKey::current_user()
+        .open(ACCESSIBILITY, Access::Read)
+        .ok()
+        .and_then(|key| key.get("TextScaleFactor").ok().flatten())
+        .map_or(*TEXT_SCALES.start(), |value| match value {
+            RegValue::Dword(p) => p.clamp(*TEXT_SCALES.start(), *TEXT_SCALES.end()),
+            _ => *TEXT_SCALES.start(),
+        });
+    u16::try_from(percent).unwrap_or(100)
+}
+
+/// Watches, for one window, the settings Windows doesn't broadcast: today the text size. A
+/// thread waits on the registry's change notification and posts [`WM_APP_ENV`] at each change;
+/// the window reads [`Env`] again and its handler hears only of what changed. Dropped, it stops
+/// the thread and waits for it, which takes no longer than a wake.
+#[derive(Debug)]
+pub(super) struct Watch {
+    stop: Arc<Event>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl Watch {
+    /// Starts watching for `hwnd`. `None` if the thread or its events can't be had: the window
+    /// then hears of the text size when something else makes it read [`Env`] again.
+    pub(super) fn start(hwnd: windows_sys::Win32::Foundation::HWND) -> Option<Self> {
+        let stop = Arc::new(Event::manual_reset().ok()?);
+        let changed = Event::auto_reset().ok()?;
+        let hwnd = hwnd.expose_provenance();
+        let thread = thread::Builder::new()
+            .name("dpro env watch".into())
+            .spawn({
+                let stop = Arc::clone(&stop);
+                move || watch(hwnd, &stop, &changed)
+            })
+            .ok()?;
+        Some(Self {
+            stop,
+            thread: Some(thread),
+        })
+    }
+}
+
+impl Drop for Watch {
+    fn drop(&mut self) {
+        // A stop that can't be signalled would leave the join waiting forever: the thread is
+        // left to end with the process instead, posting to a window that is gone (which fails).
+        if self.stop.set().is_ok()
+            && let Some(thread) = self.thread.take()
+        {
+            // ignore: a panic on the watch thread has nothing left to tell anyone.
+            let _ = thread.join();
+        }
+    }
+}
+
+/// The text size key watched for its values or, while it doesn't exist, its parent for the key
+/// being created. Opened again at each change, as either may come and go.
+fn register(changed: &Event) -> Option<RegKey> {
+    let user = RegKey::current_user();
+    let (key, what) = match user.open(ACCESSIBILITY, Access::Read) {
+        Ok(key) => (key, Notify::Values),
+        Err(_) => (user.open(MICROSOFT, Access::Read).ok()?, Notify::Subkeys),
+    };
+    key.notify(what, changed).ok()?;
+    Some(key)
+}
+
+/// The watch thread: until `stop`, each change posts [`WM_APP_ENV`] to `hwnd`. It registers for
+/// the next change before it posts, so a change while the window reads is never missed.
+fn watch(hwnd: usize, stop: &Event, changed: &Event) {
+    let hwnd: windows_sys::Win32::Foundation::HWND =
+        std::ptr::with_exposed_provenance_mut::<c_void>(hwnd);
+    let Some(mut key) = register(changed) else {
+        return;
+    };
+    while let Ok(1) = Event::wait_any(&[stop, changed]) {
+        let next = register(changed);
+        // SAFETY: posting needs no access to the window from this thread; once it's destroyed,
+        // the call fails.
+        unsafe { PostMessageW(hwnd, WM_APP_ENV, 0, 0) };
+        match next {
+            // The old key closes after the new one is registered.
+            Some(next) => key = next,
+            None => return,
+        }
+    }
+    drop(key);
 }
 
 /// `GetCaretBlinkTime`: `INFINITE` is no blinking (0), and a failure (0) Windows' default.

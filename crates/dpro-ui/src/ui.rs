@@ -50,6 +50,9 @@ pub struct Ui<M> {
     pub(crate) free: Vec<u32>,
     pub(crate) viewport: Size,
     pub(crate) scale: f32,
+    /// Windows' text size, 1 to [`MAX_TEXT_SCALE`]: every text style's size is multiplied by it
+    /// (TD-0009 §12 item 7).
+    pub(crate) text_scale: f32,
     pub(crate) motion: Motion,
     pub(crate) damage: Damage,
     pub(crate) focus: u32,
@@ -123,6 +126,9 @@ impl Hold {
 /// The root: index 0, never freed.
 pub(crate) const ROOT: u32 = 0;
 
+/// Windows' largest text size, 225 % (Settings › Accessibility › Text size).
+pub const MAX_TEXT_SCALE: f32 = 2.25;
+
 impl<M> Ui<M> {
     /// An empty window of `viewport` logical pixels at `scale` physical pixels per logical pixel.
     /// The whole window is damaged for its first paint. It's inactive, so a focused field shows
@@ -134,6 +140,7 @@ impl<M> Ui<M> {
             free: Vec::new(),
             viewport,
             scale,
+            text_scale: 1.0,
             motion,
             damage: Damage::new(),
             focus: NIL,
@@ -175,6 +182,28 @@ impl<M> Ui<M> {
             self.damage_all();
             self.a11y.all = true;
         }
+    }
+
+    /// Windows' text size changed (Settings › Accessibility › Text size), as a factor: clamped to
+    /// 1 to [`MAX_TEXT_SCALE`], and 1 if it isn't a number. The next [`build`](Self::build) gives
+    /// every node its scaled text style, so the page is laid out again, and the whole window is
+    /// repainted. The same size again changes nothing.
+    pub fn set_text_scale(&mut self, text_scale: f32) {
+        let text_scale = if text_scale.is_nan() {
+            1.0
+        } else {
+            text_scale.clamp(1.0, MAX_TEXT_SCALE)
+        };
+        if self.text_scale.to_bits() != text_scale.to_bits() {
+            self.text_scale = text_scale;
+            self.damage_all();
+        }
+    }
+
+    /// Windows' text size, as a factor.
+    #[must_use]
+    pub fn text_scale(&self) -> f32 {
+        self.text_scale
     }
 
     /// The durations changed (*Animation effects* toggled). A running animation finishes on its
@@ -266,6 +295,7 @@ impl<M> Ui<M> {
             key: n.key,
             rect: n.rect,
             text: &n.text,
+            text_style: n.text_style,
             enabled: n.enabled,
             check: n.check,
             selected: n.selected,

@@ -12,6 +12,7 @@
 use crate::{
     field::TextEdit,
     pool::capacity_for,
+    text::TextStyle,
     tree::{Element, Extra, NIL, NodeId, Role},
     ui::{HoldSlot, ROOT, Ui},
 };
@@ -152,8 +153,14 @@ impl<M> Ui<M> {
             n.style = el.style;
             layout = true;
         }
-        if n.text_style != el.text_style {
-            n.text_style = el.text_style;
+        // Windows' text size multiplies every style here, so measuring, caret stops, painting and
+        // the accessibility tree all see one size. At 100 % the product is exact.
+        let text_style = TextStyle {
+            size: el.text_style.size * self.text_scale,
+            ..el.text_style
+        };
+        if n.text_style != text_style {
+            n.text_style = text_style;
             layout = true;
             field_style = true;
         }

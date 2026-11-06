@@ -14,13 +14,15 @@ use windows_sys::Win32::{
     Foundation::{ERROR_FILE_NOT_FOUND, ERROR_MORE_DATA},
     System::Registry::{
         HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WRITE, REG_BINARY, REG_DWORD,
-        REG_EXPAND_SZ, REG_MULTI_SZ, REG_QWORD, REG_SZ, RegCloseKey, RegDeleteValueW,
-        RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
+        REG_EXPAND_SZ, REG_MULTI_SZ, REG_NOTIFY_CHANGE_LAST_SET, REG_NOTIFY_CHANGE_NAME, REG_QWORD,
+        REG_SZ, RegCloseKey, RegDeleteValueW, RegNotifyChangeKeyValue, RegOpenKeyExW,
+        RegQueryValueExW, RegSetValueExW,
     },
 };
 
 use crate::{
     error::{Error, Result, win32},
+    event::Event,
     wide::WideCString,
 };
 
@@ -169,6 +171,33 @@ impl RegKey {
         }
         win32(status, "RegDeleteValueW").map(|()| true)
     }
+
+    /// Asks Windows to signal `event` at the next change of `what` in this key (not its
+    /// subkeys'). One signal per call: call again to hear of the next change. Closing the key, or
+    /// the calling thread ending, also signals it. The key must be open for [`Access::Read`],
+    /// which includes `KEY_NOTIFY`.
+    ///
+    /// # Errors
+    /// The OS error from `RegNotifyChangeKeyValue`.
+    pub fn notify(&self, what: Notify, event: &Event) -> Result<()> {
+        let filter = match what {
+            Notify::Values => REG_NOTIFY_CHANGE_LAST_SET,
+            Notify::Subkeys => REG_NOTIFY_CHANGE_NAME,
+        };
+        // SAFETY: `self.hkey` is open and `event` is an open event for the call. Asynchronous:
+        // the call returns at once, and Windows holds its own references until the signal.
+        let status = unsafe { RegNotifyChangeKeyValue(self.hkey, 0, filter, event.as_raw(), 1) };
+        win32(status, "RegNotifyChangeKeyValue")
+    }
+}
+
+/// What [`RegKey::notify`] watches for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Notify {
+    /// A value set, added or deleted.
+    Values,
+    /// A subkey added or deleted.
+    Subkeys,
 }
 
 /// Decodes `RegQueryValueExW` output. String data may lack its terminating NUL (the
@@ -276,5 +305,35 @@ mod tests {
                 actual: 2
             })
         ));
+    }
+
+    /// Polls `event` every 10 ms for up to `ms`.
+    fn signalled(event: &Event, ms: u64) -> bool {
+        (0..ms / 10).any(|_| {
+            let set = event.is_set();
+            if !set {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            set
+        })
+    }
+
+    #[test]
+    fn notify_signals_one_value_change_per_call() {
+        // A value of the test's own in a key every hive has, removed again.
+        const NAME: &str = "dpro-win notify test";
+        let key = RegKey::current_user()
+            .open("Software", Access::ReadWrite)
+            .unwrap();
+        let event = Event::auto_reset().unwrap();
+        key.notify(Notify::Values, &event).unwrap();
+        assert!(!event.is_set(), "nothing changed yet");
+        key.set(NAME, &RegValue::Dword(1)).unwrap();
+        assert!(signalled(&event, 2000), "setting a value signals");
+        key.set(NAME, &RegValue::Dword(2)).unwrap();
+        assert!(!signalled(&event, 100), "one signal per call");
+        key.notify(Notify::Values, &event).unwrap();
+        assert!(key.delete_value(NAME).unwrap());
+        assert!(signalled(&event, 2000), "deleting a value signals");
     }
 }
