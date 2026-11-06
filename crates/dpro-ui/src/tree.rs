@@ -6,6 +6,7 @@ use dpro_app::table::Tri;
 use crate::{
     field::TextEdit,
     geom::{Insets, Rect, Size},
+    scroll::{Axes, ScrollInfo},
     style::{Axis, Dim, Style},
     text::TextStyle,
     theme::{
@@ -266,6 +267,10 @@ pub(crate) mod rare {
     pub(crate) const EXPANDED: u8 = 4;
     /// It has a [tooltip](super::Element::tooltip).
     pub(crate) const TIP: u8 = 8;
+    /// It's a [scroll viewport](super::Element::scroll) along x, along y (TD-0009 A2).
+    pub(crate) const SCROLL_X: u8 = 16;
+    pub(crate) const SCROLL_Y: u8 = 32;
+    pub(crate) const SCROLL: u8 = SCROLL_X | SCROLL_Y;
 
     /// Whether what a node with flags `r` opens is open; `None` if it opens nothing.
     pub(crate) const fn expanded(r: u8) -> Option<bool> {
@@ -346,6 +351,20 @@ impl<'s, M> Element<'s, M> {
         Self::new(key, Role::Container, "", None)
     }
 
+    /// A scroll viewport (TD-0009 A2): a container whose children scroll along `axes` when they
+    /// don't fit it, clipped to it. The wheel, its bar, Page Up, Page Down, Ctrl+Home and Ctrl+End
+    /// scroll it, and focus moving into it scrolls the focused node into view. With no tab stop
+    /// inside, it's one itself and its arrows scroll it: name it then, for assistive technology.
+    /// Give it a size along `axes` (fixed, a max, or grown into its parent), or it's as big as its
+    /// content and never scrolls.
+    #[must_use]
+    pub fn scroll(key: Key, axes: Axes) -> Self {
+        Self {
+            rare: axes.flags(),
+            ..Self::stack(key)
+        }
+    }
+
     /// A container for [tabs](Self::tab), in a row: one Tab stop, Left and Right pick
     /// ([`Group::Tabs`]). Name it.
     #[must_use]
@@ -394,6 +413,8 @@ impl<'s, M> Element<'s, M> {
                 ..Style::default()
             },
             look: POPUP,
+            // A menu taller than its popup (`popup::MAX_HEIGHT`) scrolls (A2.4).
+            rare: rare::SCROLL_Y,
             ..Self::stack(key)
         }
     }
@@ -726,6 +747,10 @@ fn item_style() -> Style {
 /// No node: the end of a sibling list, or no parent.
 pub(crate) const NIL: u32 = u32::MAX;
 
+/// An animation that hasn't had its first tick: no start time yet. `u64::MAX` ms on the
+/// monotonic clock is never reached.
+pub(crate) const NOT_STARTED: u64 = u64::MAX;
+
 /// A node in the arena. Links are arena indices, so moving a node is O(1) and allocates nothing.
 #[derive(Debug)]
 #[allow(
@@ -759,6 +784,11 @@ pub(crate) struct Node<M> {
     pub(crate) special: bool,
     /// Its slot in the Ui's side table (a tooltip, a dropdown's name and step); [`NIL`] if none.
     pub(crate) side: u32,
+    /// A scroll viewport's slot in the Ui's scroll table (`scroll.rs`); [`NIL`] for other nodes.
+    pub(crate) scroll: u32,
+    /// A scroll viewport holds it (an ancestor is one): only then does it show anywhere but
+    /// where layout put it. Set when it's linked, and kept as viewports come and go.
+    pub(crate) in_viewport: bool,
     /// Whether what it opens is open; `None` if it opens nothing.
     pub(crate) expanded: Option<bool>,
     /// Context requests on it or inside it ask for the model's menu.
@@ -789,8 +819,9 @@ pub(crate) struct Node<M> {
     /// The hover highlight, 0 to 1, animated toward `hovered`.
     pub(crate) hover_t: f32,
     pub(crate) anim_from: f32,
-    /// When the running animation started; `None` until its first tick.
-    pub(crate) anim_start: Option<u64>,
+    /// When the running animation started; [`NOT_STARTED`] until its first tick. Not an
+    /// `Option`, whose 16 bytes made every node 8 bytes bigger (TD-0009 §13, slice 5a).
+    pub(crate) anim_start: u64,
     /// In the window's animation set.
     pub(crate) animating: bool,
     /// Listed for the next accessibility update.
@@ -818,6 +849,8 @@ impl<M> Node<M> {
             hold: false,
             special: false,
             side: NIL,
+            scroll: NIL,
+            in_viewport: false,
             expanded: None,
             context: false,
             rare: 0,
@@ -836,7 +869,7 @@ impl<M> Node<M> {
             pressed: false,
             hover_t: 0.0,
             anim_from: 0.0,
-            anim_start: None,
+            anim_start: NOT_STARTED,
             animating: false,
             a11y_dirty: false,
         }
@@ -886,6 +919,8 @@ pub struct NodeInfo<'a> {
     pub focused: bool,
     /// The animated hover highlight, 0 to 1.
     pub hover: f32,
+    /// Where it's scrolled, for a scroll viewport.
+    pub scroll: Option<ScrollInfo>,
 }
 
 #[cfg(test)]

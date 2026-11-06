@@ -443,6 +443,23 @@ pub mod tokens {
         /// Hold to apply.
         pub const HOLD_MS: u16 = 1_500;
     }
+
+    /// Scroll bars (TD-0009 A2.10 item 3, accepted 2026-11-06). No fade, so no timer: the bar is
+    /// an indicator or expanded, by where the pointer is.
+    pub mod scroll {
+        /// The indicator's width at rest, while the content overflows.
+        pub const INDICATOR: f32 = 2.0;
+        /// The bar's width with its track: the pointer on its strip, or auto-hide off.
+        pub const BAR: f32 = 8.0;
+        /// The strip along the viewport's edge that's the bar's: the pointer there expands it.
+        pub const STRIP: f32 = 12.0;
+        /// The thumb's least length, so it stays a 24 px target (§4.4) however long the content
+        /// (a proposal for design, TD-0009 §13).
+        pub const MIN_THUMB: f32 = 24.0;
+        /// The indicator and the bar from the viewport's edge, so the bar is centered in its strip
+        /// (a proposal for design, TD-0009 §13).
+        pub const INSET: f32 = 2.0;
+    }
 }
 
 #[cfg(test)]

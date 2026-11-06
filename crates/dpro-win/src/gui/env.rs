@@ -26,6 +26,13 @@
 //!   from 100 to 225 (Settings › Accessibility › Text size; missing is 100), the value behind
 //!   `UISettings.TextScaleFactor`. No broadcast is known to reach a Win32 window when it changes,
 //!   so a [`Watch`] thread waits on the key's change notification and wakes the window.
+//! - **wheel:** `SPI_GETWHEELSCROLLLINES` and `SPI_GETWHEELSCROLLCHARS`, what a notch scrolls
+//!   vertically and horizontally (Settings › Bluetooth & devices › Mouse); `WHEEL_PAGESCROLL`
+//!   (`u32::MAX` lines) is a page. Setting either broadcasts `WM_SETTINGCHANGE`.
+//! - **scroll bars:** `DynamicScrollbars` under `HKCU\Control Panel\Accessibility`, the value
+//!   behind *Automatically hide scroll bars* (Settings › Accessibility › Visual effects); 0 keeps
+//!   them shown, and missing is Windows' default, hidden. *(verify that switching it broadcasts
+//!   `WM_SETTINGCHANGE`.)*
 //! - **winpe:** `HKLM\SYSTEM\CurrentControlSet\Control\MiniNT` exists; **build:**
 //!   `CurrentBuildNumber`. Neither changes while the process runs, so they're read once.
 
@@ -46,7 +53,8 @@ use windows_sys::{
         UI::Input::KeyboardAndMouse::GetDoubleClickTime,
         UI::WindowsAndMessaging::{
             GetCaretBlinkTime, GetSystemMetrics, PostMessageW, SM_REMOTESESSION, SPI_GETCARETWIDTH,
-            SPI_GETCLIENTAREAANIMATION, SPI_GETHIGHCONTRAST, SystemParametersInfoW, WM_APP,
+            SPI_GETCLIENTAREAANIMATION, SPI_GETHIGHCONTRAST, SPI_GETWHEELSCROLLCHARS,
+            SPI_GETWHEELSCROLLLINES, SYSTEM_PARAMETERS_INFO_ACTION, SystemParametersInfoW, WM_APP,
         },
     },
     core::{BOOL, GUID},
@@ -68,6 +76,7 @@ pub(super) const WM_APP_ENV: u32 = WM_APP + 2;
 
 const PERSONALIZE: &str = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize";
 const ACCESSIBILITY: &str = r"Software\Microsoft\Accessibility";
+const CONTROL_PANEL_ACCESSIBILITY: &str = r"Control Panel\Accessibility";
 /// [`ACCESSIBILITY`]'s parent, watched while it doesn't exist.
 const MICROSOFT: &str = r"Software\Microsoft";
 const MININT: &str = r"SYSTEM\CurrentControlSet\Control\MiniNT";
@@ -122,6 +131,12 @@ pub struct Env {
     /// Windows' text size in percent, 100 to 225 (Settings › Accessibility › Text size). `Env`'s
     /// default, 0, is taken as 100.
     pub text_scale: u16,
+    /// Lines a wheel notch scrolls; [`u32::MAX`] (`WHEEL_PAGESCROLL`) is a page, and 0 none.
+    pub wheel_lines: u32,
+    /// Characters a notch of a horizontal wheel scrolls.
+    pub wheel_chars: u32,
+    /// *Automatically hide scroll bars*: a scroll bar is an indicator until the pointer is on it.
+    pub auto_hide_scroll_bars: bool,
 }
 
 impl Env {
@@ -151,6 +166,9 @@ impl Env {
             caret_width: caret_width(),
             tooltip_ms: tooltip_ms(),
             text_scale: text_scale(),
+            wheel_lines: wheel(SPI_GETWHEELSCROLLLINES),
+            wheel_chars: wheel(SPI_GETWHEELSCROLLCHARS),
+            auto_hide_scroll_bars: auto_hide_scroll_bars(),
         }
     }
 }
@@ -268,6 +286,24 @@ fn caret_width() -> u32 {
     // SAFETY: a live out-pointer to the DWORD SPI_GETCARETWIDTH writes.
     let ok = unsafe { SystemParametersInfoW(SPI_GETCARETWIDTH, 0, (&raw mut width).cast(), 0) };
     if ok != 0 && width > 0 { width } else { 1 }
+}
+
+/// A wheel setting (`SPI_GETWHEELSCROLLLINES` or `SPI_GETWHEELSCROLLCHARS`); 3, Windows' default,
+/// if it can't be read.
+fn wheel(action: SYSTEM_PARAMETERS_INFO_ACTION) -> u32 {
+    let mut value: u32 = 3;
+    // SAFETY: a live out-pointer to the UINT both actions write.
+    let ok = unsafe { SystemParametersInfoW(action, 0, (&raw mut value).cast(), 0) };
+    if ok != 0 { value } else { 3 }
+}
+
+/// `DynamicScrollbars`: anything but 0 hides them, as does a missing value (Windows' default).
+fn auto_hide_scroll_bars() -> bool {
+    RegKey::current_user()
+        .open(CONTROL_PANEL_ACCESSIBILITY, Access::Read)
+        .ok()
+        .and_then(|key| key.get("DynamicScrollbars").ok().flatten())
+        .is_none_or(|value| !matches!(value, RegValue::Dword(0)))
 }
 
 /// `WinPE` and the build, read once.

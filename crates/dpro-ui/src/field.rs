@@ -449,8 +449,9 @@ impl<M> Ui<M> {
     }
 
     /// Whether the window is active (has keyboard focus): only then is a caret or selection shown,
-    /// or a tooltip. A window that goes inactive cancels its press and its hold, whose release it
-    /// may never see, and lets go of its tooltip; the pointer must move again to show one.
+    /// or a tooltip. A window that goes inactive cancels its press, its hold and a scroll bar
+    /// drag, whose release it may never see, and lets go of its tooltip; the pointer must move
+    /// again to show one.
     pub fn set_active(&mut self, active: bool) {
         if self.active != active {
             self.active = active;
@@ -458,6 +459,7 @@ impl<M> Ui<M> {
             self.damage_caret_field();
             if !active {
                 self.cancel_press();
+                self.scroll_release();
                 self.tip_cancel(false);
                 self.tip.over = NIL;
             }
@@ -497,9 +499,11 @@ impl<M> Ui<M> {
         let n = &self.nodes[i as usize];
         let f = &self.fields[n.field as usize];
         let line = f.line_box(n.rect.inset(n.style.padding));
+        // Where it shows, in a scroll viewport too.
+        let shift = self.shift_of(i);
         Some(Rect::new(
-            line.x - f.scroll + f.x_of(f.caret as usize),
-            line.y,
+            line.x - f.scroll + f.x_of(f.caret as usize) + shift.x,
+            line.y + shift.y,
             caret_logical(self.caret),
             line.h,
         ))
@@ -666,7 +670,8 @@ impl<M> Ui<M> {
         let n = &self.nodes[i as usize];
         let f = &self.fields[n.field as usize];
         let content = n.rect.inset(n.style.padding);
-        let at = f.hit(&n.text, p.x - content.x + f.scroll);
+        let shift = self.shift_of(i);
+        let at = f.hit(&n.text, p.x - shift.x - content.x + f.scroll);
         self.move_caret(i, at, extend);
     }
 }

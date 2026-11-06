@@ -67,6 +67,16 @@ impl Rect {
         self.w <= 0.0 || self.h <= 0.0
     }
 
+    /// The part `other` shares, at its corner if they share nothing (empty).
+    #[must_use]
+    pub fn intersect(self, other: Self) -> Self {
+        let x = self.x.max(other.x);
+        let y = self.y.max(other.y);
+        let w = (self.right().min(other.right()) - x).max(0.0);
+        let h = (self.bottom().min(other.bottom()) - y).max(0.0);
+        Self { x, y, w, h }
+    }
+
     /// Shrunk by `insets`, never below zero size.
     #[must_use]
     pub fn inset(&self, insets: Insets) -> Self {

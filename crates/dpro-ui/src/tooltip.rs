@@ -14,13 +14,7 @@
 //! Only the active window shows tips, so a menu over the main window shows its own and the main
 //! window's stop.
 
-use crate::{
-    NodeId,
-    geom::Point,
-    theme::tokens::popup,
-    tree::NIL,
-    ui::{ROOT, Ui},
-};
+use crate::{NodeId, geom::Point, theme::tokens::popup, tree::NIL, ui::Ui};
 
 /// What started a tip.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -239,22 +233,12 @@ impl<M> Ui<M> {
     /// [`NIL`] if none.
     fn tip_hit(&self, p: Point) -> u32 {
         let mut found = NIL;
-        let mut at = ROOT;
-        if !self.nodes[ROOT as usize].rect.contains(p) {
-            return NIL;
-        }
-        loop {
+        let (_, bar) = self.walk_at(p, |at| {
             if self.nodes[at as usize].side != NIL && self.tip_text(at).is_some() {
                 found = at;
             }
-            let mut c = self.nodes[at as usize].last;
-            while c != NIL && !self.nodes[c as usize].rect.contains(p) {
-                c = self.nodes[c as usize].prev;
-            }
-            if c == NIL {
-                return found;
-            }
-            at = c;
-        }
+        });
+        // A scroll bar has no tip, and hides what's under it.
+        if bar.is_some() { NIL } else { found }
     }
 }

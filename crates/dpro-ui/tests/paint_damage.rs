@@ -3,15 +3,16 @@
 //! whole window painted from scratch, pixel for pixel. At scale 1 in light, and at 1.5 in dark,
 //! where node edges fall between pixels. Then the same for editing in the filter field (§11 step
 //! 3): the caret moving and blinking, a selection, and a paste that scrolls the text; also in high
-//! contrast, where selected text has its own color.
+//! contrast, where selected text has its own color. And scrolling the table (TD-0009 A2), where the
+//! content moves under a clip and the bar changes over it.
 
 #![allow(missing_docs)]
 
 #[path = "../benches/fixtures/shell.rs"]
 mod shell;
 
-use dpro_ui::{Caret, Color, KeyCode, Mods, SysColors, Theme};
-use shell::{CTRL, Msg, PATH, Run, Shell, Step, key};
+use dpro_ui::{Caret, Color, Input, KeyCode, Mods, Point, ScrollBar, SysColors, Theme};
+use shell::{CTRL, Msg, PATH, Run, Shell, Step, key, wheel};
 
 fn check(scale: f32, theme: Theme, steps: impl FnOnce(&Run) -> Vec<Step>) {
     let mut run = Run::painted(Shell::new(), scale, theme);
@@ -130,4 +131,59 @@ fn editing_paints_exactly_its_damage() {
         btn_text: Color::hex(0x00_0008),
     };
     check(1.25, Theme::high_contrast(sys), editing);
+}
+
+/// Scrolling the table, from its top: row 4 clicked, Ctrl+End and Ctrl+Home; the pointer onto the
+/// bar's strip (the bar widens), its thumb dragged down and partway back, a press on the track
+/// below it (a page); the pointer back on the rows (the bar narrows), then wheel notches and a
+/// finer delta.
+fn scrolling(run: &Run, bar: ScrollBar) -> Vec<Step> {
+    let input = Step::Input;
+    let rows = run.center(&Run::TABLE);
+    let row = run.center(&Run::row(4));
+    let thumb = bar.thumb.center();
+    let strip = Point {
+        x: bar.track.center().x,
+        y: thumb.y,
+    };
+    let below = Point {
+        y: bar.track.bottom() - 2.0,
+        ..strip
+    };
+    let mut steps = vec![
+        input(Input::PointerMove(row)),
+        input(Input::PointerDown(row)),
+        input(Input::PointerUp(row)),
+        key(KeyCode::End, true, CTRL),
+        key(KeyCode::Home, true, CTRL),
+        input(Input::PointerMove(strip)),
+        input(Input::PointerDown(strip)),
+    ];
+    for dy in [20.0, 60.0, 120.0, 45.0] {
+        steps.push(input(Input::PointerMove(Point {
+            y: thumb.y + dy,
+            ..strip
+        })));
+    }
+    steps.extend([
+        input(Input::PointerUp(strip)),
+        input(Input::PointerMove(below)),
+        input(Input::PointerDown(below)),
+        input(Input::PointerUp(below)),
+        input(Input::PointerMove(rows)),
+        wheel(rows, -120),
+        wheel(rows, -60),
+        wheel(rows, 120),
+    ]);
+    steps
+}
+
+#[test]
+fn scrolling_paints_exactly_its_damage() {
+    for (scale, theme) in [(1.0, Theme::LIGHT), (1.5, Theme::DARK)] {
+        check(scale, theme, |run| {
+            let bar = run.table_bar().expect("the table overflows");
+            scrolling(run, bar)
+        });
+    }
 }

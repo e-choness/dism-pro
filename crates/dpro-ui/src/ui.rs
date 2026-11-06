@@ -9,7 +9,9 @@ use crate::{
     damage::Damage,
     field::{Caret, ClipboardRequest, Field},
     geom::{Point, Rect, RectPx, Size},
+    layout::Shown,
     pool::TextPool,
+    scroll::{Drag, Scroll},
     tooltip::Tip,
     tree::{Key, NIL, Node, NodeId, NodeInfo, Role},
 };
@@ -46,6 +48,10 @@ impl Motion {
 ///
 /// `M` is the view's message type: input on a node yields the message the view gave it.
 #[derive(Debug)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent window states (active, focus shown, caret on, bars hidden)"
+)]
 pub struct Ui<M> {
     pub(crate) nodes: Vec<Node<M>>,
     pub(crate) free: Vec<u32>,
@@ -104,6 +110,19 @@ pub struct Ui<M> {
     /// The node a context request found since [`take_context`](Self::take_context); [`NIL`] if
     /// none did.
     pub(crate) context: u32,
+    /// Scroll viewports' state, by their `scroll` slot; freed slots are reused (`scroll.rs`).
+    pub(crate) scrolls: Vec<Scroll>,
+    pub(crate) free_scrolls: Vec<u32>,
+    /// Windows' wheel characters and lines a notch, by axis (x, y).
+    pub(crate) wheel: [u32; 2],
+    /// "Automatically hide scroll bars".
+    pub(crate) auto_hide_bars: bool,
+    /// A scroll bar's thumb being dragged.
+    pub(crate) drag: Option<Drag>,
+    /// The bar whose strip the pointer is on: its viewport's slot and axis.
+    pub(crate) bar_hot: Option<(u32, usize)>,
+    /// While layout runs, where the subtree it's arranging shows (`layout.rs`).
+    pub(crate) shown: Shown,
 }
 
 /// A node's tooltip, and a dropdown's accessible name and step: in a side table, so the nodes
@@ -193,6 +212,13 @@ impl<M> Ui<M> {
             anchor: None,
             anchor_node: NIL,
             context: NIL,
+            scrolls: Vec::new(),
+            free_scrolls: Vec::new(),
+            wheel: [3, 3],
+            auto_hide_bars: true,
+            drag: None,
+            bar_hot: None,
+            shown: Shown::default(),
         };
         ui.damage_all();
         ui
@@ -210,6 +236,7 @@ impl<M> Ui<M> {
     /// bounds go to assistive technology again.
     pub fn set_scale(&mut self, scale: f32) {
         if self.scale.to_bits() != scale.to_bits() {
+            self.rescale_scrolls(self.scale, scale);
             self.scale = scale;
             self.damage_all();
             self.a11y.all = true;
@@ -325,7 +352,7 @@ impl<M> Ui<M> {
         Some(NodeInfo {
             role: n.role,
             key: n.key,
-            rect: n.rect,
+            rect: self.window_rect(i),
             text: &n.text,
             text_style: n.text_style,
             enabled: n.enabled,
@@ -336,6 +363,7 @@ impl<M> Ui<M> {
             pressed: n.pressed,
             focused: self.focus == i,
             hover: n.hover_t,
+            scroll: self.scroll_info(i),
         })
     }
 
@@ -389,11 +417,14 @@ impl<M> Ui<M> {
         } else {
             self.nodes[before as usize].prev
         };
+        let p = &self.nodes[parent as usize];
+        let in_viewport = p.in_viewport || p.scroll != NIL;
         {
             let c = &mut self.nodes[child as usize];
             c.parent = parent;
             c.prev = prev;
             c.next = before;
+            c.in_viewport = in_viewport;
         }
         if prev == NIL {
             self.nodes[parent as usize].first = child;
@@ -430,8 +461,7 @@ impl<M> Ui<M> {
 
     /// Unlinks and frees `child` with its subtree, damaging where it was.
     pub(crate) fn remove(&mut self, child: u32) {
-        let rect = self.nodes[child as usize].rect;
-        self.damage_rect(rect);
+        self.damage_view(child);
         let parent = self.nodes[child as usize].parent;
         self.unlink(child);
         self.free_subtree(child);
@@ -492,6 +522,10 @@ impl<M> Ui<M> {
             if side != NIL {
                 self.release_side(side);
             }
+            let scroll = std::mem::replace(&mut self.nodes[i as usize].scroll, NIL);
+            if scroll != NIL {
+                self.release_scroll(scroll);
+            }
         }
         let n = &mut self.nodes[i as usize];
         n.live = false;
@@ -531,10 +565,10 @@ impl<M> Ui<M> {
     }
 
     /// The node's look changed but not its layout (hover, press, focus, check state).
+    /// Inside a scroll viewport, where it shows.
     pub(crate) fn damage_node(&mut self, i: u32) {
-        if let Some(n) = self.nodes.get(i as usize) {
-            let rect = n.rect;
-            self.damage_rect(rect);
+        if (i as usize) < self.nodes.len() {
+            self.damage_view(i);
         }
     }
 

@@ -257,6 +257,15 @@ impl<P: Model> Host<P> {
             Event::PointerUp(p) => Input::PointerUp(at(p)),
             Event::PointerLeave => Input::PointerLeave,
             Event::Char(c) => Input::Char(c),
+            Event::Wheel {
+                delta,
+                horizontal,
+                at: p,
+            } => Input::Wheel {
+                at: at(p),
+                delta,
+                horizontal,
+            },
             Event::Key { vk, down, mods } => {
                 let key = key_code(vk);
                 if down && closes(kind, key, mods.alt) {

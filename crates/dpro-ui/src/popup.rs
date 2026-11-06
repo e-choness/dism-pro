@@ -185,7 +185,12 @@ impl<M> Ui<M> {
             self.show_focus_ring();
         }
         if self.nodes[i as usize].interactive() {
-            self.move_focus(i);
+            // From the keyboard, the node comes into view; under the pointer, it's there.
+            if at.is_some() {
+                self.focus_node(i);
+            } else {
+                self.move_focus(i);
+            }
             if self.nodes[i as usize].selected == Some(false) {
                 self.activate(i, out);
             }
@@ -193,7 +198,7 @@ impl<M> Ui<M> {
         self.anchor_node = i;
         self.anchor = Some(match at {
             Some(p) => Rect::new(p.x, p.y, 0.0, 0.0),
-            None => self.nodes[i as usize].rect,
+            None => self.window_rect(i),
         });
         self.context = i;
         true
@@ -201,16 +206,9 @@ impl<M> Ui<M> {
 
     /// The deepest node under `p`, interactive or not; the root if none.
     fn deepest(&self, p: Point) -> u32 {
-        let mut at = ROOT;
-        loop {
-            let mut c = self.nodes[at as usize].last;
-            while c != NIL && !self.nodes[c as usize].rect.contains(p) {
-                c = self.nodes[c as usize].prev;
-            }
-            if c == NIL {
-                return at;
-            }
-            at = c;
+        match self.walk_at(p, |_| {}).0 {
+            NIL => ROOT,
+            at => at,
         }
     }
 }

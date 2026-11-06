@@ -5,8 +5,8 @@
 //!   else the next one out. A notch is Windows' wheel lines ([`Ui::set_wheel`]) of the viewport's
 //!   line height; `u32::MAX` lines is a page, and a finer wheel's smaller deltas scroll their share
 //!   at once. The horizontal wheel scrolls its characters, each half the body size.
-//! - PgUp, PgDn, Ctrl+Home and Ctrl+End scroll the viewport holding the focus. A viewport with no
-//!   tab stop inside is one itself, and its arrows scroll it.
+//! - Page Up, Page Down, Ctrl+Home and Ctrl+End scroll the viewport holding the focus. A viewport
+//!   with no tab stop inside is one itself, and its arrows scroll it.
 //! - Focus moving to a node out of view scrolls it wholly into view (the focus ring is drawn
 //!   inside it). A client can scroll by line, page or offset, and bring a node into view.
 //! - The bar: a thin indicator while the content overflows, an expanded bar while the pointer is
@@ -15,9 +15,14 @@
 //! - A scroll damages the viewport and nothing else, and asks for no frames or wakes after it.
 //! - Menus and lists scroll when they're taller than their popup.
 
+#![expect(
+    clippy::expect_used,
+    reason = "test helpers: a node that isn't there fails the test"
+)]
+
 use dpro_ui::{
     Axes, Dim, Element, FakeText, Input, Insets, Key, KeyCode, KeyEvent, Mods, Motion, NodeId,
-    Point, Rect, Size, Style, Ui,
+    Point, Rect, ScrollInfo, Size, Style, Ui,
     accesskit::{Action, ActionData, ActionRequest, NodeId as AkId, ScrollUnit, TreeId},
     tokens,
 };
@@ -68,16 +73,24 @@ fn new_ui(scale: f32) -> Ui<Msg> {
 }
 
 fn viewport(ui: &Ui<Msg>) -> NodeId {
-    ui.find(&[Key::name("rows")]).unwrap()
+    ui.find(&[Key::name("rows")]).expect("the viewport")
 }
 
 fn offset_y(ui: &Ui<Msg>) -> f32 {
-    ui.info(viewport(ui)).unwrap().scroll.unwrap().offset.y
+    scroll(ui).offset.y
+}
+
+fn scroll(ui: &Ui<Msg>) -> ScrollInfo {
+    ui.info(viewport(ui))
+        .and_then(|n| n.scroll)
+        .expect("a viewport's scroll state")
 }
 
 fn row_rect(ui: &Ui<Msg>, r: u64) -> Rect {
-    let id = ui.find(&[Key::name("rows"), Key::index(r)]).unwrap();
-    ui.info(id).unwrap().rect
+    ui.find(&[Key::name("rows"), Key::index(r)])
+        .and_then(|id| ui.info(id))
+        .expect("a row")
+        .rect
 }
 
 fn wheel(ui: &mut Ui<Msg>, at: Point, delta: i32) -> bool {
@@ -170,8 +183,8 @@ fn the_offset_stops_at_the_end_and_whole_pixels_hold_at_any_scale() {
         let s = ui.info(viewport(&ui)).unwrap().scroll.unwrap();
         assert_eq!(s.offset.y, s.content.h - 200.0, "at {scale}");
         assert_eq!(
-            s.offset_px[1] as f32,
-            (s.offset.y * scale).round(),
+            f64::from(i32::try_from(s.offset_px[1]).unwrap()),
+            f64::from((s.offset.y * scale).round()),
             "at {scale}"
         );
         // The last row ends at the viewport's bottom, on a whole pixel.
@@ -408,8 +421,10 @@ fn a_client_scrolls_by_line_page_and_offset_and_brings_an_item_into_view() {
     assert_eq!(offset_y(&ui), line);
     assert!(act(&mut ui, request(rows, Action::ScrollDown, page)));
     assert_eq!(offset_y(&ui), line + 200.0 - line);
-    // No unit is a page, as UIA's ScrollPattern's large increment.
+    // No unit is a page (the view less a line), as UIA's ScrollPattern's large increment.
     assert!(act(&mut ui, request(rows, Action::ScrollUp, None)));
+    assert_eq!(offset_y(&ui), line);
+    assert!(act(&mut ui, request(rows, Action::ScrollUp, item.clone())));
     assert_eq!(offset_y(&ui), 0.0);
     assert!(
         !act(&mut ui, request(rows, Action::ScrollUp, item)),
@@ -428,10 +443,8 @@ fn a_client_scrolls_by_line_page_and_offset_and_brings_an_item_into_view() {
     // ScrollIntoView on row 25 brings it wholly into view, and moves no focus.
     let row = ui.find(&[Key::name("rows"), Key::index(25)]).unwrap();
     let focus = ui.focus();
-    assert!(act(
-        &mut ui,
-        request(ak(&ui, row), Action::ScrollIntoView, None)
-    ));
+    let target = ak(&ui, row);
+    assert!(act(&mut ui, request(target, Action::ScrollIntoView, None)));
     let view = ui.info(viewport(&ui)).unwrap().rect;
     let rect = row_rect(&ui, 25);
     assert!(
@@ -568,17 +581,11 @@ fn a_scroll_damages_the_viewport_only_and_asks_for_nothing_after() {
     ui.clear_damage();
     wheel(&mut ui, INSIDE, -120);
     let view = ui.info(viewport(&ui)).unwrap().rect;
-    let px = |v: f32| v.round() as i32;
+    let view_px = view.to_px(1.0);
     for r in ui.damage() {
-        assert!(
-            r.x0 >= px(view.x)
-                && r.y0 >= px(view.y)
-                && r.x1 <= px(view.right())
-                && r.y1 <= px(view.bottom()),
-            "{r:?} outside the viewport {view:?}"
-        );
+        assert!(view_px.contains(*r), "{r:?} outside the viewport {view:?}");
     }
-    assert!(!ui.damage().is_empty());
+    assert_ne!(ui.damage(), []);
     assert!(!ui.wants_frame());
     assert_eq!(ui.tooltip_timer(0), None);
 }
@@ -628,10 +635,13 @@ fn a_menu_taller_than_its_popup_scrolls_and_keeps_the_focused_item_in_view() {
         );
     });
     ui.layout(&mut FakeText);
-    let list = ui.find(&[Key::name("list")]).unwrap();
-    let s = ui.info(list).unwrap().scroll.unwrap();
+    let options = ui.find(&[Key::name("list")]).unwrap();
+    let s = ui.info(options).unwrap().scroll.unwrap();
     assert!(s.content.h > 300.0);
-    let view = ui.info(list).unwrap().rect;
+    let view = ui.info(options).unwrap().rect;
+    // Nothing is focused yet, so the first key focuses the first option (A1.4); End then goes to
+    // the last, out of view.
+    key(&mut ui, KeyCode::Down, Mods::default());
     key(&mut ui, KeyCode::End, Mods::default());
     let last = ui.find(&[Key::name("list"), Key::index(39)]).unwrap();
     assert_eq!(ui.focus(), Some(last));

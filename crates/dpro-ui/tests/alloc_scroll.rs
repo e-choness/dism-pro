@@ -17,7 +17,7 @@ mod shell;
 
 use std::alloc::System;
 
-use dpro_ui::{Input, KeyCode, Point, Theme};
+use dpro_ui::{Input, KeyCode, Point, ScrollBar, Theme};
 use shell::{CTRL, Run, Shell, Step, key};
 use stats_alloc::{INSTRUMENTED_SYSTEM, Region, StatsAlloc};
 
@@ -25,13 +25,12 @@ use stats_alloc::{INSTRUMENTED_SYSTEM, Region, StatsAlloc};
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
 /// The scroll script, from the table's top with the pointer resting on it and row 4 focused.
-fn script(run: &Run) -> Vec<Step> {
+fn script(run: &Run, bar: ScrollBar) -> Vec<Step> {
     let mut steps = Vec::new();
     for delta in [-120, -120, -120, -60, -60, 120, 120, 120, 120] {
         steps.push(run.table_wheel(delta));
     }
     // The thumb, pressed at its center and dragged 300 px down in 30 frames, then back.
-    let bar = run.table_bar().expect("the table overflows");
     let grab = bar.thumb.center();
     steps.push(Step::Input(Input::PointerMove(grab)));
     steps.push(Step::Input(Input::PointerDown(grab)));
@@ -60,7 +59,8 @@ fn a_warm_scroll_allocates_nothing() {
     let mut run = run.over_table();
     let row = run.ui.find(&Run::row(4));
     run.ui.set_focus(row);
-    let steps = script(&run);
+    let bar = run.table_bar().expect("the table overflows");
+    let steps = script(&run, bar);
     for _ in 0..2 {
         for s in &steps {
             run.step(s.clone());

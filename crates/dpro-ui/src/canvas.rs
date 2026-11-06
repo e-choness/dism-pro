@@ -9,6 +9,8 @@
 //! - The arithmetic is integer except that distance, so results are the same on every machine
 //!   (T1 compares pixels exactly).
 //! - Drawing never allocates (§7 U8), and every draw is clipped to the clip rectangle.
+//! - Coordinates are moved by the canvas's origin, which a scroll viewport sets for its content
+//!   (TD-0009 A2); the clip is always in the canvas's own pixels.
 
 use crate::{
     geom::RectPx,
@@ -27,6 +29,8 @@ pub struct Canvas<'a> {
     width: u32,
     height: u32,
     clip: RectPx,
+    /// Added to every coordinate drawn (not to the clip), x then y.
+    origin: [i32; 2],
 }
 
 impl<'a> Canvas<'a> {
@@ -45,7 +49,27 @@ impl<'a> Canvas<'a> {
                 x1: w,
                 y1: h,
             },
+            origin: [0, 0],
         })
+    }
+
+    /// Every later draw is moved by `origin` pixels (a scroll viewport's content). The clip isn't.
+    pub(crate) fn set_origin(&mut self, origin: [i32; 2]) {
+        self.origin = origin;
+    }
+
+    pub(crate) fn origin(&self) -> [i32; 2] {
+        self.origin
+    }
+
+    /// `r` moved by the origin: where it lands in the canvas's own pixels.
+    pub(crate) fn placed(&self, r: RectPx) -> RectPx {
+        RectPx {
+            x0: r.x0.saturating_add(self.origin[0]),
+            y0: r.y0.saturating_add(self.origin[1]),
+            x1: r.x1.saturating_add(self.origin[0]),
+            y1: r.y1.saturating_add(self.origin[1]),
+        }
     }
 
     #[must_use]
@@ -87,7 +111,7 @@ impl<'a> Canvas<'a> {
     /// Sets `rect` to `color`, replacing what's there instead of blending over it: the window's
     /// background, which under glass is clear, so the backdrop shows through (ADR-0007).
     pub fn clear(&mut self, rect: RectPx, color: Color) {
-        let area = rect.intersect(self.clip);
+        let area = self.placed(rect).intersect(self.clip);
         if area.is_empty() {
             return;
         }
@@ -100,7 +124,7 @@ impl<'a> Canvas<'a> {
 
     /// Fills `rect`.
     pub fn fill(&mut self, rect: RectPx, color: Color) {
-        let area = rect.intersect(self.clip);
+        let area = self.placed(rect).intersect(self.clip);
         if area.is_empty() || color.a == 0 {
             return;
         }
@@ -112,6 +136,11 @@ impl<'a> Canvas<'a> {
 
     /// Fills `rect` with its corners rounded to `radius` physical pixels.
     pub fn rrect(&mut self, rect: RectPx, radius: f32, color: Color) {
+        let rect = self.placed(rect);
+        self.rrect_placed(rect, radius, color);
+    }
+
+    fn rrect_placed(&mut self, rect: RectPx, radius: f32, color: Color) {
         let area = rect.intersect(self.clip);
         if area.is_empty() || color.a == 0 {
             return;
@@ -142,6 +171,7 @@ impl<'a> Canvas<'a> {
     /// A ring `width` physical pixels wide inside the edge of `rect`, whose outer corners are
     /// rounded to `radius` (the inner ones to `radius - width`): a border, or a focus ring.
     pub fn ring(&mut self, rect: RectPx, radius: f32, width: i32, color: Color) {
+        let rect = self.placed(rect);
         let width = width.max(1);
         let inner = RectPx {
             x0: rect.x0 + width,
@@ -150,7 +180,7 @@ impl<'a> Canvas<'a> {
             y1: rect.y1 - width,
         };
         if inner.is_empty() {
-            self.rrect(rect, radius, color);
+            self.rrect_placed(rect, radius, color);
             return;
         }
         let area = rect.intersect(self.clip);
@@ -194,6 +224,10 @@ impl<'a> Canvas<'a> {
         if width == 0 || color.a == 0 {
             return;
         }
+        let (left, top) = (
+            left.saturating_add(self.origin[0]),
+            top.saturating_add(self.origin[1]),
+        );
         let stride = idx_u(width);
         let target = RectPx {
             x0: left,

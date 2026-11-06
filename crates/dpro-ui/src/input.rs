@@ -38,7 +38,7 @@
 use crate::{
     geom::Point,
     tokens::motion::HOLD_MS,
-    tree::{Group, NIL, NodeId, Role},
+    tree::{Group, NIL, NOT_STARTED, NodeId, Role},
     ui::{Hold, ROOT, Ui},
 };
 
@@ -50,6 +50,13 @@ pub enum Input {
     PointerUp(Point),
     /// The pointer left the window (`WM_MOUSELEAVE`).
     PointerLeave,
+    /// The wheel turned at a point (`WM_MOUSEWHEEL`, `WM_MOUSEHWHEEL`): `delta` in 120ths of a
+    /// notch, positive away from the user (up the content), or with `horizontal` to the right.
+    Wheel {
+        at: Point,
+        delta: i32,
+        horizontal: bool,
+    },
     /// A context menu was asked for (`WM_CONTEXTMENU`): by the pointer at a point (a right-click),
     /// or by the keyboard (`None`: Shift+F10, the Menu key) for the focused node.
     ContextMenu(Option<Point>),
@@ -110,10 +117,16 @@ impl<M: Clone> Ui<M> {
         self.pointer = match input {
             Input::PointerMove(p) | Input::PointerDown(p) | Input::PointerUp(p) => Some(p),
             Input::PointerLeave => None,
-            Input::Key(_) | Input::Char(_) | Input::ContextMenu(_) => self.pointer,
+            Input::Key(_) | Input::Char(_) | Input::ContextMenu(_) | Input::Wheel { .. } => {
+                self.pointer
+            }
         };
         match input {
             Input::PointerMove(p) => {
+                // A thumb being dragged takes the pointer (A2.4).
+                if self.scroll_pointer(Some(p)) {
+                    return true;
+                }
                 let hit = self.hit(p);
                 let selecting = self.is_field(self.pressed);
                 if selecting {
@@ -130,7 +143,7 @@ impl<M: Clone> Ui<M> {
                         .is_some_and(|n| n.role == Role::MenuItem);
                 if item {
                     self.hide_focus_ring();
-                    self.move_focus(hit);
+                    self.focus_node(hit);
                 }
                 if !self.sides_empty() {
                     self.tip_pointer(Some(p));
@@ -138,59 +151,13 @@ impl<M: Clone> Ui<M> {
                 moved || selecting || item
             }
             Input::PointerLeave => {
+                self.scroll_pointer(None);
                 self.tip_pointer(None);
                 self.pointer_over(NIL)
             }
             Input::ContextMenu(at) => self.context_request(at, out),
-            Input::PointerDown(p) => {
-                let hit = self.hit(p);
-                self.pointer_over(hit);
-                self.tip_cancel(true);
-                self.hide_focus_ring();
-                if hit == NIL {
-                    return false;
-                }
-                self.pressed = hit;
-                self.move_focus(hit);
-                if self.is_field(hit) {
-                    self.field_pointer(hit, p, false);
-                } else {
-                    self.set_pressed(hit, true);
-                    if self.nodes[hit as usize].hold {
-                        self.start_hold(hit, None);
-                    }
-                }
-                true
-            }
-            Input::PointerUp(p) => {
-                let target = self.pressed;
-                if target == NIL {
-                    return false;
-                }
-                self.pressed = NIL;
-                self.set_pressed(target, false);
-                let held = self.hold.node == target && self.hold.key.is_none();
-                if held {
-                    self.end_hold();
-                }
-                let hit = self.hit(p);
-                self.pointer_over(hit);
-                // A release on a menu item invokes it, even if the press began on another.
-                let item = |i: u32| {
-                    self.nodes
-                        .get(i as usize)
-                        .is_some_and(|n| n.role == Role::MenuItem)
-                };
-                let to = if item(target) && item(hit) {
-                    hit
-                } else {
-                    target
-                };
-                if hit == to && !held && !self.is_field(to) {
-                    self.activate(to, out);
-                }
-                true
-            }
+            Input::PointerDown(p) => self.pointer_down(p),
+            Input::PointerUp(p) => self.pointer_up(p, out),
             Input::Key(k) => {
                 let before = self.focus;
                 if k.down {
@@ -211,10 +178,93 @@ impl<M: Clone> Ui<M> {
                 used
             }
             Input::Char(c) => self.field_char(c, out),
+            Input::Wheel {
+                at,
+                delta,
+                horizontal,
+            } => {
+                self.tip_cancel(true);
+                let scrolled = self.wheel(at, delta, horizontal);
+                // The content moved under the pointer: the hover follows it.
+                if scrolled && self.pressed == NIL {
+                    let hit = self.hit(at);
+                    self.pointer_over(hit);
+                }
+                scrolled
+            }
         }
     }
 
+    fn pointer_down(&mut self, p: Point) -> bool {
+        // A press on a scroll bar's strip drags its thumb or pages (A2.4).
+        if self.scroll_press(p) {
+            self.tip_cancel(true);
+            return true;
+        }
+        let hit = self.hit(p);
+        self.pointer_over(hit);
+        self.tip_cancel(true);
+        self.hide_focus_ring();
+        if hit == NIL {
+            return false;
+        }
+        self.pressed = hit;
+        // Focus from the pointer scrolls nothing: the node stays under the pointer.
+        self.focus_node(hit);
+        if self.is_field(hit) {
+            self.field_pointer(hit, p, false);
+        } else {
+            self.set_pressed(hit, true);
+            if self.nodes[hit as usize].hold {
+                self.start_hold(hit, None);
+            }
+        }
+        true
+    }
+
+    fn pointer_up(&mut self, p: Point, out: &mut Vec<M>) -> bool {
+        if self.scroll_release() {
+            // What's under the pointer now: the drag held the bar and the hover as they were.
+            self.scroll_pointer(Some(p));
+            let hit = self.hit(p);
+            self.pointer_over(hit);
+            return true;
+        }
+        let target = self.pressed;
+        if target == NIL {
+            return false;
+        }
+        self.pressed = NIL;
+        self.set_pressed(target, false);
+        let held = self.hold.node == target && self.hold.key.is_none();
+        if held {
+            self.end_hold();
+        }
+        let hit = self.hit(p);
+        self.pointer_over(hit);
+        // A release on a menu item invokes it, even if the press began on another.
+        let item = |i: u32| {
+            self.nodes
+                .get(i as usize)
+                .is_some_and(|n| n.role == Role::MenuItem)
+        };
+        let to = if item(target) && item(hit) {
+            hit
+        } else {
+            target
+        };
+        if hit == to && !held && !self.is_field(to) {
+            self.activate(to, out);
+        }
+        true
+    }
+
     fn key(&mut self, k: KeyEvent, out: &mut Vec<M>) -> bool {
+        // What nothing else used may scroll the viewport holding the focus (A2.4).
+        self.control_key(k, out) || self.scroll_key(k)
+    }
+
+    fn control_key(&mut self, k: KeyEvent, out: &mut Vec<M>) -> bool {
         let holds = self.focus != NIL && self.nodes[self.focus as usize].hold;
         match (k.key, k.down) {
             (KeyCode::Tab, true) => {
@@ -334,7 +384,7 @@ impl<M: Clone> Ui<M> {
         {
             out.push(msg.clone());
             if n.expanded.is_some() {
-                self.anchor = Some(n.rect);
+                self.anchor = Some(self.window_rect(i));
                 self.anchor_node = i;
             }
         }
@@ -436,7 +486,9 @@ impl<M> Ui<M> {
     /// can't take focus is ignored.
     pub fn set_focus(&mut self, id: Option<NodeId>) {
         match id.and_then(|id| self.index(id)) {
-            Some(i) if self.nodes[i as usize].interactive() => self.move_focus(i),
+            Some(i) if self.nodes[i as usize].interactive() || self.lone_viewport(i) => {
+                self.move_focus(i);
+            }
             Some(_) => {}
             None => self.move_focus(NIL),
         }
@@ -457,7 +509,10 @@ impl<M> Ui<M> {
                 continue;
             };
             let n = &mut self.nodes[i as usize];
-            let start = *n.anim_start.get_or_insert(now_ms);
+            if n.anim_start == NOT_STARTED {
+                n.anim_start = now_ms;
+            }
+            let start = n.anim_start;
             let elapsed = now_ms.saturating_sub(start).min(u64::from(duration));
             let progress = if duration == 0 {
                 1.0
@@ -469,7 +524,7 @@ impl<M> Ui<M> {
             let done = progress >= 1.0;
             if done {
                 n.animating = false;
-                n.anim_start = None;
+                n.anim_start = NOT_STARTED;
                 self.anims.swap_remove(k);
             } else {
                 k += 1;
@@ -592,7 +647,12 @@ impl<M> Ui<M> {
     /// one in a group its [entry](Self::group_entry), unless `from` is in that group already.
     fn tab_stop(&self, at: u32, from: u32, forward: bool) -> u32 {
         if !self.nodes[at as usize].interactive() {
-            return NIL;
+            // A viewport with no tab stop inside is one (A2.4).
+            return if self.nodes[at as usize].scroll != NIL && self.lone_viewport(at) {
+                at
+            } else {
+                NIL
+            };
         }
         let g = self.group_of(at);
         if g == NIL {
@@ -605,25 +665,15 @@ impl<M> Ui<M> {
     }
 
     /// The topmost enabled interactive node under `p`, or [`NIL`].
+    /// Over a scroll bar, none: the bar is above the content (A2.4).
     pub(crate) fn hit(&self, p: Point) -> u32 {
         let mut found = NIL;
-        let mut at = ROOT;
-        if !self.nodes[ROOT as usize].rect.contains(p) {
-            return NIL;
-        }
-        loop {
+        let (_, bar) = self.walk_at(p, |at| {
             if self.nodes[at as usize].interactive() {
                 found = at;
             }
-            let mut c = self.nodes[at as usize].last;
-            while c != NIL && !self.nodes[c as usize].rect.contains(p) {
-                c = self.nodes[c as usize].prev;
-            }
-            if c == NIL {
-                return found;
-            }
-            at = c;
-        }
+        });
+        if bar.is_some() { NIL } else { found }
     }
 
     /// The pointer is over `hit`. While a press is captured, only the captured node can be
@@ -674,7 +724,7 @@ impl<M> Ui<M> {
         } else {
             // From wherever the highlight is now, for a full duration starting at the next tick.
             n.anim_from = n.hover_t;
-            n.anim_start = None;
+            n.anim_start = NOT_STARTED;
             if !n.animating {
                 n.animating = true;
                 let id = NodeId {
@@ -716,7 +766,15 @@ impl<M> Ui<M> {
         }
     }
 
+    /// Moves focus to `to` and scrolls it into view (A2.4): from the keyboard, a client, or the
+    /// app.
     pub(crate) fn move_focus(&mut self, to: u32) {
+        self.focus_node(to);
+        self.reveal(to);
+    }
+
+    /// Moves focus to `to` where it is: from the pointer, which it stays under.
+    pub(crate) fn focus_node(&mut self, to: u32) {
         let from = self.focus;
         if from == to {
             return;

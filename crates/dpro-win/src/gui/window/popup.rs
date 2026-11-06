@@ -58,15 +58,15 @@ use windows_sys::{
                 GetActiveWindow, GetCapture, ReleaseCapture, SetActiveWindow,
             },
             WindowsAndMessaging::{
-                CS_DROPSHADOW, CreateWindowExW, DefWindowProcW, HTCLIENT, HTTRANSPARENT, HWND_TOP,
-                MA_ACTIVATEANDEAT, MA_NOACTIVATE, PostMessageW, SC_CLOSE, SW_HIDE,
-                SW_PARENTOPENING, SW_SHOW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SendMessageW,
-                SetCursor, SetWindowPos, ShowWindow, WA_INACTIVE, WM_ACTIVATE, WM_CANCELMODE,
-                WM_CONTEXTMENU, WM_CREATE, WM_DPICHANGED, WM_GETMINMAXINFO, WM_LBUTTONDOWN,
-                WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEACTIVATE, WM_MOVE,
-                WM_NCACTIVATE, WM_NCHITTEST, WM_POWERBROADCAST, WM_RBUTTONDOWN, WM_RBUTTONUP,
-                WM_SETCURSOR, WM_SETTINGCHANGE, WM_SHOWWINDOW, WM_SYSCOLORCHANGE, WM_SYSCOMMAND,
-                WM_THEMECHANGED, WM_WTSSESSION_CHANGE, WM_XBUTTONDOWN, WM_XBUTTONUP,
+                CS_DROPSHADOW, CreateWindowExW, DefWindowProcW, GetClientRect, HTCLIENT,
+                HTTRANSPARENT, HWND_TOP, MA_ACTIVATEANDEAT, MA_NOACTIVATE, PostMessageW, SC_CLOSE,
+                SW_HIDE, SW_PARENTOPENING, SW_SHOW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE,
+                SendMessageW, SetCursor, SetWindowPos, ShowWindow, WA_INACTIVE, WM_ACTIVATE,
+                WM_CANCELMODE, WM_CONTEXTMENU, WM_CREATE, WM_DPICHANGED, WM_GETMINMAXINFO,
+                WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEACTIVATE,
+                WM_MOVE, WM_NCACTIVATE, WM_NCHITTEST, WM_POWERBROADCAST, WM_RBUTTONDOWN,
+                WM_RBUTTONUP, WM_SETCURSOR, WM_SETTINGCHANGE, WM_SHOWWINDOW, WM_SYSCOLORCHANGE,
+                WM_SYSCOMMAND, WM_THEMECHANGED, WM_WTSSESSION_CHANGE, WM_XBUTTONDOWN, WM_XBUTTONUP,
                 WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_POPUP,
             },
         },
@@ -599,6 +599,36 @@ impl State {
         (inside(pt.x, size.w) && inside(pt.y, size.h)).then_some(Some(PointPx { x: pt.x, y: pt.y }))
     }
 
+    /// On a main window's state: a wheel turned (`WM_MOUSEWHEEL`, or `WM_MOUSEHWHEEL` if
+    /// `horizontal`), sent to `hwnd` or one of its popups. The surface under the pointer hears
+    /// it in its client pixels: a shown menu or list, else the window's client area. A tooltip
+    /// is never under it, as clicks pass through it too.
+    pub(super) fn wheel(&self, hwnd: HWND, horizontal: bool, wp: WPARAM, lp: LPARAM) {
+        // GET_WHEEL_DELTA_WPARAM: the high word, signed.
+        let word = u16::try_from((wp >> 16) & 0xFFFF).unwrap_or(0);
+        let delta = i32::from(word.cast_signed());
+        let screen = point(lp);
+        let event = |at: PointPx| Event::Wheel {
+            delta,
+            horizontal,
+            at,
+        };
+        for kind in [PopupKind::Menu, PopupKind::List] {
+            if !self.popups.shown(kind) {
+                continue;
+            }
+            if let Some(popup) = self.popups.hwnd(kind)
+                && let Some(at) = client_point(popup, screen)
+            {
+                self.dispatch_as(hwnd, Surface::Popup(kind), |h, cx| h.event(event(at), cx));
+                return;
+            }
+        }
+        if let Some(at) = client_point(hwnd, screen) {
+            self.send(hwnd, event(at));
+        }
+    }
+
     /// Every shown popup must close: the handler hears [`Event::Dismiss`] for each.
     pub(super) fn dismiss_popups(&self, hwnd: HWND) {
         for kind in PopupKind::ALL {
@@ -809,6 +839,27 @@ fn work_area(r: RectPx, fallback: u32) -> (RectPx, u32) {
         }
     };
     (work, monitor_dpi(monitor).unwrap_or(fallback))
+}
+
+/// `screen` (screen pixels) in `hwnd`'s client pixels, if it's in its client area.
+fn client_point(hwnd: HWND, screen: PointPx) -> Option<PointPx> {
+    let mut pt = POINT {
+        x: screen.x,
+        y: screen.y,
+    };
+    let mut client = RECT {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    // SAFETY: hwnd is a live window of this thread, and both out-pointers are live locals.
+    let ok = unsafe {
+        ScreenToClient(hwnd, &raw mut pt) != 0 && GetClientRect(hwnd, &raw mut client) != 0
+    };
+    let inside = |v: i32, end: i32| (0..end).contains(&v);
+    (ok && inside(pt.x, client.right) && inside(pt.y, client.bottom))
+        .then_some(PointPx { x: pt.x, y: pt.y })
 }
 
 type GetDpiForMonitor = unsafe extern "system" fn(HMONITOR, i32, *mut u32, *mut u32) -> HRESULT;
