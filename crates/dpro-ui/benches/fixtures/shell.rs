@@ -220,13 +220,20 @@ fn row(gap: f32) -> Style {
     }
 }
 
-/// A control `height` high, `pad` from its text at each side (doc 05: 30, 36 or 40 px).
+/// A control at least `height` high, `pad` from its text at each side (doc 05: 30, 36 or 40 px).
+/// At least, not exactly: larger text (Windows' text size, up to 225 %) makes it taller.
 fn sized(height: f32, pad: f32) -> Style {
     Style {
-        height: Dim::Fixed(height),
+        min: at_least(height),
         padding: Insets::xy(pad, 0.0),
         ..Style::default()
     }
+}
+
+/// No narrower than its content, and at least `height` high: what the canvas's fixed heights
+/// become, so that text scaled up reflows instead of clipping.
+fn at_least(height: f32) -> Size {
+    Size { w: 0.0, h: height }
 }
 
 /// A card: surface, hairline border, rounded by `radius`.
@@ -277,7 +284,7 @@ pub(crate) fn view(s: &Shell, cx: &mut Cx<'_, Msg>) {
     cx.add_with(
         Element::stack(Key::name("header")).style(Style {
             padding: Insets::xy(16.0, 8.0),
-            height: Dim::Fixed(48.0),
+            min: at_least(48.0),
             justify: Justify::SpaceBetween,
             ..row(12.0)
         }),
@@ -431,7 +438,7 @@ fn content(s: &Shell, cx: &mut Cx<'_, Msg>) {
                         cx.add_with(
                             Element::button(Key::index(u64::from(r)), &cells[0], Msg::Row(r))
                                 .style(Style {
-                                    height: Dim::Fixed(32.0),
+                                    min: at_least(32.0),
                                     padding: Insets::xy(8.0, 0.0),
                                     ..row(12.0)
                                 })
@@ -556,7 +563,7 @@ fn summary(s: &Shell, cx: &mut Cx<'_, Msg>) {
                 cx.add_with(
                     Element::stack(Key::index(i))
                         .style(Style {
-                            height: Dim::Fixed(56.0),
+                            min: at_least(56.0),
                             padding: Insets::xy(12.0, 8.0),
                             ..row(12.0)
                         })
@@ -631,6 +638,8 @@ pub(crate) enum Step {
     /// A message straight to the view-model, as from a keyboard accelerator, the engine or
     /// assistive technology.
     Update(Msg),
+    /// Windows' text size changed (Settings › Accessibility › Text size), as a factor: 1 to 2.25.
+    TextScale(f32),
 }
 
 /// A key pressed with `mods`, as a step.
@@ -669,24 +678,35 @@ pub(crate) struct Run {
 impl Run {
     /// Frames end at layout and damage (U2).
     pub(crate) fn with(shell: Shell) -> Self {
-        Self::new(shell, 1.0, None)
+        Self::new(shell, 1.0, None, 1.0)
+    }
+
+    /// Frames end at layout and damage, with Windows' text size at `text_scale` (1 to 2.25) from
+    /// the first frame.
+    pub(crate) fn text_scaled(shell: Shell, text_scale: f32) -> Self {
+        Self::new(shell, 1.0, None, text_scale)
     }
 
     /// Frames are painted too, at `scale` in `theme` (U3).
     pub(crate) fn painted(shell: Shell, scale: f32, theme: Theme) -> Self {
-        Self::new(shell, scale, Some(theme))
+        Self::new(shell, scale, Some(theme), 1.0)
+    }
+
+    /// Painted, with the text size at `text_scale` from the first frame.
+    pub(crate) fn painted_text_scaled(shell: Shell, theme: Theme, text_scale: f32) -> Self {
+        Self::new(shell, 1.0, Some(theme), text_scale)
     }
 
     /// Frames end at layout, and an assistive technology listens (U12): the first frame's whole
     /// tree is served, then every frame's changes are taken.
     pub(crate) fn accessible(shell: Shell) -> Self {
-        let mut run = Self::new(shell, 1.0, None);
+        let mut run = Self::new(shell, 1.0, None, 1.0);
         drop(run.ui.a11y_tree());
         run.take_a11y = true;
         run
     }
 
-    fn new(shell: Shell, scale: f32, theme: Option<Theme>) -> Self {
+    fn new(shell: Shell, scale: f32, theme: Option<Theme>, text_scale: f32) -> Self {
         let mut run = Self {
             ui: Ui::new(
                 START,
@@ -706,6 +726,7 @@ impl Run {
         };
         // The window has keyboard focus, as a window the user works in does.
         run.ui.set_active(true);
+        run.ui.set_text_scale(text_scale);
         run.frame();
         run
     }
@@ -731,6 +752,7 @@ impl Run {
                 self.ui.tick(self.now, &mut self.msgs);
             }
             Step::Update(msg) => self.msgs.push(msg),
+            Step::TextScale(t) => self.ui.set_text_scale(t),
         }
         for m in self.msgs.drain(..) {
             self.shell.update(m);

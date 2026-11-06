@@ -7,10 +7,12 @@
 //!   a keystroke, the caret one character left and one word left, a word deleted, and pastes of a
 //!   `MAX_PATH`-long path and of 64 KiB (the most a field holds, the worst case). The standard
 //!   controls (§11 step 4): Right on the focused tab (the next tab is picked and the table
-//!   refilters), one frame of a hold on Hold to apply, and a progress report.
+//!   refilters), one frame of a hold on Hold to apply, and a progress report. Windows' text size
+//!   switched from 100 to 225 % (every text node measured again, the whole page laid out), and the
+//!   first frame at 100 and at 225 %.
 //! - `paint`: U3 without presenting, frames painted at 1000 × 700, scale 1, light theme; and the
-//!   whole window repainted, as after a theme switch, at scales 1 and 1.5. With a keystroke and a
-//!   caret blink in the field, a hold's frame and a progress report.
+//!   whole window repainted, as after a theme switch, at scales 1 and 1.5 and with the text at
+//!   225 %. With a keystroke and a caret blink in the field, a hold's frame and a progress report.
 //! - `a11y`: U12 with a client listening, as in `a11y.rs`: the whole tree, and one frame's update
 //!   for an unchanged event, another row selected, a page switch each way, and a progress report.
 //!
@@ -115,6 +117,11 @@ fn warm_painted_150() -> (Run, Vec<Step>) {
     warmed(Run::painted(Shell::new(), 1.5, Theme::DARK))
 }
 
+/// Warm and painted, with the text size at 225 % (Windows' largest) from the first frame.
+fn warm_painted_225() -> (Run, Vec<Step>) {
+    warmed(Run::painted_text_scaled(Shell::new(), Theme::LIGHT, 2.25))
+}
+
 #[library_benchmark]
 #[bench::scripted(setup = warm)]
 fn session((mut run, steps): (Run, Vec<Step>)) -> (Run, Vec<Step>) {
@@ -136,15 +143,22 @@ fn session((mut run, steps): (Run, Vec<Step>)) -> (Run, Vec<Step>) {
 #[bench::tab_arrow(args = (key(KeyCode::Right, true, Mods::default())), setup = tabs_with)]
 #[bench::hold_tick(args = (Step::Tick(FRAME_MS)), setup = holding_with)]
 #[bench::progress(args = (Step::Update(Msg::Progress(41))), setup = drawer_with)]
+#[bench::text_scale(args = (Step::TextScale(2.25)), setup = warm_with)]
 fn event((mut run, step): (Run, Step)) -> Run {
     run.step(black_box(step));
     run
 }
 
 #[library_benchmark]
-#[bench::shell(setup = Shell::new)]
-fn first_frame(shell: Shell) -> Run {
-    Run::with(black_box(shell))
+#[bench::shell(args = (1.0), setup = shell_at)]
+#[bench::text_225(args = (2.25), setup = shell_at)]
+fn first_frame((shell, text_scale): (Shell, f32)) -> Run {
+    Run::text_scaled(black_box(shell), black_box(text_scale))
+}
+
+/// A new shell, to open with the text size at `text_scale`.
+fn shell_at(text_scale: f32) -> (Shell, f32) {
+    (Shell::new(), text_scale)
 }
 
 library_benchmark_group!(name = interact, benchmarks = [session, event, first_frame]);
@@ -179,6 +193,7 @@ fn painted_first_frame(shell: Shell) -> Run {
 #[library_benchmark]
 #[bench::light_100(setup = warm_painted)]
 #[bench::dark_150(setup = warm_painted_150)]
+#[bench::text_225(setup = warm_painted_225)]
 fn repaint_all((mut run, steps): (Run, Vec<Step>)) -> (Run, Vec<Step>) {
     run.repaint_all();
     (run, steps)
