@@ -141,6 +141,26 @@ fn tip_with(step: Step) -> (Run, Step) {
     (warm().0.tip_pending(), step)
 }
 
+/// Warm, the pointer resting on the table, then a wheel notch of `delta` there (A2, slice 5a).
+fn table_with(delta: i32) -> (Run, Step) {
+    let run = warm().0.over_table();
+    let step = run.table_wheel(delta);
+    (run, step)
+}
+
+fn table_painted_with(delta: i32) -> (Run, Step) {
+    let run = warm_painted().0.over_table();
+    let step = run.table_wheel(delta);
+    (run, step)
+}
+
+/// Warm, the table's thumb pressed, then the pointer `dy` lower: one frame of a thumb drag.
+fn thumb_with(dy: f32) -> (Run, Step) {
+    let run = warm().0.thumb_grabbed();
+    let step = run.thumb_moved(dy);
+    (run, step)
+}
+
 fn warm_painted_150() -> (Run, Vec<Step>) {
     warmed(Run::painted(Shell::new(), 1.5, Theme::DARK))
 }
@@ -175,6 +195,8 @@ fn session((mut run, steps): (Run, Vec<Step>)) -> (Run, Vec<Step>) {
 #[bench::context_menu(args = (Step::Input(Input::ContextMenu(None))), setup = row_with)]
 #[bench::menu_arrow(args = (popup_key(KeyCode::Down, true, Mods::default())), setup = menu_with)]
 #[bench::tooltip_due(args = (Step::Tick(u64::from(tokens::popup::TIP_DELAY_MS))), setup = tip_with)]
+#[bench::wheel_notch(args = (-120), setup = table_with)]
+#[bench::thumb_drag(args = (40.0), setup = thumb_with)]
 fn event((mut run, step): (Run, Step)) -> Run {
     run.step(black_box(step));
     run
@@ -211,6 +233,7 @@ fn painted_session((mut run, steps): (Run, Vec<Step>)) -> (Run, Vec<Step>) {
 #[bench::hold_tick(args = (Step::Tick(FRAME_MS)), setup = holding_painted_with)]
 #[bench::progress(args = (Step::Update(Msg::Progress(41))), setup = drawer_painted_with)]
 #[bench::context_menu(args = (Step::Input(Input::ContextMenu(None))), setup = row_painted_with)]
+#[bench::wheel_notch(args = (-120), setup = table_painted_with)]
 fn painted_event((mut run, step): (Run, Step)) -> Run {
     run.step(black_box(step));
     run
@@ -296,6 +319,16 @@ fn accessible_after(before: Option<Step>, step: Step) -> Box<Run> {
     Box::new(run)
 }
 
+/// [`warm_accessible`], the pointer on the table, then a wheel notch down it with its update left
+/// to take: rows move, and the table's scroll offset changes (A2, slice 5a).
+fn accessible_scroll() -> Box<Run> {
+    let mut run = warm_accessible().over_table();
+    let step = run.table_wheel(-120);
+    run.take_a11y = false;
+    run.step(step);
+    Box::new(run)
+}
+
 /// [`warm_accessible`], for the shell's whole tree.
 fn shell_tree() -> (Box<Run>, bool) {
     (Box::new(warm_accessible()), false)
@@ -324,6 +357,7 @@ fn a11y_tree((mut run, popup): (Box<Run>, bool)) -> (TreeUpdate, Box<Run>) {
 #[bench::page_away(args = (None, Step::Update(Msg::Page(1))), setup = accessible_after)]
 #[bench::page_back(args = (Some(Step::Update(Msg::Page(1))), Step::Update(Msg::Page(0))), setup = accessible_after)]
 #[bench::progress(args = (Some(Step::Update(Msg::Drawer)), Step::Update(Msg::Progress(41))), setup = accessible_after)]
+#[bench::scroll(setup = accessible_scroll)]
 fn a11y_update(mut run: Box<Run>) -> (Option<TreeUpdate>, Box<Run>) {
     (run.a11y_update(), run)
 }

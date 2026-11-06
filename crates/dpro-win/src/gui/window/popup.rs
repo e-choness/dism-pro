@@ -1263,6 +1263,88 @@ mod tests {
         drain();
     }
 
+    /// T2 (TD-0009 A2.5, slice 5a): `WM_MOUSEWHEEL` and `WM_MOUSEHWHEEL` reach the surface under
+    /// the pointer as [`Event::Wheel`] in its client pixels, whichever of them Windows sent them
+    /// to: the window under the pointer, or with "Scroll inactive windows" off the focused one (an
+    /// open list). Both are handled, so `DefWindowProc` never passes them on to an owner again.
+    #[test]
+    fn wheels_reach_the_surface_under_the_pointer() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{WM_MOUSEHWHEEL, WM_MOUSEWHEEL};
+
+        let (window, log, _) = open();
+        let lparam = |p: POINT| {
+            let word = |v: i32| v.cast_unsigned() & 0xFFFF;
+            LPARAM::try_from((word(p.y) << 16) | word(p.x)).unwrap_or(0)
+        };
+        // The delta is wParam's high word, signed; its low word is the buttons and keys held.
+        let wparam = |delta: i16| WPARAM::from(delta.cast_unsigned()) << 16;
+        let screen = |hwnd: HWND, x: i32, y: i32| {
+            let mut p = POINT { x, y };
+            // SAFETY: a live window of the test's, and a live local.
+            unsafe { ClientToScreen(hwnd, &raw mut p) };
+            p
+        };
+        let wheel = |delta: i32, horizontal: bool, x: i32, y: i32| Event::Wheel {
+            delta,
+            horizontal,
+            at: PointPx { x, y },
+        };
+        let main = window.hwnd;
+        let to = |hwnd: HWND, msg: u32, delta: i16, at: POINT| {
+            // SAFETY: a message sent to one of the test's live windows, on their thread.
+            unsafe { SendMessageW(hwnd, msg, wparam(delta), lparam(at)) }
+        };
+        assert_eq!(
+            to(main, WM_MOUSEWHEEL, -120, screen(main, 10, 12)),
+            0,
+            "handled"
+        );
+        assert_eq!(
+            heard(&log, Surface::Main, wheel(-120, false, 10, 12)),
+            1,
+            "{:?}",
+            log.borrow()
+        );
+        assert_eq!(to(main, WM_MOUSEHWHEEL, 30, screen(main, 20, 30)), 0);
+        assert_eq!(heard(&log, Surface::Main, wheel(30, true, 20, 30)), 1);
+
+        // Over an open list, the list's; over the owner beside it, the owner's. The list covers
+        // the owner's right side, clear of the owner's point below.
+        let o = screen(main, 150, 40);
+        as_handler(&window, |cx| {
+            let at = rect(o.x, o.y, o.x + 150, o.y + 140);
+            cx.show_popup(PopupKind::List, at, Backdrop::None);
+        });
+        let list = popup(&window, PopupKind::List).expect("the list's window");
+        let in_list = Surface::Popup(PopupKind::List);
+        to(list, WM_MOUSEWHEEL, 120, screen(list, 5, 6));
+        assert_eq!(
+            heard(&log, in_list, wheel(120, false, 5, 6)),
+            1,
+            "{:?}",
+            log.borrow()
+        );
+        to(list, WM_MOUSEWHEEL, -240, screen(main, 15, 16));
+        assert_eq!(
+            heard(&log, Surface::Main, wheel(-240, false, 15, 16)),
+            1,
+            "{:?}",
+            log.borrow()
+        );
+        assert_eq!(heard(&log, in_list, wheel(-240, false, 15, 16)), 0);
+
+        // Outside both (the title bar, another window): nobody's.
+        let before = log.borrow().len();
+        to(main, WM_MOUSEWHEEL, 120, screen(main, -40, -40));
+        let wheels = log.borrow()[before..]
+            .iter()
+            .filter(|(_, e)| matches!(e, Event::Wheel { .. }))
+            .count();
+        assert_eq!(wheels, 0);
+        drop(window);
+        drain();
+    }
+
     /// The work area holds the point it was asked for, and the DPI is a real one.
     #[test]
     fn the_work_area_is_where_the_point_is() {

@@ -374,4 +374,18 @@ mod tests {
         // Window text and window background are never the same color.
         assert_ne!(env.colors.window, env.colors.window_text);
     }
+
+    /// T2/T3 (TD-0009 A2.5, slice 5a): the wheel's settings and the scroll bars'. The test
+    /// runners keep Windows' defaults: 3 lines and 3 characters a notch, and scroll bars that hide
+    /// (no `DynamicScrollbars` value, which reads as on).
+    #[test]
+    fn the_wheel_and_scroll_bar_settings_read_as_windows_defaults() {
+        let env = Env::read();
+        println!(
+            "wheel lines {}, chars {}, auto-hide scroll bars {}",
+            env.wheel_lines, env.wheel_chars, env.auto_hide_scroll_bars
+        );
+        assert_eq!((env.wheel_lines, env.wheel_chars), (3, 3));
+        assert!(env.auto_hide_scroll_bars);
+    }
 }

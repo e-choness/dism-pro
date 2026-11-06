@@ -58,6 +58,12 @@ raw-API baseline, measured in this job, so it holds on whatever machine the runn
       and second menu opens, the right-click and the dropdown, from the input to UIA seeing it;
       and (U7, 2 MiB) the working set the open menu adds. Screenshots of the menu, the list and
       the tip go to -Out for A1.3's shadow and corners, checked by hand.
+  Scrolling (TD-0009 A2, slice 5a): the shell's table, 40 rows taller than its viewport. A wheel
+      notch through SendInput at its center moves the rows up, and a notch back puts them where
+      they were; with a row focused, Ctrl+End shows the last row and Ctrl+Home the first again;
+      UIA's SetFocus on the last row, out of view, scrolls it into view. Each is read back as
+      the rows' BoundingRectangle within 2 s; the times are advisory (U3: 50 ms), and Windows'
+      wheel lines are reported.
 
 The probe target is dpro-ui's `shell` example until roadmap 3.2 gives dismpro.exe its shell.
 Results go to annotations and the job summary; the raw reports and screenshots go to -Out, which
@@ -1289,6 +1295,113 @@ try {
 foreach ($k in $checks.Keys) { $lines += '{0,-50} {1}' -f $k, (Format-Verdict $checks[$k]) }
 $ok = $checks.Count -gt 0 -and -not ($checks.Values -contains $false)
 Publish 'Popups' $lines $ok
+if (-not $ok) { $failed++ }
+
+# Scrolling (TD-0009 A2, slice 5a) -----------------------------------------------------------------
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class ScrollGateWin32 {
+    [StructLayout(LayoutKind.Sequential)]
+    struct MOUSEINPUT { public int dx; public int dy; public uint mouseData; public uint dwFlags; public uint time; public IntPtr dwExtraInfo; }
+    [StructLayout(LayoutKind.Sequential)]
+    struct KEYBDINPUT { public ushort wVk; public ushort wScan; public uint dwFlags; public uint time; public IntPtr dwExtraInfo; }
+    [StructLayout(LayoutKind.Explicit)]
+    struct InputUnion { [FieldOffset(0)] public MOUSEINPUT mi; [FieldOffset(0)] public KEYBDINPUT ki; }
+    [StructLayout(LayoutKind.Sequential)]
+    struct INPUT { public uint type; public InputUnion u; }
+    [DllImport("user32.dll", SetLastError = true)]
+    static extern uint SendInput(uint n, INPUT[] inputs, int size);
+    [DllImport("user32.dll")]
+    public static extern bool SetCursorPos(int x, int y);
+    [DllImport("user32.dll")]
+    static extern bool SystemParametersInfoW(uint action, uint param, ref uint value, uint ini);
+    // One wheel event of `delta` (120 a notch; positive is away from the user, or right):
+    // MOUSEEVENTF_WHEEL, or MOUSEEVENTF_HWHEEL. Returns the events sent.
+    public static uint Wheel(int delta, bool horizontal) {
+        var i = new INPUT { type = 0 };
+        i.u.mi = new MOUSEINPUT { mouseData = unchecked((uint) delta), dwFlags = horizontal ? 0x1000u : 0x0800u };
+        return SendInput(1, new INPUT[] { i }, Marshal.SizeOf(typeof(INPUT)));
+    }
+    // SPI_GETWHEELSCROLLLINES; 0 if it couldn't be read.
+    public static uint WheelLines() {
+        uint v = 0;
+        return SystemParametersInfoW(0x0068, 0, ref v, 0) ? v : 0;
+    }
+}
+'@
+function Send-Chord([uint16] $Mod, [uint16] $Vk) {
+    [void][ControlsGateWin32]::Key($Mod, $true)
+    Send-Key $Vk
+    [void][ControlsGateWin32]::Key($Mod, $false)
+}
+# Whether `$Inner`'s rectangle lies inside `$Outer`'s, to half a pixel.
+function Test-Inside($Inner, $Outer) {
+    $Inner.Y -ge $Outer.Y - 0.5 -and $Inner.Bottom -le $Outer.Bottom + 0.5
+}
+
+$lines = @("Scrolling in the shell at $Size (the checks are gates; the times are advisory, U3: 50 ms)")
+$checks = [ordered]@{}
+$hwnd = [IntPtr]::Zero
+$p = Start-Process -FilePath $exe.shell -ArgumentList @('--size', $Size) -PassThru
+$null = $p.Handle
+try {
+    $shown = Wait-Until {
+        $script:hwnd = [UiaGateWin32]::FindWindowW('dismpro.window', 'DISM Pro shell probe')
+        $script:hwnd -ne [IntPtr]::Zero -and [UiaGateWin32]::IsWindowVisible($script:hwnd)
+    } 30000
+    if (-not $shown) { throw "the shell showed no window in 30 s (exited: $($p.HasExited))" }
+    $root = $ae::FromHandle($hwnd)
+    $table = $null
+    $found = Wait-Until { $script:table = Find-First $root $types::Group 'Programs'; $null -ne $script:table } 10000
+    if (-not $found) { throw 'no Group "Programs" in 10 s' }
+    $rows = @(Find-Elements $table $types::ListItem)
+    $view = $table.Current.BoundingRectangle
+    $first = $rows[0]
+    $last = $rows[$rows.Count - 1]
+    $y0 = $first.Current.BoundingRectangle.Y
+    $checks['the table overflows: its last row is out of view'] = $rows.Count -eq 40 -and -not (Test-Inside $last.Current.BoundingRectangle $view)
+    $lines += 'table {0:N0}x{1:N0} at {2:N0},{3:N0}; {4} rows; Windows scrolls {5} lines a notch' -f $view.Width, $view.Height, $view.X, $view.Y, $rows.Count, [ScrollGateWin32]::WheelLines()
+    $checks['the window is active'] = [GlassGateWin32]::Activate($hwnd)
+
+    # The wheel, through SendInput, at the table's center.
+    [void][ScrollGateWin32]::SetCursorPos([int] ($view.X + $view.Width / 2), [int] ($view.Y + $view.Height / 2))
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    [void][ScrollGateWin32]::Wheel(-120, $false)
+    $moved = Wait-Until { $first.Current.BoundingRectangle.Y -lt $y0 } 2000
+    $ms = $sw.Elapsed.TotalMilliseconds
+    $checks['a notch down moves the rows up'] = $moved
+    $lines += '{0,-12} {1,7:N1} ms  rows moved {2:N0} px' -f 'notch', $ms, ($y0 - $first.Current.BoundingRectangle.Y)
+    [void][ScrollGateWin32]::Wheel(120, $false)
+    $checks['a notch up moves them back'] = Wait-Until { $first.Current.BoundingRectangle.Y -eq $y0 } 2000
+
+    # Ctrl+End and Ctrl+Home scroll the viewport holding the focus.
+    $first.SetFocus()
+    $focused = Wait-Until { $first.Current.HasKeyboardFocus } 2000
+    $sw.Restart()
+    Send-Chord 0x11 0x23
+    $end = $focused -and (Wait-Until { Test-Inside $last.Current.BoundingRectangle $view } 2000)
+    $ms = $sw.Elapsed.TotalMilliseconds
+    $checks['Ctrl+End shows the last row'] = $end
+    $lines += '{0,-12} {1,7:N1} ms' -f 'Ctrl+End', $ms
+    Send-Chord 0x11 0x24
+    $checks['Ctrl+Home shows the first again'] = Wait-Until { $first.Current.BoundingRectangle.Y -eq $y0 } 2000
+
+    # Focus moving to a row out of view brings it into view.
+    $last.SetFocus()
+    $checks['SetFocus on the last row scrolls it into view'] = Wait-Until { $last.Current.HasKeyboardFocus -and (Test-Inside $last.Current.BoundingRectangle $view) } 2000
+} catch {
+    $lines += "scrolling FAILED: $($_.Exception.Message)"
+    $checks['client'] = $false
+} finally {
+    if (-not $p.HasExited) {
+        if ($hwnd -ne [IntPtr]::Zero) { [void][UiaGateWin32]::PostMessageW($hwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) } # WM_CLOSE
+        if (-not $p.WaitForExit(5000)) { $p.Kill(); $lines += 'the shell did not close on WM_CLOSE'; $checks['closes'] = $false }
+    }
+}
+foreach ($k in $checks.Keys) { $lines += '{0,-50} {1}' -f $k, (Format-Verdict $checks[$k]) }
+$ok = $checks.Count -gt 0 -and -not ($checks.Values -contains $false)
+Publish 'Scrolling' $lines $ok
 if (-not $ok) { $failed++ }
 
 exit $failed
