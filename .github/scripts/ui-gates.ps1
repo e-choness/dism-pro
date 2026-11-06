@@ -18,6 +18,7 @@ raw-API baseline, measured in this job, so it holds on whatever machine the runn
       swap-chain buffers of the same size).
   U12 UI Automation, as a client sees it. The time from the window showing to the tree served
       (the "Review changes" button found through UIA) is advisory: <= 100 ms (S-01: 40-42 ms).
+      The client is warmed on bare_window first, so its own start isn't counted.
       The checks are gates: names and roles (the page list, the table's rows, the check boxes),
       then Toggle, SelectionItem and Invoke through UIA, each read back through UIA.
   Live theme switch: see its section.
@@ -37,6 +38,11 @@ raw-API baseline, measured in this job, so it holds on whatever machine the runn
       Hold to apply asks for the typed confirmation and applies nothing; Enter held 0.5 s and let
       go applies nothing; held 1.8 s it applies (the bar reaches 100). Each is read back through
       UIA within 2 s.
+  Text scaling (TD-0009 §12 item 7): Windows' text size, TextScaleFactor under
+      HKCU\Software\Microsoft\Accessibility, written 225 then 100 with no broadcast: the shell's
+      title, read through UIA, grows 2.25 times and comes back, each within 2 s (advisory: 100 ms).
+      UISettings.TextScaleFactor (WinRT) is reported beside the registry value. The runner's own
+      value is restored.
 
 The probe target is dpro-ui's `shell` example until roadmap 3.2 gives dismpro.exe its shell.
 Results go to annotations and the job summary; the raw reports go to -Out.
@@ -225,6 +231,25 @@ function Get-Pattern($Element, $Pattern) {
 
 $lines = @("UI Automation on the shell at $Size (advisory: tree served <= 100 ms after the window shows; the checks are gates)")
 $checks = [ordered]@{}
+# This process's first UIA calls load the client (UIAutomationCore, the managed client, these
+# functions' first runs): 0.5 to 3.8 s on runners, which U12 must not charge to the shell. The same
+# calls run first on bare_window, which serves next to nothing; that time is reported on its own.
+$warm = Start-Process -FilePath $exe.bare -PassThru
+try {
+    $warmed = Wait-Until { $warm.Refresh(); $warm.MainWindowHandle -ne [IntPtr]::Zero } 30000
+    if ($warmed) {
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        $null = Find-Elements ($ae::FromHandle($warm.MainWindowHandle)) $types::Button 'Review changes'
+        $lines += 'UIA client warm-up on bare_window: {0:N1} ms (not part of U12)' -f $sw.Elapsed.TotalMilliseconds
+    } else {
+        $lines += 'UIA client warm-up skipped: bare_window showed no window in 30 s'
+    }
+} finally {
+    if (-not $warm.HasExited) {
+        if ($warm.MainWindowHandle -ne [IntPtr]::Zero) { [void][UiaGateWin32]::PostMessageW($warm.MainWindowHandle, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) } # WM_CLOSE
+        if (-not $warm.WaitForExit(5000)) { $warm.Kill() }
+    }
+}
 $p = Start-Process -FilePath $exe.shell -ArgumentList @('--size', $Size) -PassThru
 $null = $p.Handle
 try {
@@ -849,6 +874,77 @@ try {
 foreach ($k in $checks.Keys) { $lines += '{0,-48} {1}' -f $k, (Format-Verdict $checks[$k]) }
 $ok = $checks.Count -gt 0 -and -not ($checks.Values -contains $false)
 Publish 'Controls' $lines $ok
+if (-not $ok) { $failed++ }
+
+# Text scaling (TD-0009 §12 item 7) ----------------------------------------------------------------
+# Windows' text size is HKCU\Software\Microsoft\Accessibility\TextScaleFactor (100-225). It's
+# written here with no broadcast at all: the shell must notice the value itself.
+function Get-UISettingsTextScale {
+    # UISettings is WinRT, which pwsh 7 can't project; Windows PowerShell 5.1 can.
+    $read = '[void][Windows.UI.ViewManagement.UISettings,Windows.UI.ViewManagement,ContentType=WindowsRuntime]; (New-Object Windows.UI.ViewManagement.UISettings).TextScaleFactor'
+    try { (& powershell.exe -NoProfile -NonInteractive -Command $read 2>&1 | Out-String).Trim() } catch { "unreadable: $($_.Exception.Message)" }
+}
+
+$a11yKey = 'HKCU:\Software\Microsoft\Accessibility'
+$hadA11yKey = Test-Path $a11yKey
+$savedScale = if ($hadA11yKey) { (Get-ItemProperty -Path $a11yKey -Name TextScaleFactor -ErrorAction SilentlyContinue).TextScaleFactor } else { $null }
+$lines = @("Text scaling on the shell at ${Size}: TextScaleFactor written with no broadcast (gates: the title's height x2.25 within 2 s, and back within 2 s; advisory: <= 100 ms)")
+$checks = [ordered]@{}
+$hwnd = [IntPtr]::Zero
+$p = $null
+try {
+    if (-not $hadA11yKey) { $null = New-Item -Path $a11yKey -Force }
+    Set-ItemProperty -Path $a11yKey -Name TextScaleFactor -Value 100 -Type DWord
+    $p = Start-Process -FilePath $exe.shell -ArgumentList @('--size', $Size) -PassThru
+    $null = $p.Handle
+    $shown = Wait-Until {
+        $script:hwnd = [UiaGateWin32]::FindWindowW('dismpro.window', 'DISM Pro shell probe')
+        $script:hwnd -ne [IntPtr]::Zero -and [UiaGateWin32]::IsWindowVisible($script:hwnd)
+    } 30000
+    if (-not $shown) { throw "the shell showed no window in 30 s (exited: $($p.HasExited))" }
+    $root = $ae::FromHandle($hwnd)
+    $title = $null
+    $found = Wait-Until {
+        $script:title = Find-Elements $root $types::Text 'DISM Pro' | Select-Object -First 1
+        $null -ne $script:title -and $script:title.Current.BoundingRectangle.Height -gt 0
+    } 10000
+    $checks['a Text named "DISM Pro"'] = $found
+    if (-not $found) { throw 'no Text named "DISM Pro" in 10 s' }
+    $h100 = $title.Current.BoundingRectangle.Height
+    $lines += "UISettings.TextScaleFactor at 100: $(Get-UISettingsTextScale)"
+
+    Set-ItemProperty -Path $a11yKey -Name TextScaleFactor -Value 225 -Type DWord
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    $grew = Wait-Until { $title.Current.BoundingRectangle.Height -ge $h100 * 2.25 - 2 } 2000
+    $ms = $sw.Elapsed.TotalMilliseconds
+    $h225 = $title.Current.BoundingRectangle.Height
+    $lines += '225 %   {0,6:N1} ms  title {1} px high (at 100 %: {2}){3}' -f $ms, $h225, $h100, $(if ($ms -gt 100) { ' (advisory: over 100 ms)' } else { '' })
+    $checks['225 %: the text grows 2.25x, live'] = $grew
+    $lines += "UISettings.TextScaleFactor at 225: $(Get-UISettingsTextScale)"
+
+    Set-ItemProperty -Path $a11yKey -Name TextScaleFactor -Value 100 -Type DWord
+    $sw.Restart()
+    $back = Wait-Until { [math]::Abs($title.Current.BoundingRectangle.Height - $h100) -le 1 } 2000
+    $lines += '100 %   {0,6:N1} ms  title {1} px high' -f $sw.Elapsed.TotalMilliseconds, $title.Current.BoundingRectangle.Height
+    $checks['back to 100 %: as it was, live'] = $back
+} catch {
+    $lines += "text scaling FAILED: $($_.Exception.Message)"
+    $checks['client'] = $false
+} finally {
+    if ($null -ne $savedScale) {
+        Set-ItemProperty -Path $a11yKey -Name TextScaleFactor -Value $savedScale -Type DWord
+    } else {
+        Remove-ItemProperty -Path $a11yKey -Name TextScaleFactor -ErrorAction SilentlyContinue
+    }
+    if (-not $hadA11yKey) { Remove-Item -Path $a11yKey -ErrorAction SilentlyContinue }
+    if ($p -and -not $p.HasExited) {
+        if ($hwnd -ne [IntPtr]::Zero) { [void][UiaGateWin32]::PostMessageW($hwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) } # WM_CLOSE
+        if (-not $p.WaitForExit(5000)) { $p.Kill(); $lines += 'the shell did not close on WM_CLOSE'; $checks['closes'] = $false }
+    }
+}
+foreach ($k in $checks.Keys) { $lines += '{0,-48} {1}' -f $k, (Format-Verdict $checks[$k]) }
+$ok = $checks.Count -gt 0 -and -not ($checks.Values -contains $false)
+Publish 'Text scaling' $lines $ok
 if (-not $ok) { $failed++ }
 
 exit $failed

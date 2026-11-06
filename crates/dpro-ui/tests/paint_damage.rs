@@ -11,7 +11,7 @@
 mod shell;
 
 use dpro_ui::{Caret, Color, KeyCode, Mods, SysColors, Theme};
-use shell::{CTRL, PATH, Run, Shell, Step, key};
+use shell::{CTRL, Msg, PATH, Run, Shell, Step, key};
 
 fn check(scale: f32, theme: Theme, steps: impl FnOnce(&Run) -> Vec<Step>) {
     let mut run = Run::painted(Shell::new(), scale, theme);
@@ -91,6 +91,27 @@ fn incremental_painting_matches_a_full_repaint_at_scale_1() {
 #[test]
 fn incremental_painting_matches_a_full_repaint_at_scale_1_5() {
     check(1.5, Theme::DARK, session);
+}
+
+/// Windows' text size switched up and down (TD-0009 §12 item 7), with the drawer and a page
+/// switch between, so every switch reflows a different page.
+fn text_sizes(_: &Run) -> Vec<Step> {
+    vec![
+        Step::TextScale(2.25),
+        Step::Update(Msg::Drawer),
+        Step::TextScale(1.75),
+        Step::Update(Msg::Drawer),
+        Step::Update(Msg::Page(1)),
+        Step::TextScale(1.0),
+        Step::Update(Msg::Page(0)),
+        Step::TextScale(1.25),
+    ]
+}
+
+#[test]
+fn a_text_size_switch_paints_exactly_its_damage() {
+    check(1.0, Theme::LIGHT, text_sizes);
+    check(1.5, Theme::DARK, text_sizes);
 }
 
 #[test]

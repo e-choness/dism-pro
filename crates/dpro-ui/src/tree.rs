@@ -616,6 +616,8 @@ pub struct NodeInfo<'a> {
     pub key: Key,
     pub rect: Rect,
     pub text: &'a str,
+    /// The style its text is measured and drawn in: the view's, times Windows' text size.
+    pub text_style: TextStyle,
     pub enabled: bool,
     pub check: Tri,
     /// Whether it's picked, for an item of a set the user picks from.

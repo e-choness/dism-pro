@@ -23,7 +23,7 @@ use dpro_ui::{Input, KeyCode, Mods, Point, Size, Theme};
 use shell::{Msg, Run, START, Shell, Step, click, key};
 
 /// The session, an unchanged event, a filter keystroke, a resize, a tab picked with the arrow
-/// keys and a progress report, on `run`.
+/// keys, a progress report and a text size switch, on `run`.
 fn events(g: &mut BenchmarkGroup<'_, WallTime>, run: &mut Run) {
     let steps = run.session();
 
@@ -94,6 +94,15 @@ fn events(g: &mut BenchmarkGroup<'_, WallTime>, run: &mut Run) {
     });
     run.step(Step::Update(Msg::Drawer));
     run.settle();
+
+    // Windows' text size up to 225 % and back (§12 item 7): every text node measured again and
+    // the whole page laid out, each way.
+    g.bench_function("text_scale", |b| {
+        b.iter(|| {
+            run.step(Step::TextScale(2.25));
+            run.step(Step::TextScale(1.0));
+        });
+    });
 }
 
 fn interact(c: &mut Criterion) {

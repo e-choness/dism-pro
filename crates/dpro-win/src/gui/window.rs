@@ -94,7 +94,7 @@ use super::{
     a11y::{Initial, Requests, ToUiThread, WM_APP_A11Y},
     clipboard,
     compose::{Composer, Device, Gpu, Rects, after_loss},
-    env::{Env, GUID_POWER_SAVING_STATUS},
+    env::{Env, GUID_POWER_SAVING_STATUS, WM_APP_ENV, Watch},
     probe,
 };
 use crate::{
@@ -560,6 +560,9 @@ struct State {
     a11y_served: Cell<bool>,
     /// Windows' settings, as last sent to the handler.
     env: Cell<Env>,
+    /// The thread watching the settings Windows doesn't broadcast (the text size); `None` if it
+    /// couldn't start, or after `WM_DESTROY`.
+    watch: Cell<Option<Watch>>,
     /// The battery saver subscription; 0 if there is none.
     power: Cell<HPOWERNOTIFY>,
     /// Subscribed to session changes.
@@ -665,6 +668,7 @@ impl State {
             a11y_whole: Cell::new(false),
             a11y_served: Cell::new(false),
             env: Cell::new(Env::default()),
+            watch: Cell::new(None),
             power: Cell::new(0),
             sessions: Cell::new(false),
             depth: Cell::new(0),
@@ -766,6 +770,7 @@ impl State {
                     self.dispatch(hwnd, |h, cx| h.a11y_action(&request, cx));
                 }
             }
+            WM_APP_ENV => self.env_changed(hwnd),
             WM_DESTROY => self.destroyed(hwnd),
             _ => return self.input(hwnd, msg, wp, lp),
         }
@@ -934,9 +939,11 @@ impl State {
         self.dispatch(hwnd, |h, cx| h.event(event, cx))
     }
 
-    /// Subscribes to the signals that aren't broadcast: session changes and battery saver. Either
-    /// may be unavailable (no session manager); the window then misses that change only.
+    /// Subscribes to the signals that aren't broadcast: session changes, battery saver and the
+    /// text size, before the first reading of [`Env`] so no change falls between. Each may be
+    /// unavailable (no session manager); the window then misses that change only.
     fn subscribe(&self, hwnd: HWND) {
+        self.watch.set(Watch::start(hwnd));
         // SAFETY: hwnd is live; unsubscribed at WM_DESTROY.
         self.sessions
             .set(unsafe { WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION) } != 0);
@@ -952,6 +959,8 @@ impl State {
     }
 
     fn unsubscribe(&self, hwnd: HWND) {
+        // Stops the watch thread and waits for it: it only posts, so it never waits on this one.
+        drop(self.watch.take());
         if self.sessions.take() {
             // SAFETY: hwnd is live until WM_DESTROY returns, and subscribed.
             unsafe { WTSUnRegisterSessionNotification(hwnd) };

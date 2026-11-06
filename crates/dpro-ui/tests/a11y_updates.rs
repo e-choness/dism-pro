@@ -5,8 +5,8 @@
 //! one with its id, and nodes no longer reachable from the root are gone. The update must follow
 //! AccessKit's rules: every node it sends is in the tree afterwards (the root, or a child of a
 //! node in it), so a removed node is never sent, and a new node's parent is sent with it. After
-//! every step of the scripted session, plus row selections and page switches, the copy must equal
-//! the whole tree node for node, focus included.
+//! every step of the scripted session, plus row selections, page switches and text size
+//! switches, the copy must equal the whole tree node for node, focus included.
 
 #[path = "../benches/fixtures/shell.rs"]
 mod shell;
@@ -123,6 +123,9 @@ fn incremental_updates_keep_a_copy_equal_to_the_whole_tree() {
         tab(false),
         Step::Update(Msg::Drawer),
         Step::Update(Msg::Page(0)),
+        // Windows' text size: every node's bounds move, nothing else changes.
+        Step::TextScale(2.25),
+        Step::TextScale(1.0),
     ]);
     // The field's value and focus, with the drawer opening between edits, then cleared by the
     // app, not the field.
