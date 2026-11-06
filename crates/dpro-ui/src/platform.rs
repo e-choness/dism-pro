@@ -19,6 +19,12 @@
 //! light, as glass or solid), the motion (*Animation effects* off is reduced motion), the
 //! [`Materials`] and the window's backdrop (Mica under glass). A new theme repaints the whole
 //! window once; any other change repaints nothing.
+//!
+//! **Text input.** Typed characters go to the focused field. A copy, cut or paste a field asks
+//! for is done with the clipboard's text right after the input. The caret blinks on the window's
+//! one-shot wake, set again after every event for when it's next due, and cancelled once it rests
+//! (U6). It follows Windows' blink rate and width, and shows only while the window has keyboard
+//! focus. Over a field the pointer is an I-beam.
 
 use std::time::Instant;
 
@@ -28,8 +34,9 @@ use dpro_win::gui::{
 };
 
 use crate::{
-    Canvas, Color, Cx, GlyphSink, Icon, Input, KeyCode, KeyEvent, Mods, Motion, Point, Rect,
-    Scheme, Size, SysColors, TextMetrics, TextStyle, TextSystem, Theme, Ui,
+    Canvas, Caret, CaretStop, ClipboardRequest, Color, Cursor, Cx, GlyphSink, Icon, Input, KeyCode,
+    KeyEvent, MAX_FIELD_LEN, Mods, Motion, Point, Rect, Scheme, Size, SysColors, TextMetrics,
+    TextStyle, TextSystem, Theme, Ui,
     materials::{
         Environment, GLASS_BUILD, GlassPref, Materials, PresenterKind, SolidReason, materials,
     },
@@ -78,6 +85,13 @@ impl TextSystem for DirectWrite {
     fn icon(&mut self, icon: Icon, rect: Rect, scale: f32, sink: &mut dyn GlyphSink) {
         self.0
             .icon(icon.codepoint(), rect_f(rect), scale, &mut Masks(sink));
+    }
+
+    fn caret_stops(&mut self, text: &str, style: &TextStyle, out: &mut Vec<CaretStop>) {
+        out.clear();
+        self.0.caret_stops(text, &text_style(*style), |index, x| {
+            out.push(CaretStop { index, x });
+        });
     }
 }
 
@@ -133,6 +147,8 @@ pub struct Host<P: Model> {
     msgs: Vec<P::Msg>,
     /// The animation clock's zero.
     start: Instant,
+    /// When the window's wake is set for, on that clock: the caret's next blink.
+    wake_due: Option<u64>,
 }
 
 /// What new settings or a new presenter changed in how the window looks.
@@ -172,6 +188,7 @@ impl<P: Model> Host<P> {
             presenter: Presenter::default(),
             msgs: Vec::with_capacity(4),
             start: Instant::now(),
+            wake_due: None,
         }
     }
 
@@ -196,6 +213,10 @@ impl<P: Model> Host<P> {
     fn set_env(&mut self, env: gui::env::Env) -> Restyle {
         self.env = Some(env);
         self.ui.set_motion(Motion::system(env.animations));
+        self.ui.set_caret(Caret {
+            width: env.caret_width.max(1),
+            blink_ms: env.caret_blink_ms,
+        });
         self.restyle()
     }
 
@@ -253,11 +274,41 @@ impl<P: Model> Host<P> {
         used
     }
 
+    /// Carries out the copy, cut or paste the last input asked for, with the clipboard's text, and
+    /// updates the model with the edit.
+    fn clipboard(&mut self, cx: &mut WindowCx<'_>) {
+        let Some(request) = self.ui.take_clipboard() else {
+            return;
+        };
+        match request {
+            ClipboardRequest::Copy => {
+                cx.set_clipboard_text(self.ui.selected_text());
+            }
+            ClipboardRequest::Cut => {
+                if cx.set_clipboard_text(self.ui.selected_text()) {
+                    self.ui.cut_selection(&mut self.msgs);
+                }
+            }
+            ClipboardRequest::Paste => {
+                // A field holds at most MAX_FIELD_LEN bytes, and every code unit is at least one.
+                if let Some(text) = cx.clipboard_text(MAX_FIELD_LEN) {
+                    self.ui.paste(&text, &mut self.msgs);
+                }
+            }
+        }
+        for msg in self.msgs.drain(..) {
+            self.model.update(msg);
+        }
+    }
+
     /// Rebuilds and lays out the view, and hands the damage to the window.
     fn frame(&mut self, cx: &mut WindowCx<'_>) {
         let model = &self.model;
         self.ui.build(|c| model.view(c));
         self.ui.layout(self.text.as_mut());
+        // Before the damage goes out: a blink damages the caret.
+        let now = self.now_ms();
+        let next = self.ui.caret_timer(now);
         for r in self.ui.damage() {
             cx.invalidate(gui::RectPx {
                 x0: r.x0,
@@ -267,6 +318,11 @@ impl<P: Model> Host<P> {
             });
         }
         cx.want_frames(self.ui.wants_frame());
+        let due = next.map(|ms| now.saturating_add(ms));
+        if due != self.wake_due {
+            self.wake_due = due;
+            cx.wake_after(next.map(|ms| u32::try_from(ms).unwrap_or(u32::MAX)));
+        }
     }
 
     fn now_ms(&self) -> u64 {
@@ -297,6 +353,7 @@ impl<P: Model> Handler for Host<P> {
             }
             Event::PointerMove(p) => self.input(Input::PointerMove(at(p))),
             Event::PointerDown(p) => self.input(Input::PointerDown(at(p))),
+            Event::Char(c) => self.input(Input::Char(c)),
             Event::PointerUp(p) => self.input(Input::PointerUp(at(p))),
             Event::PointerLeave => self.input(Input::PointerLeave),
             Event::Key { vk, down, mods } => self.input(Input::Key(KeyEvent {
@@ -319,7 +376,15 @@ impl<P: Model> Handler for Host<P> {
                 self.apply(restyle, cx);
                 true
             }
-            Event::Focus(_) => false,
+            Event::Focus(active) => {
+                self.ui.set_active(active);
+                false
+            }
+            Event::Wake => {
+                // One shot: it's gone, and the frame sets the next.
+                self.wake_due = None;
+                true
+            }
             Event::Frame => {
                 let now = self.now_ms();
                 self.ui.tick(now);
@@ -330,6 +395,7 @@ impl<P: Model> Handler for Host<P> {
                 return true;
             }
         };
+        self.clipboard(cx);
         self.frame(cx);
         used
     }
@@ -339,6 +405,13 @@ impl<P: Model> Handler for Host<P> {
             self.ui.paint(&mut canvas, self.text.as_mut(), &self.theme);
         }
         self.ui.clear_damage();
+    }
+
+    fn cursor(&self) -> gui::Cursor {
+        match self.ui.cursor() {
+            Cursor::Text => gui::Cursor::IBeam,
+            Cursor::Arrow => gui::Cursor::Arrow,
+        }
     }
 
     fn a11y_tree(&mut self) -> Option<accesskit::TreeUpdate> {
@@ -460,6 +533,7 @@ fn logical_size(v: u32, scale: f32) -> f32 {
 /// The toolkit's key for a virtual-key code (`WinUser.h`'s `VK_*` values).
 fn key_code(vk: u16) -> KeyCode {
     match vk {
+        0x08 => KeyCode::Backspace,
         0x09 => KeyCode::Tab,
         0x0D => KeyCode::Enter,
         0x1B => KeyCode::Escape,
@@ -472,6 +546,8 @@ fn key_code(vk: u16) -> KeyCode {
         0x26 => KeyCode::Up,
         0x27 => KeyCode::Right,
         0x28 => KeyCode::Down,
+        0x2D => KeyCode::Insert,
+        0x2E => KeyCode::Delete,
         other => KeyCode::Other(other),
     }
 }
@@ -549,6 +625,9 @@ mod tests {
     fn keys_map_to_the_toolkit_s() {
         assert_eq!(key_code(0x09), KeyCode::Tab);
         assert_eq!(key_code(0x22), KeyCode::PageDown);
+        assert_eq!(key_code(0x08), KeyCode::Backspace);
+        assert_eq!(key_code(0x2D), KeyCode::Insert);
+        assert_eq!(key_code(0x2E), KeyCode::Delete);
         assert_eq!(key_code(0x41), KeyCode::Other(0x41));
     }
 

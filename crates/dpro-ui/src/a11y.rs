@@ -17,12 +17,17 @@
 //! - A button is a button, or a list item (a selection item) when it's [selectable](
 //!   crate::Element::selected).
 //! - A check box is a toggle.
+//! - A field is a text input (UI Automation's Edit, with the Value pattern), named by its
+//!   [name](crate::Element::name). Its text is its value; its placeholder is help text while it's
+//!   empty; and it's read-only when it is.
 //!
-//! Enabled buttons and check boxes take `Click` and `Focus`; disabled ones are marked so.
+//! Enabled buttons and check boxes take `Click` and `Focus`; enabled fields take `Focus`, and
+//! editable ones `SetValue`, which replaces the text as a paste would. Disabled nodes are marked
+//! so.
 
 use accesskit::{
-    Action, ActionRequest, Node, NodeId as AkId, Rect as AkRect, Role as AkRole, Toggled, TreeId,
-    TreeInfo, TreeUpdate,
+    Action, ActionData, ActionRequest, Node, NodeId as AkId, Rect as AkRect, Role as AkRole,
+    Toggled, TreeId, TreeInfo, TreeUpdate,
 };
 use dpro_app::table::Tri;
 
@@ -176,6 +181,7 @@ impl<M> Ui<M> {
                 Role::Button if n.selected.is_some() => AkRole::ListItem,
                 Role::Button => AkRole::Button,
                 Role::CheckBox => AkRole::CheckBox,
+                Role::Field => AkRole::TextInput,
             }
         };
         let mut node = Node::new(role);
@@ -194,6 +200,22 @@ impl<M> Ui<M> {
             );
         }
         match (role, n.text.is_empty()) {
+            (AkRole::TextInput, _) => {
+                let f = &self.fields[n.field as usize];
+                node.set_value(n.text.as_str());
+                if !f.name.is_empty() {
+                    node.set_label(f.name.as_str());
+                }
+                if !f.placeholder.is_empty() {
+                    // Clients show it only while the field is empty.
+                    node.set_placeholder(f.placeholder.as_str());
+                }
+                if f.on_edit.is_none() {
+                    node.set_read_only();
+                } else if n.enabled {
+                    node.add_action(Action::SetValue);
+                }
+            }
             // A label's text is its value, which clients read as its name.
             (AkRole::Label, false) => node.set_value(n.text.as_str()),
             (AkRole::Label, true) => node.set_hidden(),
@@ -202,7 +224,9 @@ impl<M> Ui<M> {
         }
         if n.role.interactive() {
             if n.enabled {
-                node.add_action(Action::Click);
+                if n.role != Role::Field {
+                    node.add_action(Action::Click);
+                }
                 node.add_action(Action::Focus);
             } else {
                 node.set_disabled();
@@ -225,8 +249,9 @@ impl<M> Ui<M> {
 impl<M: Clone> Ui<M> {
     /// Carries out a client's request, which the platform posts to the UI thread: `Click`
     /// activates the node as a click does, pushing its message to `out`, and `Focus` moves focus
-    /// to it and shows the focus ring. Returns whether it applied; requests for nodes gone since,
-    /// nodes that take no input, or other actions do nothing.
+    /// to it and shows the focus ring, and `SetValue` replaces an editable field's text, pushing
+    /// its edit. Returns whether it applied; requests for nodes gone since, nodes that take no
+    /// input, or other actions do nothing.
     pub fn a11y_action(&mut self, request: &ActionRequest, out: &mut Vec<M>) -> bool {
         if request.target_tree != TreeId::ROOT {
             return false;
@@ -237,12 +262,16 @@ impl<M: Clone> Ui<M> {
         if !self.nodes[i as usize].interactive() {
             return false;
         }
-        match request.action {
-            Action::Click => {
+        let field = self.nodes[i as usize].role == Role::Field;
+        match (request.action, &request.data) {
+            (Action::Click, _) if !field => {
                 self.activate(i, out);
                 true
             }
-            Action::Focus => {
+            (Action::SetValue, Some(ActionData::Value(value))) if field => {
+                self.field_set_value(i, value, out)
+            }
+            (Action::Focus, _) => {
                 self.move_focus(i);
                 self.show_focus_ring();
                 true

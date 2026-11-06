@@ -10,6 +10,7 @@
 //! into the node's own buffer, so a warm window reconciles without allocating (§7 U8).
 
 use crate::{
+    field::TextEdit,
     pool::capacity_for,
     tree::{Element, NIL, NodeId},
     ui::{ROOT, Ui},
@@ -143,6 +144,9 @@ impl<M> Ui<M> {
         // Check state and enabled show, and a client sees them.
         let state = n.check != el.check || n.enabled != el.enabled;
         let mut seen = state || n.selected != el.selected;
+        // A field's text never changes its size: the view sets its width, and it's a line high.
+        let field = n.field;
+        let (mut field_text, mut field_style) = (false, false);
         if n.style != el.style {
             n.style = el.style;
             layout = true;
@@ -150,6 +154,7 @@ impl<M> Ui<M> {
         if n.text_style != el.text_style {
             n.text_style = el.text_style;
             layout = true;
+            field_style = true;
         }
         if n.text != el.text {
             n.text.clear();
@@ -157,7 +162,11 @@ impl<M> Ui<M> {
                 n.text.reserve_exact(capacity_for(el.text.len()));
             }
             n.text.push_str(el.text);
-            layout = true;
+            if field == NIL {
+                layout = true;
+            } else {
+                field_text = true;
+            }
             seen = true;
         }
         let looks = state || n.look != el.look;
@@ -171,6 +180,15 @@ impl<M> Ui<M> {
                 self.lose_input(i);
             }
         }
+        if field != NIL {
+            seen |= self.update_field(field, el.label, el.placeholder, el.on_edit);
+            if field_text {
+                self.field_text_set(i);
+            } else if field_style {
+                // The same text in another size: new caret stops, the caret where it was.
+                self.fields[field as usize].stops_valid = false;
+            }
+        }
         if layout {
             self.mark_dirty(i);
         }
@@ -181,6 +199,36 @@ impl<M> Ui<M> {
         if seen {
             self.a11y_touch(i);
         }
+    }
+
+    /// Copies a field's name, placeholder and edit handler into its slot `f`. Returns whether a
+    /// client sees a change; a new placeholder shows while the field is empty.
+    fn update_field(
+        &mut self,
+        f: u32,
+        name: &str,
+        placeholder: &str,
+        on_edit: Option<fn(TextEdit) -> M>,
+    ) -> bool {
+        let slot = &mut self.fields[f as usize];
+        // Becoming read-only, or editable, is seen.
+        let mut seen = slot.on_edit.is_some() != on_edit.is_some();
+        slot.on_edit = on_edit;
+        if slot.name != name {
+            slot.name.clear();
+            slot.name.push_str(name);
+            seen = true;
+        }
+        if slot.placeholder != placeholder {
+            slot.placeholder.clear();
+            slot.placeholder.push_str(placeholder);
+            let i = slot.node;
+            if self.nodes[i as usize].text.is_empty() {
+                self.damage_node(i);
+            }
+            seen = true;
+        }
+        seen
     }
 
     /// A node that became disabled lets go of focus, hover and presses.

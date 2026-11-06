@@ -71,16 +71,17 @@ use windows_sys::{
             WindowsAndMessaging::{
                 CREATESTRUCTW, CW_USEDEFAULT, CreateWindowExW, DEVICE_NOTIFY_WINDOW_HANDLE,
                 DefWindowProcW, DestroyWindow, DispatchMessageW, GWLP_USERDATA, GetClientRect,
-                GetMessageW, GetWindowLongPtrW, IDC_ARROW, KillTimer, LoadCursorW, MINMAXINFO, MSG,
-                PBT_POWERSETTINGCHANGE, PostQuitMessage, RegisterClassExW, SIZE_MINIMIZED,
-                SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SetTimer,
-                SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, WM_CAPTURECHANGED,
-                WM_CLOSE, WM_CREATE, WM_DESTROY, WM_DPICHANGED, WM_DWMCOMPOSITIONCHANGED,
-                WM_ERASEBKGND, WM_GETMINMAXINFO, WM_GETOBJECT, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS,
-                WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_NCDESTROY, WM_PAINT,
-                WM_POWERBROADCAST, WM_SETFOCUS, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE,
-                WM_SYSKEYDOWN, WM_SYSKEYUP, WM_THEMECHANGED, WM_TIMER, WM_WTSSESSION_CHANGE,
-                WNDCLASSEXW, WS_EX_NOREDIRECTIONBITMAP, WS_OVERLAPPEDWINDOW,
+                GetMessageW, GetWindowLongPtrW, HCURSOR, HTCLIENT, IDC_ARROW, IDC_IBEAM, KillTimer,
+                LoadCursorW, MINMAXINFO, MSG, PBT_POWERSETTINGCHANGE, PostQuitMessage,
+                RegisterClassExW, SIZE_MINIMIZED, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOMOVE,
+                SWP_NOZORDER, SetCursor, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+                TranslateMessage, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_CREATE, WM_DESTROY,
+                WM_DPICHANGED, WM_DWMCOMPOSITIONCHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO,
+                WM_GETOBJECT, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP,
+                WM_MOUSEMOVE, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_POWERBROADCAST, WM_SETCURSOR,
+                WM_SETFOCUS, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_SYSKEYDOWN,
+                WM_SYSKEYUP, WM_THEMECHANGED, WM_TIMER, WM_WTSSESSION_CHANGE, WNDCLASSEXW,
+                WS_EX_NOREDIRECTIONBITMAP, WS_OVERLAPPEDWINDOW,
             },
         },
     },
@@ -88,8 +89,10 @@ use windows_sys::{
 };
 
 use super::{
-    Backdrop, Event, Frame, Handler, Mods, PointPx, Presenter, RectPx, SizePx, WindowOptions,
+    Backdrop, Cursor, Event, Frame, Handler, Mods, PointPx, Presenter, RectPx, SizePx,
+    WindowOptions,
     a11y::{Initial, Requests, ToUiThread, WM_APP_A11Y},
+    clipboard,
     compose::{Composer, Device, Gpu, Rects, after_loss},
     env::{Env, GUID_POWER_SAVING_STATUS},
     probe,
@@ -107,6 +110,8 @@ const FRAME_MS: u32 = 16;
 /// timer, so a device that fails at once costs a rebuild a second, not one per paint.
 const REBUILD_TIMER: usize = 2;
 const REBUILD_GAP: Duration = Duration::from_secs(1);
+/// The one-shot timer behind [`WindowCx::wake_after`].
+const WAKE_TIMER: usize = 3;
 /// The DPI that is 100 %.
 const BASE_DPI: u32 = 96;
 /// `WinUser.h`'s value; windows-sys files it under `Win32_UI_Controls`, a large feature for one
@@ -415,6 +420,37 @@ impl WindowCx<'_> {
         self.state.frames.set(on && ok);
     }
 
+    /// Sends [`Event::Wake`] once, `ms` milliseconds from now (the system makes it at least 10),
+    /// replacing an earlier request; `None` cancels it. A caret blinks on it, and stops asking.
+    pub fn wake_after(&mut self, ms: Option<u32>) {
+        match ms {
+            Some(ms) => {
+                // SAFETY: hwnd is live; WM_TIMER comes through the loop (no callback). Setting the
+                // same id again replaces the timer.
+                let ok = unsafe { SetTimer(self.hwnd, WAKE_TIMER, ms, None) } != 0;
+                self.state.wake.set(ok);
+            }
+            None => {
+                if self.state.wake.replace(false) {
+                    // SAFETY: hwnd is live; the timer is this window's.
+                    unsafe { KillTimer(self.hwnd, WAKE_TIMER) };
+                }
+            }
+        }
+    }
+
+    /// The clipboard's text, its first `max_units` UTF-16 code units at most; `None` if it holds
+    /// none, or another window kept it open.
+    #[must_use]
+    pub fn clipboard_text(&self, max_units: usize) -> Option<String> {
+        clipboard::read(self.hwnd, max_units)
+    }
+
+    /// Puts `text` on the clipboard. Returns whether it's there.
+    pub fn set_clipboard_text(&mut self, text: &str) -> bool {
+        clipboard::write(self.hwnd, text)
+    }
+
     /// Destroys the window once the handler returns, ending [`Window::run`].
     pub fn close(&mut self) {
         self.state.close.set(true);
@@ -501,6 +537,12 @@ struct State {
     dirty: Cell<bool>,
     /// The frame timer runs.
     frames: Cell<bool>,
+    /// The wake timer runs.
+    wake: Cell<bool>,
+    /// The first half of a surrogate pair a `WM_CHAR` brought; 0 if none.
+    surrogate: Cell<u16>,
+    /// The system's arrow and I-beam.
+    cursors: [HCURSOR; 2],
     /// The handler asked to close.
     close: Cell<bool>,
     /// `TrackMouseEvent` will send `WM_MOUSELEAVE`.
@@ -606,6 +648,15 @@ impl State {
             min_size,
             dirty: Cell::new(false),
             frames: Cell::new(false),
+            wake: Cell::new(false),
+            surrogate: Cell::new(0),
+            // SAFETY: system cursors, by their predefined ids; shared, never destroyed.
+            cursors: unsafe {
+                [
+                    LoadCursorW(null_mut(), IDC_ARROW),
+                    LoadCursorW(null_mut(), IDC_IBEAM),
+                ]
+            },
             close: Cell::new(false),
             tracking: Cell::new(false),
             pressed: Cell::new(false),
@@ -687,6 +738,20 @@ impl State {
                 self.send(hwnd, Event::Frame);
             }
             WM_TIMER if wp == REBUILD_TIMER => self.rebuild_due(hwnd),
+            WM_TIMER if wp == WAKE_TIMER => {
+                // One shot: the handler asks again if it needs to.
+                self.wake.set(false);
+                // SAFETY: hwnd is live; the timer is this window's.
+                unsafe { KillTimer(hwnd, WAKE_TIMER) };
+                self.send(hwnd, Event::Wake);
+            }
+            // Over the client area the handler picks the shape; elsewhere the system does.
+            WM_SETCURSOR if low(lp) == HTCLIENT => {
+                if !self.set_cursor() {
+                    return None;
+                }
+                return Some(1);
+            }
             WM_SETFOCUS | WM_KILLFOCUS => {
                 let focused = msg == WM_SETFOCUS;
                 self.send(hwnd, Event::Focus(focused));
@@ -776,6 +841,9 @@ impl State {
                     self.tracking.set(ok != 0);
                 }
                 self.send(hwnd, Event::PointerMove(point(lp)));
+                // WM_SETCURSOR came before the handler saw the move; and while the window holds
+                // the pointer (selecting text), it doesn't come at all.
+                self.set_cursor();
             }
             WM_MOUSELEAVE => {
                 self.tracking.set(false);
@@ -814,9 +882,50 @@ impl State {
                     return None;
                 }
             }
+            WM_CHAR => {
+                let Some(c) = self.char_of(u16::try_from(wp & 0xFFFF).unwrap_or(0)) else {
+                    return Some(0);
+                };
+                if self.send(hwnd, Event::Char(c)) != Some(true) {
+                    return None;
+                }
+            }
             _ => return None,
         }
         Some(0)
+    }
+
+    /// The character a `WM_CHAR` code unit completes: a surrogate pair's first half waits for its
+    /// second, and an unpaired half is dropped.
+    fn char_of(&self, unit: u16) -> Option<char> {
+        match unit {
+            0xD800..=0xDBFF => {
+                self.surrogate.set(unit);
+                None
+            }
+            0xDC00..=0xDFFF => match self.surrogate.replace(0) {
+                0 => None,
+                high => char::decode_utf16([high, unit]).next()?.ok(),
+            },
+            _ => {
+                self.surrogate.set(0);
+                char::from_u32(u32::from(unit))
+            }
+        }
+    }
+
+    /// Shows the handler's cursor. False if the handler is busy, and the class's arrow shows.
+    fn set_cursor(&self) -> bool {
+        let Ok(handler) = self.handler.try_borrow() else {
+            return false;
+        };
+        let cursor = match handler.cursor() {
+            Cursor::Arrow => self.cursors[0],
+            Cursor::IBeam => self.cursors[1],
+        };
+        // SAFETY: a system cursor; no other preconditions.
+        unsafe { SetCursor(cursor) };
+        true
     }
 
     /// Hands `event` to the handler. Returns whether the handler used it, or `None` if the handler
@@ -1676,6 +1785,63 @@ mod tests {
         // SAFETY: as above.
         let heard = unsafe { with_state(window.hwnd, |s| s.env.get()) };
         assert_eq!(heard, Some(real));
+    }
+
+    /// Characters reach the handler whole: a surrogate pair as one, an unpaired half not at all.
+    /// The wake timer fires once.
+    #[test]
+    fn typed_characters_arrive_whole_and_a_wake_fires_once() {
+        let (window, events, _) = open(0);
+        let hwnd = window.hwnd;
+        let before = events.borrow().len();
+        // SAFETY: messages sent to this test's live window, on its thread.
+        unsafe {
+            SendMessageW(hwnd, WM_CHAR, 0x61, 0);
+            // U+1F600: D83D DE00. Then a lone low half, and a high half another character ends.
+            SendMessageW(hwnd, WM_CHAR, 0xD83D, 0);
+            SendMessageW(hwnd, WM_CHAR, 0xDE00, 0);
+            SendMessageW(hwnd, WM_CHAR, 0xDE00, 0);
+            SendMessageW(hwnd, WM_CHAR, 0xD83D, 0);
+            SendMessageW(hwnd, WM_CHAR, 0x62, 0);
+        };
+        let chars: Vec<Event> = events.borrow()[before..].to_vec();
+        assert_eq!(
+            chars,
+            [Event::Char('a'), Event::Char('\u{1F600}'), Event::Char('b')]
+        );
+        // SAFETY: this test's window, on its thread.
+        unsafe { with_state(hwnd, |state| WindowCx { hwnd, state }.wake_after(Some(10))) };
+        let pump = || {
+            // SAFETY: plain data; all-zero is a valid value.
+            let mut msg: MSG = unsafe { std::mem::zeroed() };
+            // SAFETY: msg is a live local; the timer's message is dispatched to the window.
+            while unsafe { PeekMessageW(&raw mut msg, null_mut(), 0, 0, PM_REMOVE) } != 0 {
+                // SAFETY: msg is the message PeekMessageW just filled.
+                unsafe { DispatchMessageW(&raw const msg) };
+            }
+        };
+        let wakes = || {
+            events
+                .borrow()
+                .iter()
+                .filter(|e| **e == Event::Wake)
+                .count()
+        };
+        let start = Instant::now();
+        while wakes() == 0 && start.elapsed() < Duration::from_secs(5) {
+            pump();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(wakes(), 1, "{:?}", events.borrow());
+        // One shot: nothing more comes.
+        std::thread::sleep(Duration::from_millis(60));
+        pump();
+        assert_eq!(wakes(), 1);
+        // SAFETY: as above.
+        assert_eq!(unsafe { with_state(hwnd, |s| s.wake.get()) }, Some(false));
+        drop(window);
+        // Take the WM_QUIT the destroyed window posted.
+        pump();
     }
 
     #[test]

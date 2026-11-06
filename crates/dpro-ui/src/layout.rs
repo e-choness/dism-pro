@@ -31,6 +31,7 @@ impl<M> Ui<M> {
     pub fn layout(&mut self, text: &mut dyn TextSystem) {
         let window = Rect::new(0.0, 0.0, self.viewport.w, self.viewport.h);
         self.arrange(ROOT, window, text, false);
+        self.layout_fields(text);
         // Nodes may have moved, appeared or been enabled under a pointer that stayed still.
         if let Some(p) = self.pointer {
             let hit = self.hit(p);
@@ -63,6 +64,11 @@ impl<M> Ui<M> {
                         h: m.height,
                     }
                 }
+                // As wide as the view makes it, a line high: its text never changes its size.
+                Role::Field => Size {
+                    w: 0.0,
+                    h: text.measure("", &n.text_style, f32::INFINITY).height,
+                },
                 Role::CheckBox => {
                     // The box is a line high, with half a line before the label.
                     let line = text.measure("", &n.text_style, f32::INFINITY).height;
@@ -619,6 +625,10 @@ mod tests {
         fn draw(&mut self, _: &str, _: &TextStyle, _: Rect, _: f32, _: &mut dyn crate::GlyphSink) {}
 
         fn icon(&mut self, _: crate::Icon, _: Rect, _: f32, _: &mut dyn crate::GlyphSink) {}
+
+        fn caret_stops(&mut self, text: &str, style: &TextStyle, out: &mut Vec<crate::CaretStop>) {
+            FakeText.caret_stops(text, style, out);
+        }
     }
 
     #[test]

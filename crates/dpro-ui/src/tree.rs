@@ -4,6 +4,7 @@
 use dpro_app::table::Tri;
 
 use crate::{
+    field::TextEdit,
     geom::{Rect, Size},
     style::Style,
     text::TextStyle,
@@ -60,11 +61,13 @@ pub enum Role {
     Button,
     /// Emits its message when toggled; the view owns the state.
     CheckBox,
+    /// One line of editable text (`field.rs`); the view owns the value.
+    Field,
 }
 
 impl Role {
     pub(crate) fn interactive(self) -> bool {
-        matches!(self, Self::Button | Self::CheckBox)
+        matches!(self, Self::Button | Self::CheckBox | Self::Field)
     }
 }
 
@@ -138,6 +141,12 @@ pub struct Element<'s, M> {
     pub(crate) check: Tri,
     pub(crate) enabled: bool,
     pub(crate) selected: Option<bool>,
+    /// A field's accessible name.
+    pub(crate) label: &'s str,
+    /// What a field shows while it's empty.
+    pub(crate) placeholder: &'s str,
+    /// A field's edits as the view's messages; `None` for a read-only field.
+    pub(crate) on_edit: Option<fn(TextEdit) -> M>,
 }
 
 impl<'s, M> Element<'s, M> {
@@ -153,6 +162,9 @@ impl<'s, M> Element<'s, M> {
             check: Tri::Off,
             enabled: true,
             selected: None,
+            label: "",
+            placeholder: "",
+            on_edit: None,
         }
     }
 
@@ -188,6 +200,52 @@ impl<'s, M> Element<'s, M> {
         }
     }
 
+    /// A one-line text field showing `value`. Each edit reaches the view as `on_edit(edit)`; the
+    /// view applies it to its copy ([`TextEdit::apply`]) and passes the result as `value` next
+    /// frame. Give it a [name](Self::name) for assistive technology, and a
+    /// [placeholder](Self::placeholder) if it's empty at first.
+    #[must_use]
+    pub fn field(key: Key, value: &'s str, on_edit: fn(TextEdit) -> M) -> Self {
+        Self {
+            on_edit: Some(on_edit),
+            // A text box: a surface inside a border.
+            look: Look {
+                fill: Some(Tone::Surface),
+                border: Some(Tone::Border),
+                radius: Radius::Control,
+                ..Look::PLAIN
+            },
+            ..Self::new(key, Role::Field, value, None)
+        }
+    }
+
+    /// A field whose text can be selected and copied, but not changed.
+    #[must_use]
+    pub fn read_only(self) -> Self {
+        Self {
+            on_edit: None,
+            ..self
+        }
+    }
+
+    /// What a field shows, in secondary text, while it's empty; UI Automation's help text then.
+    #[must_use]
+    pub fn placeholder(self, placeholder: &'s str) -> Self {
+        Self {
+            placeholder,
+            ..self
+        }
+    }
+
+    /// The message Enter sends while the field has focus (a palette runs its command).
+    #[must_use]
+    pub fn submit(self, msg: M) -> Self {
+        Self {
+            msg: Some(msg),
+            ..self
+        }
+    }
+
     #[must_use]
     pub fn style(self, style: Style) -> Self {
         Self { style, ..self }
@@ -219,11 +277,18 @@ impl<'s, M> Element<'s, M> {
         }
     }
 
-    /// The accessible name of a container, which draws no text: "Pages" for a rail, a table's
-    /// title. Labels and buttons are named by their text.
+    /// The accessible name of a container, which draws no text ("Pages" for a rail, a table's
+    /// title), or of a field, whose text is its value. Labels and buttons are named by their text.
     #[must_use]
     pub fn name(self, name: &'s str) -> Self {
-        Self { text: name, ..self }
+        if self.role == Role::Field {
+            Self {
+                label: name,
+                ..self
+            }
+        } else {
+            Self { text: name, ..self }
+        }
     }
 }
 
@@ -250,6 +315,8 @@ pub(crate) struct Node<M> {
     pub(crate) check: Tri,
     pub(crate) enabled: bool,
     pub(crate) selected: Option<bool>,
+    /// A field's slot in the Ui's field table; [`NIL`] for other roles.
+    pub(crate) field: u32,
 
     pub(crate) parent: u32,
     pub(crate) first: u32,
@@ -296,6 +363,7 @@ impl<M> Node<M> {
             check: Tri::Off,
             enabled: true,
             selected: None,
+            field: NIL,
             parent: NIL,
             first: NIL,
             last: NIL,
@@ -369,12 +437,13 @@ mod tests {
     }
 
     #[test]
-    fn only_enabled_buttons_and_checkboxes_are_interactive() {
+    fn only_enabled_buttons_checkboxes_and_fields_are_interactive() {
         let mut n: Node<()> = Node::new(Key(1), Role::Button);
         assert!(n.interactive());
         n.enabled = false;
         assert!(!n.interactive());
         assert!(!Node::<()>::new(Key(1), Role::Label).interactive());
         assert!(Node::<()>::new(Key(1), Role::CheckBox).interactive());
+        assert!(Node::<()>::new(Key(1), Role::Field).interactive());
     }
 }

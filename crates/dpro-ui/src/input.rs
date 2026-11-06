@@ -6,13 +6,16 @@
 //!   release over that node activates it. While captured, only that node shows hover.
 //! - **Keyboard:** Tab and Shift+Tab move focus in tree order, which is visual order because views
 //!   build in reading order, wrapping at the ends. Enter activates on the press; Space presses and
-//!   activates on the release, as Windows buttons do. Other keys are left to the caller.
+//!   activates on the release, as Windows buttons do. A focused field takes its editing keys and
+//!   typed characters first (`field.rs`). Other keys are left to the caller.
+//! - **Fields** take a press as a caret position and a drag as a selection; they never activate,
+//!   and show no hover highlight.
 //! - **Animations:** hover fades over [`Motion::hover_ms`](crate::Motion) with an ease-out curve
 //!   (doc 05 §4). A duration of 0 jumps, so reduced motion never asks for a frame.
 
 use crate::{
     geom::Point,
-    tree::{NIL, NodeId},
+    tree::{NIL, NodeId, Role},
     ui::{ROOT, Ui},
 };
 
@@ -25,6 +28,9 @@ pub enum Input {
     /// The pointer left the window (`WM_MOUSELEAVE`).
     PointerLeave,
     Key(KeyEvent),
+    /// A typed character (`WM_CHAR`, surrogate pairs joined), after its key's
+    /// [`Input::Key`]. Control characters come too (Ctrl+A is U+0001); fields ignore them.
+    Char(char),
 }
 
 /// A key going down or up.
@@ -42,6 +48,9 @@ pub enum KeyCode {
     Enter,
     Space,
     Escape,
+    Backspace,
+    Delete,
+    Insert,
     Up,
     Down,
     Left,
@@ -73,12 +82,17 @@ impl<M: Clone> Ui<M> {
         self.pointer = match input {
             Input::PointerMove(p) | Input::PointerDown(p) | Input::PointerUp(p) => Some(p),
             Input::PointerLeave => None,
-            Input::Key(_) => self.pointer,
+            Input::Key(_) | Input::Char(_) => self.pointer,
         };
         match input {
             Input::PointerMove(p) => {
                 let hit = self.hit(p);
-                self.pointer_over(hit)
+                let selecting = self.is_field(self.pressed);
+                if selecting {
+                    // The selection's end follows the pointer, even outside the field.
+                    self.field_pointer(self.pressed, p, true);
+                }
+                self.pointer_over(hit) || selecting
             }
             Input::PointerLeave => self.pointer_over(NIL),
             Input::PointerDown(p) => {
@@ -89,8 +103,12 @@ impl<M: Clone> Ui<M> {
                     return false;
                 }
                 self.pressed = hit;
-                self.set_pressed(hit, true);
                 self.move_focus(hit);
+                if self.is_field(hit) {
+                    self.field_pointer(hit, p, false);
+                } else {
+                    self.set_pressed(hit, true);
+                }
                 true
             }
             Input::PointerUp(p) => {
@@ -102,12 +120,20 @@ impl<M: Clone> Ui<M> {
                 self.set_pressed(target, false);
                 let hit = self.hit(p);
                 self.pointer_over(hit);
-                if hit == target {
+                if hit == target && !self.is_field(target) {
                     self.activate(target, out);
                 }
                 true
             }
-            Input::Key(k) => self.key(k, out),
+            Input::Key(k) => {
+                if let Some(i) = self.focused_field()
+                    && let Some(used) = self.field_key(i, k, out)
+                {
+                    return used;
+                }
+                self.key(k, out)
+            }
+            Input::Char(c) => self.field_char(c, out),
         }
     }
 
@@ -122,6 +148,9 @@ impl<M: Clone> Ui<M> {
                 self.show_focus_ring();
                 if to != NIL {
                     self.move_focus(to);
+                    if self.is_field(to) {
+                        self.select_all(to);
+                    }
                 }
                 true
             }
@@ -244,12 +273,13 @@ impl<M> Ui<M> {
         } else {
             NIL
         };
-        if self.pressed != NIL {
+        if self.pressed != NIL && !self.is_field(self.pressed) {
             self.set_pressed(self.pressed, hit == self.pressed);
         }
         self.set_hover(hit)
     }
 
+    /// Hover moved to `to`. Returns whether it changed, which can change the pointer's shape.
     pub(crate) fn set_hover(&mut self, to: u32) -> bool {
         let from = self.hover;
         if from == to {
@@ -259,10 +289,20 @@ impl<M> Ui<M> {
         for (i, on) in [(from, false), (to, true)] {
             if i != NIL {
                 self.nodes[i as usize].hovered = on;
-                self.animate_hover(i);
+                // A field shows hover only as the I-beam.
+                if !self.is_field(i) {
+                    self.animate_hover(i);
+                }
             }
         }
         true
+    }
+
+    /// Whether `i` is a field node; false for [`NIL`].
+    pub(crate) fn is_field(&self, i: u32) -> bool {
+        self.nodes
+            .get(i as usize)
+            .is_some_and(|n| n.role == Role::Field)
     }
 
     fn animate_hover(&mut self, i: u32) {
@@ -307,6 +347,10 @@ impl<M> Ui<M> {
         self.focus = to;
         self.damage_node(from);
         self.damage_node(to);
+        if self.is_field(to) {
+            // The caret shows at once, and blinks from now.
+            self.reset_caret();
+        }
     }
 
     pub(crate) fn show_focus_ring(&mut self) {

@@ -14,6 +14,9 @@
 //! - **animations:** `SPI_GETCLIENTAREAANIMATION`, the *Animation effects* switch that
 //!   `UISettings.AnimationsEnabled` reports.
 //! - **remote:** `GetSystemMetrics(SM_REMOTESESSION)`.
+//! - **caret:** `GetCaretBlinkTime` and `SPI_GETCARETWIDTH`, the text cursor's blink rate and
+//!   thickness (Settings › Accessibility › Text cursor). *(verify that changing the blink rate
+//!   sends `WM_SETTINGCHANGE`; the thickness does.)*
 //! - **battery saver:** `GetSystemPowerStatus`'s `SystemStatusFlag`; the window subscribes to
 //!   `GUID_POWER_SAVING_STATUS`. *(verify on Windows 11 24H2+, whose Energy saver replaced it.)*
 //! - **winpe:** `HKLM\SYSTEM\CurrentControlSet\Control\MiniNT` exists; **build:**
@@ -30,8 +33,8 @@ use windows_sys::{
         },
         System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS},
         UI::WindowsAndMessaging::{
-            GetSystemMetrics, SM_REMOTESESSION, SPI_GETCLIENTAREAANIMATION, SPI_GETHIGHCONTRAST,
-            SystemParametersInfoW,
+            GetCaretBlinkTime, GetSystemMetrics, SM_REMOTESESSION, SPI_GETCARETWIDTH,
+            SPI_GETCLIENTAREAANIMATION, SPI_GETHIGHCONTRAST, SystemParametersInfoW,
         },
     },
     core::{BOOL, GUID},
@@ -83,6 +86,10 @@ pub struct Env {
     /// A remote desktop session.
     pub remote: bool,
     pub battery_saver: bool,
+    /// How long the caret is on, then off, in milliseconds; 0 doesn't blink.
+    pub caret_blink_ms: u32,
+    /// The caret's width in pixels at 100 %; at least 1.
+    pub caret_width: u32,
 }
 
 impl Env {
@@ -108,8 +115,28 @@ impl Env {
             // SAFETY: no preconditions.
             remote: unsafe { GetSystemMetrics(SM_REMOTESESSION) } != 0,
             battery_saver: battery_saver(),
+            caret_blink_ms: caret_blink_ms(),
+            caret_width: caret_width(),
         }
     }
+}
+
+/// `GetCaretBlinkTime`: `INFINITE` is no blinking (0), and a failure (0) Windows' default.
+fn caret_blink_ms() -> u32 {
+    // SAFETY: no preconditions.
+    match unsafe { GetCaretBlinkTime() } {
+        u32::MAX => 0,
+        0 => 530,
+        ms => ms,
+    }
+}
+
+/// `SPI_GETCARETWIDTH`; 1, Windows' default, if it can't be read.
+fn caret_width() -> u32 {
+    let mut width: u32 = 0;
+    // SAFETY: a live out-pointer to the DWORD SPI_GETCARETWIDTH writes.
+    let ok = unsafe { SystemParametersInfoW(SPI_GETCARETWIDTH, 0, (&raw mut width).cast(), 0) };
+    if ok != 0 && width > 0 { width } else { 1 }
 }
 
 /// `WinPE` and the build, read once.

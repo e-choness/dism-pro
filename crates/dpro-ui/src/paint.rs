@@ -128,6 +128,7 @@ impl<M> Ui<M> {
         );
         match node.role {
             Role::CheckBox => p.check_box(node, interactive, ink),
+            Role::Field => self.paint_field(i, visible, under, ink, p),
             Role::Label | Role::Button if node.first == NIL && !node.text.is_empty() => {
                 let content = node.rect.inset(node.style.padding);
                 p.text(node, content, node.role == Role::Button, ink);
@@ -143,6 +144,70 @@ impl<M> Ui<M> {
             p.canvas.set_clip(visible);
             p.focus_ring(rect, corner);
         }
+    }
+
+    /// A field's content, clipped to its content box: the selection, the visible part of its
+    /// text (or the placeholder while it's empty), then the caret. Selected text keeps its ink;
+    /// high contrast redraws it in `HighlightText` over `Highlight`.
+    fn paint_field(
+        &self,
+        i: u32,
+        visible: RectPx,
+        under: Tone,
+        ink: Color,
+        p: &mut Painter<'_, '_>,
+    ) {
+        let node = &self.nodes[i as usize];
+        let field = &self.fields[node.field as usize];
+        let content = node.rect.inset(node.style.padding);
+        let clip = content.snap(p.scale).intersect(visible);
+        if clip.is_empty() {
+            return;
+        }
+        p.canvas.set_clip(clip);
+        let line = field.line_box(content);
+        // Where the text starts: scrolled left to keep the caret in view.
+        let origin = line.x - field.scroll;
+        let shows = self.active && self.focused_field() == Some(i);
+        let (start, end) = field.selection();
+        let selection = (shows && start != end).then(|| {
+            let x0 = origin + field.x_of(start);
+            let x1 = origin + field.x_of(end);
+            Rect::new(x0, line.y, x1 - x0, line.h).snap(p.scale)
+        });
+        if let Some(sel) = selection {
+            let fill = p.theme.fill(Tone::Selected, true);
+            p.canvas.fill(sel, p.theme.color(fill));
+        }
+        if node.text.is_empty() {
+            if !field.placeholder.is_empty() {
+                let secondary = p.theme.ink(Tone::TextSecondary, under);
+                p.line(&field.placeholder, node, line, secondary);
+            }
+        } else {
+            let (slice, offset) = field.visible(&node.text);
+            let run = Rect::new(origin + offset, line.y, f32::INFINITY, line.h);
+            p.line(slice, node, run, ink);
+            let selected_ink = p.theme.ink(Tone::Text, Tone::Selected);
+            if let Some(sel) = selection
+                && selected_ink != ink
+            {
+                p.canvas.set_clip(sel.intersect(clip));
+                p.line(slice, node, run, selected_ink);
+                p.canvas.set_clip(clip);
+            }
+        }
+        if shows && self.caret_on {
+            let caret = Rect::new(
+                origin + field.x_of(field.caret as usize),
+                line.y,
+                crate::field::caret_logical(self.caret),
+                line.h,
+            );
+            p.canvas
+                .fill(caret.snap(p.scale), p.theme.ink(Tone::Text, under));
+        }
+        p.canvas.set_clip(visible);
     }
 }
 
@@ -221,6 +286,17 @@ impl Painter<'_, '_> {
         };
         self.text
             .draw(&n.text, &n.text_style, rect, self.scale, &mut sink);
+    }
+
+    /// `text` on one line in `n`'s text style, from `rect`'s top-left, untrimmed if `rect` is
+    /// unbounded; clipped by the canvas.
+    fn line<M>(&mut self, text: &str, n: &Node<M>, rect: Rect, ink: Color) {
+        let mut sink = Ink {
+            canvas: &mut *self.canvas,
+            color: ink,
+        };
+        self.text
+            .draw(text, &n.text_style, rect, self.scale, &mut sink);
     }
 
     /// The box, a line high, then the label half a line after it (the size layout measured).
