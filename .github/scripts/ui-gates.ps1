@@ -18,6 +18,7 @@ raw-API baseline, measured in this job, so it holds on whatever machine the runn
       swap-chain buffers of the same size).
   U12 UI Automation, as a client sees it. The time from the window showing to the tree served
       (the "Review changes" button found through UIA) is advisory: <= 100 ms (S-01: 40-42 ms).
+      The client is warmed on bare_window first, so its own start isn't counted.
       The checks are gates: names and roles (the page list, the table's rows, the check boxes),
       then Toggle, SelectionItem and Invoke through UIA, each read back through UIA.
   Live theme switch: see its section.
@@ -230,6 +231,25 @@ function Get-Pattern($Element, $Pattern) {
 
 $lines = @("UI Automation on the shell at $Size (advisory: tree served <= 100 ms after the window shows; the checks are gates)")
 $checks = [ordered]@{}
+# This process's first UIA calls load the client (UIAutomationCore, the managed client, these
+# functions' first runs): 0.5 to 3.8 s on runners, which U12 must not charge to the shell. The same
+# calls run first on bare_window, which serves next to nothing; that time is reported on its own.
+$warm = Start-Process -FilePath $exe.bare -PassThru
+try {
+    $warmed = Wait-Until { $warm.Refresh(); $warm.MainWindowHandle -ne [IntPtr]::Zero } 30000
+    if ($warmed) {
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        $null = Find-Elements ($ae::FromHandle($warm.MainWindowHandle)) $types::Button 'Review changes'
+        $lines += 'UIA client warm-up on bare_window: {0:N1} ms (not part of U12)' -f $sw.Elapsed.TotalMilliseconds
+    } else {
+        $lines += 'UIA client warm-up skipped: bare_window showed no window in 30 s'
+    }
+} finally {
+    if (-not $warm.HasExited) {
+        if ($warm.MainWindowHandle -ne [IntPtr]::Zero) { [void][UiaGateWin32]::PostMessageW($warm.MainWindowHandle, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) } # WM_CLOSE
+        if (-not $warm.WaitForExit(5000)) { $warm.Kill() }
+    }
+}
 $p = Start-Process -FilePath $exe.shell -ArgumentList @('--size', $Size) -PassThru
 $null = $p.Handle
 try {
