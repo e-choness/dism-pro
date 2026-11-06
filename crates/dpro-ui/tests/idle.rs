@@ -1,25 +1,27 @@
 //! TD-0009 §7 U6, the static part: once nothing changes, the UI asks for nothing.
 //!
 //! The platform's loop sleeps in `GetMessage` unless the UI wants a frame or its caret timer, so
-//! idle costs no CPU when three things hold:
+//! idle costs no CPU when four things hold:
 //! - every animation ends, within its duration, after whatever input started it;
+//! - a hold on Hold to apply asks for frames only while it runs: until it's let go, or until
+//!   `motion.hold` has passed and it has applied, even if it's still pressed (§11 step 4);
 //! - a focused field's caret stops blinking, on, within [`Caret::BLINK_FOR_MS`] of the last
 //!   keystroke or caret move, and its timer then stops too (§11 step 3);
 //! - a frame nobody asked for (a repaint after the window was uncovered, say) finds nothing to do:
 //!   no damage, no accessibility update, and no new request for frames or wakes.
 //!
-//! All three are checked after every step of the scripted session, with an assistive technology
+//! All of them are checked after every step of the scripted session, with an assistive technology
 //! listening. G1's `--ui-probe idle` measures the rest on Windows: no timers, no wakes and no CPU
 //! time over 5 s.
 
 #[path = "../benches/fixtures/shell.rs"]
 mod shell;
 
-use dpro_ui::{Caret, FakeText, tokens::motion::HOVER_MS};
-use shell::{Run, Shell, Step, view};
-
-/// One frame at 60 Hz, rounded down to whole milliseconds.
-const FRAME_MS: u64 = 16;
+use dpro_ui::{
+    Caret, FakeText, Input,
+    tokens::motion::{HOLD_MS, HOVER_MS},
+};
+use shell::{FRAME_MS, Run, Shell, Step, view};
 
 /// Frames until the animations stop: the first tick starts them, and they end once a whole
 /// duration has passed.
@@ -27,15 +29,18 @@ fn max_ticks() -> u64 {
     u64::from(HOVER_MS).div_ceil(FRAME_MS) + 1
 }
 
-/// Ticks frames until the UI stops asking for them, and fails if that takes longer than the
-/// hover duration allows. Returns the frames it took.
-fn settle(run: &mut Run, when: &str) -> u64 {
+/// Frames until a hold held from its first tick applies: the first tick starts its clock, and it
+/// ends once `motion.hold` has passed.
+fn hold_ticks() -> u64 {
+    u64::from(HOLD_MS).div_ceil(FRAME_MS) + 1
+}
+
+/// Ticks frames until the UI stops asking for them, and fails if that takes more than `most`.
+/// Returns the frames it took.
+fn settle(run: &mut Run, when: &str, most: u64) -> u64 {
     let mut ticks = 0;
     while run.ui.wants_frame() {
-        assert!(
-            ticks < max_ticks(),
-            "{when}: still animating after {ticks} frames"
-        );
+        assert!(ticks < most, "{when}: still asks for frames after {ticks}");
         run.step(Step::Tick(FRAME_MS));
         ticks += 1;
     }
@@ -88,19 +93,27 @@ fn assert_idle(run: &mut Run, when: &str) {
 }
 
 #[test]
-fn every_step_settles_within_the_hover_duration_and_stays_idle() {
+fn every_step_settles_within_its_bound_and_stays_idle() {
     let mut run = Run::accessible(Shell::new());
     assert_idle(&mut run, "the first frame");
-    let (mut longest, mut blinked) = (0, 0);
+    let (mut longest, mut held, mut blinked) = (0, 0, 0);
     for (n, step) in run.session().into_iter().enumerate() {
         let when = format!("step {n} ({step:?})");
         run.step(step);
-        longest = longest.max(settle(&mut run, &when));
+        // The session's press on Hold to apply, settled here: held until it applies.
+        if run.ui.hold_progress().is_some() {
+            held = held.max(settle(&mut run, &when, hold_ticks()));
+        } else {
+            longest = longest.max(settle(&mut run, &when, max_ticks()));
+        }
         blinked = blinked.max(settle_caret(&mut run, &when));
         assert_idle(&mut run, &when);
     }
     // A full fade takes exactly the bound, so the bound is tight and the hovers did animate.
     assert_eq!(longest, max_ticks());
+    // So does the hold, which then applied, once.
+    assert_eq!(held, hold_ticks());
+    assert_eq!(run.shell.applies(), 1);
     // The field had focus, and its caret blinked for the whole time it may.
     let caret = Caret::WINDOWS;
     assert_eq!(
@@ -111,16 +124,48 @@ fn every_step_settles_within_the_hover_duration_and_stays_idle() {
 
 #[test]
 fn the_session_as_scripted_settles_and_stays_idle() {
-    // No frames between steps: hovers interrupt each other mid-fade, as a fast pointer does.
+    // No frames between steps: hovers interrupt each other mid-fade, as a fast pointer does, and
+    // the hold is let go after three frames.
     let mut run = Run::accessible(Shell::new());
     for step in run.session() {
         run.step(step);
     }
-    settle(&mut run, "after the session");
+    settle(&mut run, "after the session", max_ticks());
     settle_caret(&mut run, "after the session");
     assert_idle(&mut run, "after the session");
+    assert_eq!(run.shell.applies(), 0, "a hold let go early applied");
     // Idle frames stay idle.
     for k in 0..3 {
         assert_idle(&mut run, &format!("idle frame {k}"));
     }
+}
+
+#[test]
+fn a_hold_asks_for_frames_only_while_it_runs() {
+    let mut run = Run::accessible(Shell::new()).drawer_open();
+    let at = run.center(&Run::APPLY);
+    // Let go halfway: nothing applies, and the frames stop with it.
+    run.step(Step::Input(Input::PointerDown(at)));
+    for _ in 0..hold_ticks() / 2 {
+        run.step(Step::Tick(FRAME_MS));
+        assert!(
+            run.ui.wants_frame(),
+            "a running hold stopped asking for frames"
+        );
+    }
+    run.step(Step::Input(Input::PointerUp(at)));
+    settle(&mut run, "let go", max_ticks());
+    assert_idle(&mut run, "let go");
+    assert_eq!(run.shell.applies(), 0, "a hold let go early applied");
+
+    // Held to the end: it applies once, and asks for nothing more while still pressed, nor when
+    // it's let go.
+    run.step(Step::Input(Input::PointerDown(at)));
+    settle(&mut run, "held", hold_ticks());
+    assert_eq!(run.shell.applies(), 1);
+    assert_idle(&mut run, "held, still pressed");
+    run.step(Step::Input(Input::PointerUp(at)));
+    settle(&mut run, "held, let go", max_ticks());
+    assert_idle(&mut run, "held, let go");
+    assert_eq!(run.shell.applies(), 1, "letting go applied again");
 }

@@ -81,6 +81,43 @@ pub struct Ui<M> {
     pub(crate) active: bool,
     /// What the last input asked of the clipboard.
     pub(crate) clipboard: Option<ClipboardRequest>,
+    /// Hold buttons' Invoke messages, one per node with `hold` set.
+    pub(crate) holds: Vec<HoldSlot<M>>,
+    /// The hold running or spent, or none (`input.rs`).
+    pub(crate) hold: Hold,
+}
+
+/// A hold button's Invoke message.
+#[derive(Debug)]
+pub(crate) struct HoldSlot<M> {
+    pub(crate) node: u32,
+    pub(crate) invoke: fn() -> M,
+}
+
+/// The one hold a window can have: one pointer, one keyboard.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Hold {
+    /// The hold button pressed, or [`NIL`].
+    pub(crate) node: u32,
+    /// The key holding it, if it's the keyboard's: only that key's release ends it.
+    pub(crate) key: Option<crate::KeyCode>,
+    /// When the press started counting: the first tick while it's pressed. A pointer that
+    /// slides off the button and back starts it again.
+    pub(crate) start: Option<u64>,
+    /// How far it has come, 0 to 1, as painted.
+    pub(crate) t: f32,
+    /// It came to the end and sent its message; it does nothing more until let go.
+    pub(crate) done: bool,
+}
+
+impl Hold {
+    pub(crate) const NONE: Self = Self {
+        node: NIL,
+        key: None,
+        start: None,
+        t: 0.0,
+        done: false,
+    };
 }
 
 /// The root: index 0, never freed.
@@ -115,6 +152,8 @@ impl<M> Ui<M> {
             caret_epoch: None,
             active: false,
             clipboard: None,
+            holds: Vec::new(),
+            hold: Hold::NONE,
         };
         ui.damage_all();
         ui
@@ -362,6 +401,9 @@ impl<M> Ui<M> {
         let field = std::mem::replace(&mut self.nodes[i as usize].field, NIL);
         if field != NIL {
             self.release_field(field);
+        }
+        if std::mem::replace(&mut self.nodes[i as usize].hold, false) {
+            self.forget_hold(i);
         }
         let n = &mut self.nodes[i as usize];
         n.live = false;

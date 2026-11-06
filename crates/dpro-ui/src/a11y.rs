@@ -12,18 +12,22 @@
 //! Roles:
 //! - The root is the window.
 //! - A container is a group when it has a [name](crate::Element::name), and otherwise a generic
-//!   container, which the client leaves out of the tree it exposes.
+//!   container, which the client leaves out of the tree it exposes. A [group](crate::Group) of
+//!   tabs is a tab list, of radio buttons a radio group, and a list a list.
 //! - A label is text; an empty one is hidden.
 //! - A button is a button, or a list item (a selection item) when it's [selectable](
 //!   crate::Element::selected).
 //! - A check box is a toggle.
+//! - A tab is a tab item and a radio button a radio button: selection items, picked or not.
+//! - A progress bar is a progress bar, a read-only range value from 0 to 100.
 //! - A field is a text input (UI Automation's Edit, with the Value pattern), named by its
 //!   [name](crate::Element::name). Its text is its value; its placeholder is help text while it's
 //!   empty; and it's read-only when it is.
 //!
-//! Enabled buttons and check boxes take `Click` and `Focus`; enabled fields take `Focus`, and
-//! editable ones `SetValue`, which replaces the text as a paste would. Disabled nodes are marked
-//! so.
+//! Enabled buttons, check boxes, tabs and radio buttons take `Click` (Invoke, Toggle or Select)
+//! and `Focus`, except that a hold button's `Click` sends its Invoke message: a client can't hold
+//! (TD-0009 §8). Enabled fields take `Focus`, and editable ones `SetValue`, which replaces the
+//! text as a paste would. Disabled nodes are marked so.
 
 use accesskit::{
     Action, ActionData, ActionRequest, Node, NodeId as AkId, Rect as AkRect, Role as AkRole,
@@ -32,7 +36,7 @@ use accesskit::{
 use dpro_app::table::Tri;
 
 use crate::{
-    tree::{NIL, NodeId, Role},
+    tree::{Group, NIL, NodeId, Role},
     ui::{ROOT, Ui},
 };
 
@@ -175,13 +179,21 @@ impl<M> Ui<M> {
             AkRole::Window
         } else {
             match n.role {
-                Role::Container if n.text.is_empty() => AkRole::GenericContainer,
-                Role::Container => AkRole::Group,
+                Role::Container => match n.group {
+                    Some(Group::Tabs) => AkRole::TabList,
+                    Some(Group::Radios) => AkRole::RadioGroup,
+                    Some(Group::List) => AkRole::List,
+                    None if n.text.is_empty() => AkRole::GenericContainer,
+                    None => AkRole::Group,
+                },
                 Role::Label => AkRole::Label,
                 Role::Button if n.selected.is_some() => AkRole::ListItem,
                 Role::Button => AkRole::Button,
                 Role::CheckBox => AkRole::CheckBox,
                 Role::Field => AkRole::TextInput,
+                Role::Tab => AkRole::Tab,
+                Role::Radio => AkRole::RadioButton,
+                Role::Progress => AkRole::ProgressIndicator,
             }
         };
         let mut node = Node::new(role);
@@ -239,8 +251,19 @@ impl<M> Ui<M> {
                 Tri::Mixed => Toggled::Mixed,
             });
         }
-        if let Some(selected) = n.selected {
-            node.set_selected(selected);
+        match (n.role, n.selected) {
+            // UI Automation reads a radio button's selection from its toggled state.
+            (Role::Radio, Some(on)) => {
+                node.set_toggled(if on { Toggled::True } else { Toggled::False });
+            }
+            (_, Some(selected)) => node.set_selected(selected),
+            (_, None) => {}
+        }
+        if n.role == Role::Progress {
+            // A percentage, to a tenth.
+            node.set_numeric_value((f64::from(n.value) * 1_000.0).round() / 10.0);
+            node.set_min_numeric_value(0.0);
+            node.set_max_numeric_value(100.0);
         }
         node
     }
@@ -265,7 +288,7 @@ impl<M: Clone> Ui<M> {
         let field = self.nodes[i as usize].role == Role::Field;
         match (request.action, &request.data) {
             (Action::Click, _) if !field => {
-                self.activate(i, out);
+                self.invoke(i, out);
                 true
             }
             (Action::SetValue, Some(ActionData::Value(value))) if field => {
@@ -357,7 +380,7 @@ mod tests {
     }
 
     /// The AccessKit id of the node at `path`, which maps back to it.
-    fn id(ui: &Ui<Msg>, path: &[Key]) -> AkId {
+    fn id<M>(ui: &Ui<M>, path: &[Key]) -> AkId {
         let node = ui.find(path).unwrap();
         let ak = ui.ak_id(node.index);
         assert_eq!(ui.a11y_node(ak), Some(node));
@@ -557,6 +580,98 @@ mod tests {
         assert_eq!(ui.a11y_node(row3), None);
         assert!(!ui.a11y_action(&request(Action::Click, row3), &mut msgs));
         assert_eq!(msgs, [Msg::Pick(1)]);
+    }
+
+    /// TD-0009 §11 step 4: tabs, radio buttons, a list, a progress bar and a hold button, as a
+    /// client sees and uses them.
+    #[test]
+    fn controls_have_their_roles_states_and_actions() {
+        let mut ui: Ui<u8> = Ui::new(Size { w: 300.0, h: 400.0 }, 1.0, Motion::default());
+        ui.build(|cx| {
+            cx.add_with(Element::tabs(Key::name("tabs")).name("Kinds"), |cx| {
+                cx.add(Element::tab(Key::index(0), "A", true, 10));
+                cx.add(Element::tab(Key::index(1), "B", false, 11));
+            });
+            cx.add_with(Element::radios(Key::name("radios")).name("Theme"), |cx| {
+                cx.add(Element::radio(Key::index(0), "Light", false, 20));
+                cx.add(Element::radio(Key::index(1), "Dark", true, 21));
+            });
+            cx.add_with(Element::list(Key::name("rail")).name("Pages"), |cx| {
+                cx.add(Element::button(Key::index(0), "Home", 30).selected(true));
+            });
+            cx.add(Element::progress(Key::name("bar"), 0.41).name("Applying"));
+            cx.add(Element::button(Key::name("hold"), "Hold to apply", 40).hold(|| 41));
+        });
+        ui.layout(&mut FakeText);
+        let tree = ui.a11y_tree();
+        let node = |path: &[Key]| {
+            let want = id(&ui, path);
+            &tree.nodes.iter().find(|(id, _)| *id == want).unwrap().1
+        };
+        let tabs = node(&[Key::name("tabs")]);
+        assert_eq!(
+            (tabs.role(), tabs.label()),
+            (AkRole::TabList, Some("Kinds"))
+        );
+        let a = node(&[Key::name("tabs"), Key::index(0)]);
+        assert_eq!((a.role(), a.is_selected()), (AkRole::Tab, Some(true)));
+        assert!(a.supports_action(Action::Click) && a.supports_action(Action::Focus));
+        assert_eq!(
+            node(&[Key::name("tabs"), Key::index(1)]).is_selected(),
+            Some(false)
+        );
+
+        let radios = node(&[Key::name("radios")]);
+        assert_eq!(
+            (radios.role(), radios.label()),
+            (AkRole::RadioGroup, Some("Theme"))
+        );
+        let dark = node(&[Key::name("radios"), Key::index(1)]);
+        assert_eq!(
+            (dark.role(), dark.toggled(), dark.is_selected()),
+            (AkRole::RadioButton, Some(Toggled::True), None)
+        );
+        assert_eq!(
+            node(&[Key::name("radios"), Key::index(0)]).toggled(),
+            Some(Toggled::False)
+        );
+
+        let rail = node(&[Key::name("rail")]);
+        assert_eq!((rail.role(), rail.label()), (AkRole::List, Some("Pages")));
+        assert_eq!(
+            node(&[Key::name("rail"), Key::index(0)]).role(),
+            AkRole::ListItem
+        );
+
+        let bar = node(&[Key::name("bar")]);
+        assert_eq!(
+            (bar.role(), bar.label(), bar.numeric_value()),
+            (AkRole::ProgressIndicator, Some("Applying"), Some(41.0))
+        );
+        assert_eq!(
+            (bar.min_numeric_value(), bar.max_numeric_value()),
+            (Some(0.0), Some(100.0))
+        );
+        assert!(!bar.supports_action(Action::Click) && !bar.supports_action(Action::SetValue));
+
+        // Invoke on a hold button sends its other message; on the others, theirs.
+        let request = |target_node| ActionRequest {
+            action: Action::Click,
+            target_tree: TreeId::ROOT,
+            target_node,
+            data: None,
+        };
+        let mut msgs = Vec::new();
+        let paths: [&[Key]; 3] = [
+            &[Key::name("hold")],
+            &[Key::name("tabs"), Key::index(1)],
+            &[Key::name("radios"), Key::index(0)],
+        ];
+        for path in paths {
+            assert!(ui.a11y_action(&request(id(&ui, path)), &mut msgs));
+        }
+        assert!(!ui.a11y_action(&request(id(&ui, &[Key::name("bar")])), &mut msgs));
+        assert_eq!(msgs, [41, 11, 20]);
     }
 
     #[test]

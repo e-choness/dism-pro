@@ -56,8 +56,9 @@ impl<M> Ui<M> {
             Size::ZERO
         } else if n.first == NIL {
             match n.role {
-                Role::Container => Size::ZERO,
-                Role::Label | Role::Button => {
+                // A progress bar is as big as its style makes it.
+                Role::Container | Role::Progress => Size::ZERO,
+                Role::Label | Role::Button | Role::Tab => {
                     let m = text.measure(&n.text, &n.text_style, inner_w);
                     Size {
                         w: m.width,
@@ -69,8 +70,8 @@ impl<M> Ui<M> {
                     w: 0.0,
                     h: text.measure("", &n.text_style, f32::INFINITY).height,
                 },
-                Role::CheckBox => {
-                    // The box is a line high, with half a line before the label.
+                Role::CheckBox | Role::Radio => {
+                    // The box (or circle) is a line high, with half a line before the label.
                     let line = text.measure("", &n.text_style, f32::INFINITY).height;
                     let label_w = (inner_w - line * 1.5).max(0.0);
                     let m = text.measure(&n.text, &n.text_style, label_w);

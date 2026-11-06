@@ -12,8 +12,8 @@
 use crate::{
     field::TextEdit,
     pool::capacity_for,
-    tree::{Element, NIL, NodeId},
-    ui::{ROOT, Ui},
+    tree::{Element, Extra, NIL, NodeId, Role},
+    ui::{HoldSlot, ROOT, Ui},
 };
 
 /// Builds one parent's children for this frame.
@@ -143,7 +143,8 @@ impl<M> Ui<M> {
         let mut layout = false;
         // Check state and enabled show, and a client sees them.
         let state = n.check != el.check || n.enabled != el.enabled;
-        let mut seen = state || n.selected != el.selected;
+        let picked = n.selected != el.selected;
+        let mut seen = state || picked;
         // A field's text never changes its size: the view sets its width, and it's a line high.
         let field = n.field;
         let (mut field_text, mut field_style) = (false, false);
@@ -169,24 +170,40 @@ impl<M> Ui<M> {
             }
             seen = true;
         }
-        let looks = state || n.look != el.look;
+        // A radio button shows whether it's picked.
+        let mut looks = state || n.look != el.look || (picked && n.role == Role::Radio);
         n.look = el.look;
         n.check = el.check;
         n.selected = el.selected;
         n.msg = el.msg;
+        let special = n.special;
         if n.enabled != el.enabled {
             n.enabled = el.enabled;
             if !el.enabled {
                 self.lose_input(i);
             }
         }
-        if field != NIL {
-            seen |= self.update_field(field, el.label, el.placeholder, el.on_edit);
-            if field_text {
-                self.field_text_set(i);
-            } else if field_style {
-                // The same text in another size: new caret stops, the caret where it was.
-                self.fields[field as usize].stops_valid = false;
+        match el.extra {
+            // Most nodes: nothing more.
+            Extra::None if !special => {}
+            // Only a field describes one, and every field has its slot.
+            Extra::Field {
+                label,
+                placeholder,
+                on_edit,
+            } if field != NIL => {
+                seen |= self.update_field(field, label, placeholder, on_edit);
+                if field_text {
+                    self.field_text_set(i);
+                } else if field_style {
+                    // The same text in another size: new caret stops, the caret where it was.
+                    self.fields[field as usize].stops_valid = false;
+                }
+            }
+            extra => {
+                let (s, l) = self.update_extra(i, extra);
+                seen |= s;
+                looks |= l;
             }
         }
         if layout {
@@ -231,8 +248,52 @@ impl<M> Ui<M> {
         seen
     }
 
-    /// A node that became disabled lets go of focus, hover and presses.
+    /// Copies a group, a progress bar's value or a hold button's Invoke message into node `i`,
+    /// clearing what it had of the others. Returns whether a client sees a change, and whether
+    /// it shows.
+    fn update_extra(&mut self, i: u32, extra: Extra<'_, M>) -> (bool, bool) {
+        let (group, value, invoke) = match extra {
+            Extra::Group(g) => (Some(g), 0.0, None),
+            Extra::Progress(v) => (None, v, None),
+            Extra::Hold(m) => (None, 0.0, Some(m)),
+            Extra::None | Extra::Field { .. } => (None, 0.0, None),
+        };
+        let n = &mut self.nodes[i as usize];
+        // The group sets a client's role (a tab list, a radio group, a list).
+        let regrouped = n.group != group;
+        // A progress bar's fill shows, and a client reads it as its value.
+        let revalued = n.value.to_bits() != value.to_bits();
+        n.group = group;
+        n.value = value;
+        n.special = group.is_some() || invoke.is_some() || value.to_bits() != 0;
+        if n.hold || invoke.is_some() {
+            self.update_hold(i, invoke);
+        }
+        (regrouped || revalued, revalued)
+    }
+
+    /// Keeps hold button `i`'s Invoke message in the hold table: a button that became a hold
+    /// button gets a slot, and one that stopped being one loses it, with its hold if one runs.
+    fn update_hold(&mut self, i: u32, invoke: Option<fn() -> M>) {
+        let slot = self.holds.iter().position(|s| s.node == i);
+        match (slot, invoke) {
+            (Some(k), Some(invoke)) => self.holds[k].invoke = invoke,
+            (None, Some(invoke)) => {
+                self.holds.push(HoldSlot { node: i, invoke });
+                self.nodes[i as usize].hold = true;
+            }
+            (_, None) => {
+                self.nodes[i as usize].hold = false;
+                self.forget_hold(i);
+            }
+        }
+    }
+
+    /// A node that became disabled lets go of focus, hover, presses and holds.
     fn lose_input(&mut self, i: u32) {
+        if self.hold.node == i {
+            self.end_hold();
+        }
         if self.focus == i {
             self.focus = NIL;
         }

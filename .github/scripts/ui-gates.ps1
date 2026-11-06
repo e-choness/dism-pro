@@ -29,6 +29,14 @@ raw-API baseline, measured in this job, so it holds on whatever machine the runn
       clipboard pasted with Ctrl+V as one line, Shift+Home and Ctrl+X; then UIA's SetValue, which
       filters the table, and the pointer's I-beam over the field. Each is read back through UIA or
       the clipboard within 2 s; the time from typing to UIA's value is advisory (U3: 50 ms).
+  Controls (TD-0009 §11 step 4): the shell's tabs, rail, radio group, progress bar and Hold to
+      apply, through UIA and real keys. SelectionItem.Select on a tab picks it and refilters the
+      table; Left on the focused tab picks the other (selection follows focus); Down on the rail
+      moves focus without opening a page, and Enter opens it; Select and Down on Settings' radio
+      buttons pick, wrapping. The drawer's progress bar is a read-only RangeValue at 0; Invoke on
+      Hold to apply asks for the typed confirmation and applies nothing; Enter held 0.5 s and let
+      go applies nothing; held 1.8 s it applies (the bar reaches 100). Each is read back through
+      UIA within 2 s.
 
 The probe target is dpro-ui's `shell` example until roadmap 3.2 gives dismpro.exe its shell.
 Results go to annotations and the job summary; the raw reports go to -Out.
@@ -237,7 +245,7 @@ try {
     $lines += if ($served) { 'tree served {0:N1} ms after the window showed{1}' -f $servedMs, $(if ($servedMs -gt 100) { ' (advisory: over 100 ms)' } else { '' }) } else { 'tree NOT served in 10 s' }
     $checks['served'] = $served
 
-    $pages = @(Find-Elements $root $types::Group 'Pages' | ForEach-Object { Find-Elements $_ $types::ListItem })
+    $pages = @(Find-Elements $root $types::List 'Pages' | ForEach-Object { Find-Elements $_ $types::ListItem })
     $rows = @(Find-Elements $root $types::Group 'Programs' | ForEach-Object { Find-Elements $_ $types::ListItem })
     $boxes = @(Find-Elements $root $types::CheckBox | ForEach-Object { $_.Current.Name })
     $checks['12 pages, Overview first'] = $pages.Count -eq 12 -and $pages[0].Current.Name -eq 'Overview'
@@ -532,8 +540,6 @@ public static class TextGateWin32 {
     static extern IntPtr LoadCursorW(IntPtr instance, IntPtr id);
     [DllImport("user32.dll")]
     public static extern bool SetForegroundWindow(IntPtr hwnd);
-    [DllImport("user32.dll")]
-    public static extern bool SetCursorPos(int x, int y);
     const uint KEYBOARD = 1, KEYUP = 2, UNICODE = 4;
     static INPUT Key(ushort vk, ushort scan, uint flags) {
         var i = new INPUT { type = KEYBOARD };
@@ -561,11 +567,75 @@ public static class TextGateWin32 {
         for (int k = mods.Length - 1; k >= 0; k--) { inputs[n++] = Key(mods[k], 0, KEYUP); }
         return Send(inputs);
     }
-    // Whether the pointer shows the system's I-beam (IDC_IBEAM, a shared handle).
-    public static bool IsIBeam() {
+    [StructLayout(LayoutKind.Sequential)]
+    struct POINT { public int x; public int y; }
+    [DllImport("user32.dll")]
+    static extern bool GetCursorPos(out POINT p);
+    [DllImport("user32.dll")]
+    static extern IntPtr WindowFromPoint(POINT p);
+    [DllImport("user32.dll")]
+    static extern IntPtr GetAncestor(IntPtr hwnd, uint flags);
+    [DllImport("user32.dll")]
+    static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    static extern int GetClassNameW(IntPtr hwnd, System.Text.StringBuilder name, int size);
+    [DllImport("kernel32.dll")]
+    static extern uint GetCurrentThreadId();
+    [DllImport("user32.dll")]
+    static extern bool AttachThreadInput(uint from, uint to, bool attach);
+    [DllImport("user32.dll")]
+    static extern IntPtr GetCursor();
+    [DllImport("user32.dll")]
+    static extern int GetSystemMetrics(int index);
+    const uint MOUSE = 0, MOVE = 1, ABSOLUTE = 0x8000;
+    // The system cursors, shared handles: the same in every process of the session.
+    static readonly IntPtr IBeam = LoadCursorW(IntPtr.Zero, (IntPtr) 32513);
+    static readonly IntPtr Arrow = LoadCursorW(IntPtr.Zero, (IntPtr) 32512);
+    static string Name(IntPtr cursor) {
+        if (cursor == IntPtr.Zero) { return "none"; }
+        if (cursor == IBeam) { return "I-beam"; }
+        if (cursor == Arrow) { return "arrow"; }
+        return "0x" + cursor.ToString("X");
+    }
+    // The pointer moved to (x, y) on the primary monitor as mouse input, like a mouse would, not
+    // placed (SetCursorPos). Returns the events sent.
+    public static uint MoveTo(int x, int y) {
+        int w = Math.Max(2, GetSystemMetrics(0)), h = Math.Max(2, GetSystemMetrics(1)); // SM_CXSCREEN, SM_CYSCREEN
+        var i = new INPUT { type = MOUSE };
+        i.u.mi = new MOUSEINPUT { dx = (int) (x * 65535L / (w - 1)), dy = (int) (y * 65535L / (h - 1)), dwFlags = MOVE | ABSOLUTE };
+        return Send(new[] { i });
+    }
+    // Whether the pointer over `hwnd` is an I-beam, and what was read. A pointer Windows shows
+    // must be the I-beam. When it shows none (no mouse on the machine, or hidden while typing),
+    // the cursor the window's thread set is read instead, through its input queue
+    // (AttachThreadInput, then GetCursor): what the shell asked for is all there is to see.
+    public static string Pointer(IntPtr hwnd, out bool ibeam) {
         var info = new CURSORINFO();
         info.cbSize = Marshal.SizeOf(info);
-        return GetCursorInfo(ref info) && info.hCursor == LoadCursorW(IntPtr.Zero, (IntPtr) 32513);
+        bool got = GetCursorInfo(ref info);
+        bool shown = got && (info.flags & 1) != 0; // CURSOR_SHOWING
+        uint pid;
+        uint thread = GetWindowThreadProcessId(hwnd, out pid);
+        IntPtr set = IntPtr.Zero;
+        uint me = GetCurrentThreadId();
+        bool attached = thread != 0 && thread != me && AttachThreadInput(me, thread, true);
+        if (attached) {
+            set = GetCursor();
+            AttachThreadInput(me, thread, false);
+        }
+        ibeam = shown ? info.hCursor == IBeam : attached && set == IBeam;
+        POINT at;
+        GetCursorPos(out at);
+        IntPtr under = GetAncestor(WindowFromPoint(at), 2); // GA_ROOT
+        uint underPid;
+        GetWindowThreadProcessId(under, out underPid);
+        var cls = new System.Text.StringBuilder(64);
+        GetClassNameW(under, cls, cls.Capacity);
+        string owner = under == hwnd ? "the shell" : "another window (" + cls + ", pid " + underPid + ")";
+        return String.Format(
+            "shown: {0} (GetCursorInfo {1}, flags {2}); set by the shell: {3}; at ({4}, {5}) over {6}; mouse present: {7}",
+            shown ? Name(info.hCursor) : "no pointer", got ? "ok" : "failed", info.flags,
+            attached ? Name(set) : "unread", at.x, at.y, owner, GetSystemMetrics(19)); // SM_MOUSEPRESENT
     }
 }
 '@
@@ -631,9 +701,23 @@ try {
         $value.Current.Value -eq 'Fabrikam' -and $rows.Count -gt 0 -and $rows[0].Current.Name -like 'Fabrikam*'
     } 2000
 
+    # The pointer comes from the table into the field as mouse input, so the window sees the move
+    # into it; what it shows (or sets) there is the check, and both places are reported.
+    $win = $root.Current.BoundingRectangle
     $r = $edit.Current.BoundingRectangle
-    [void][TextGateWin32]::SetCursorPos([int] ($r.X + $r.Width / 2), [int] ($r.Y + $r.Height / 2))
-    $checks['an I-beam over it'] = Wait-Until { [TextGateWin32]::IsIBeam() } 2000
+    $hit = $false
+    $off = [TextGateWin32]::MoveTo([int] ($win.X + $win.Width / 2), [int] ($win.Y + $win.Height * 3 / 4))
+    $null = Wait-Until { $null = [TextGateWin32]::Pointer($hwnd, [ref] $script:hit); -not $script:hit } 1000
+    $lines += "pointer off the field ($off sent): $([TextGateWin32]::Pointer($hwnd, [ref] $hit))"
+    $fx = [int] ($r.X + $r.Width / 2)
+    $fy = [int] ($r.Y + $r.Height / 2)
+    $on = [TextGateWin32]::MoveTo($fx, $fy)
+    $pointer = ''
+    $checks['an I-beam over it'] = Wait-Until {
+        $script:pointer = [TextGateWin32]::Pointer($hwnd, [ref] $script:hit)
+        $script:hit
+    } 2000
+    $lines += "pointer on the field at ($fx, $fy) ($on sent): $pointer"
 } catch {
     $lines += "text input FAILED: $($_.Exception.Message)"
     $checks['client'] = $false
@@ -647,6 +731,124 @@ try {
 foreach ($k in $checks.Keys) { $lines += '{0,-44} {1}' -f $k, (Format-Verdict $checks[$k]) }
 $ok = $checks.Count -gt 0 -and -not ($checks.Values -contains $false)
 Publish 'Text input' $lines $ok
+if (-not $ok) { $failed++ }
+
+# Controls (TD-0009 §11 step 4) --------------------------------------------------------------------
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class ControlsGateWin32 {
+    [StructLayout(LayoutKind.Sequential)]
+    struct KEYBDINPUT { public ushort wVk; public ushort wScan; public uint dwFlags; public uint time; public IntPtr dwExtraInfo; }
+    [StructLayout(LayoutKind.Sequential)]
+    struct MOUSEINPUT { public int dx; public int dy; public uint mouseData; public uint dwFlags; public uint time; public IntPtr dwExtraInfo; }
+    [StructLayout(LayoutKind.Explicit)]
+    struct InputUnion { [FieldOffset(0)] public MOUSEINPUT mi; [FieldOffset(0)] public KEYBDINPUT ki; }
+    [StructLayout(LayoutKind.Sequential)]
+    struct INPUT { public uint type; public InputUnion u; }
+    [DllImport("user32.dll", SetLastError = true)]
+    static extern uint SendInput(uint n, INPUT[] inputs, int size);
+    // `vk` going down, or up: one event, so a held key is held until its up. Returns the events
+    // sent.
+    public static uint Key(ushort vk, bool down) {
+        var i = new INPUT { type = 1 };
+        i.u.ki = new KEYBDINPUT { wVk = vk, dwFlags = down ? 0u : 2u };
+        return SendInput(1, new INPUT[] { i }, Marshal.SizeOf(typeof(INPUT)));
+    }
+}
+'@
+function Send-Key([uint16] $Vk) {
+    [void][ControlsGateWin32]::Key($Vk, $true)
+    [void][ControlsGateWin32]::Key($Vk, $false)
+}
+function Test-Selected($Element) { (Get-Pattern $Element ([Windows.Automation.SelectionItemPattern]::Pattern)).Current.IsSelected }
+function Select-Item($Element) { (Get-Pattern $Element ([Windows.Automation.SelectionItemPattern]::Pattern)).Select() }
+function Find-First($Root, $Type, [string] $Name) { Find-Elements $Root $Type $Name | Select-Object -First 1 }
+
+$lines = @("Controls in the shell at $Size (the checks are gates; the hold's time is gated at >= 1,500 ms, its excess advisory)")
+$checks = [ordered]@{}
+$hwnd = [IntPtr]::Zero
+$p = Start-Process -FilePath $exe.shell -ArgumentList @('--size', $Size) -PassThru
+$null = $p.Handle
+try {
+    $shown = Wait-Until {
+        $script:hwnd = [UiaGateWin32]::FindWindowW('dismpro.window', 'DISM Pro shell probe')
+        $script:hwnd -ne [IntPtr]::Zero -and [UiaGateWin32]::IsWindowVisible($script:hwnd)
+    } 30000
+    if (-not $shown) { throw "the shell showed no window in 30 s (exited: $($p.HasExited))" }
+    $root = $ae::FromHandle($hwnd)
+    $store = $null
+    $found = Wait-Until { $script:store = Find-First $root $types::TabItem 'Store apps'; $null -ne $script:store } 10000
+    $checks['TabItems in a Tab "Program types"'] = $found -and (Find-Elements $root $types::Tab 'Program types').Count -eq 1
+    if (-not $found) { throw 'no TabItem "Store apps" in 10 s' }
+    $desktop = Find-First $root $types::TabItem 'Desktop programs'
+    $firstRow = { @(Find-Elements $root $types::Group 'Programs' | ForEach-Object { Find-Elements $_ $types::ListItem } | ForEach-Object { $_.Current.Name }) | Select-Object -First 1 }
+
+    # Tabs: Select through UIA, then Left on the focused tab (selection follows focus).
+    Select-Item $store
+    $checks['Select(Store apps) picks it, the table follows'] = Wait-Until { (Test-Selected $store) -and -not (Test-Selected $desktop) -and (& $firstRow) -like 'Tailspin*' } 2000
+    $checks['the window is active'] = [GlassGateWin32]::Activate($hwnd)
+    $store.SetFocus()
+    $checks['Left on it picks Desktop programs'] = (Wait-Until { $store.Current.HasKeyboardFocus } 2000) -and $(Send-Key 0x25; Wait-Until { (Test-Selected $desktop) -and $desktop.Current.HasKeyboardFocus -and (& $firstRow) -like 'Contoso*' } 2000)
+
+    # The rail: a list, so the arrows move focus only, and Enter opens.
+    $overview = Find-First $root $types::ListItem 'Overview'
+    $clean = Find-First $root $types::ListItem 'Clean'
+    $overview.SetFocus()
+    $checks['Down on the rail moves focus, not the page'] = (Wait-Until { $overview.Current.HasKeyboardFocus } 2000) -and $(Send-Key 0x28; Wait-Until { $clean.Current.HasKeyboardFocus -and (Test-Selected $overview) -and -not (Test-Selected $clean) } 2000)
+    Send-Key 0x0D
+    $checks['Enter opens the focused page'] = Wait-Until { (Test-Selected $clean) -and (Find-Elements $root $types::Group 'Clean').Count -eq 1 } 2000
+
+    # Settings' radio group.
+    Select-Item (Find-First $root $types::ListItem 'Settings')
+    $dark = $null
+    $found = Wait-Until { $script:dark = Find-First $root $types::RadioButton 'Dark'; $null -ne $script:dark } 2000
+    $checks['3 RadioButtons in a group "Theme"'] = $found -and (Find-Elements $root $types::RadioButton).Count -eq 3 -and (Find-Elements $root $types::Group 'Theme').Count -eq 1
+    if ($found) {
+        $system = Find-First $root $types::RadioButton 'System'
+        Select-Item $dark
+        $checks['Select(Dark) picks it'] = Wait-Until { (Test-Selected $dark) -and -not (Test-Selected $system) } 2000
+        $dark.SetFocus()
+        $checks['Down from the last picks the first'] = (Wait-Until { $dark.Current.HasKeyboardFocus } 2000) -and $(Send-Key 0x28; Wait-Until { (Test-Selected $system) -and $system.Current.HasKeyboardFocus -and -not (Test-Selected $dark) } 2000)
+    }
+
+    # The drawer: its progress bar and Hold to apply.
+    (Get-Pattern (Find-First $root $types::Button 'Review changes') ([Windows.Automation.InvokePattern]::Pattern)).Invoke()
+    $bar = $null
+    $found = Wait-Until { $script:bar = Find-First $root $types::ProgressBar 'Applying'; $null -ne $script:bar } 2000
+    if (-not $found) { throw 'no ProgressBar "Applying" in the drawer in 2 s' }
+    $range = Get-Pattern $bar ([Windows.Automation.RangeValuePattern]::Pattern)
+    $checks['a read-only ProgressBar "Applying" at 0 of 100'] = $range.Current.Value -eq 0 -and $range.Current.Maximum -eq 100 -and $range.Current.IsReadOnly
+    $hold = Find-First $root $types::Button 'Hold to apply'
+    (Get-Pattern $hold ([Windows.Automation.InvokePattern]::Pattern)).Invoke()
+    $checks['Invoke(Hold to apply) asks to confirm instead'] = (Wait-Until { (Find-Elements $root $types::Text 'Type 20 to confirm').Count -eq 1 } 2000) -and $range.Current.Value -eq 0
+    [void][GlassGateWin32]::Activate($hwnd)
+    $hold.SetFocus()
+    $focused = Wait-Until { $hold.Current.HasKeyboardFocus } 2000
+    [void][ControlsGateWin32]::Key(0x0D, $true)
+    Start-Sleep -Milliseconds 500
+    [void][ControlsGateWin32]::Key(0x0D, $false)
+    Start-Sleep -Milliseconds 300
+    $checks['Enter held 0.5 s and let go applies nothing'] = $focused -and $range.Current.Value -eq 0 -and (Find-Elements $root $types::Text 'Applied').Count -eq 0
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    [void][ControlsGateWin32]::Key(0x0D, $true)
+    $applied = Wait-Until { $range.Current.Value -eq 100 } 4000
+    $ms = $sw.Elapsed.TotalMilliseconds
+    [void][ControlsGateWin32]::Key(0x0D, $false)
+    $lines += if ($applied) { 'Enter held: applied {0:N0} ms after the press{1}' -f $ms, $(if ($ms -gt 1700) { ' (advisory: over 1,700 ms)' } else { '' }) } else { 'Enter held 4 s: nothing applied' }
+    $checks['Enter held applies, not before 1,500 ms'] = $applied -and $ms -ge 1500 -and (Wait-Until { (Find-Elements $root $types::Text 'Applied').Count -eq 1 } 2000)
+} catch {
+    $lines += "controls FAILED: $($_.Exception.Message)"
+    $checks['client'] = $false
+} finally {
+    if (-not $p.HasExited) {
+        if ($hwnd -ne [IntPtr]::Zero) { [void][UiaGateWin32]::PostMessageW($hwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) } # WM_CLOSE
+        if (-not $p.WaitForExit(5000)) { $p.Kill(); $lines += 'the shell did not close on WM_CLOSE'; $checks['closes'] = $false }
+    }
+}
+foreach ($k in $checks.Keys) { $lines += '{0,-48} {1}' -f $k, (Format-Verdict $checks[$k]) }
+$ok = $checks.Count -gt 0 -and -not ($checks.Values -contains $false)
+Publish 'Controls' $lines $ok
 if (-not $ok) { $failed++ }
 
 exit $failed

@@ -1,5 +1,5 @@
 //! TD-0009 §7 U4, U6, U7: G1's probe target until roadmap 3.2 gives `dismpro.exe` its shell. The
-//! synthetic shell that the benches and tests drive (387 nodes, a 40-row table over 1,000 data rows)
+//! synthetic shell that the benches and tests drive (390 nodes, a 40-row table over 1,000 data rows)
 //! in a real window: dpro-win's window, GDI presenter and DirectWrite text, and the toolkit's frame
 //! pipeline and painting. It exits with 1 if DirectWrite is unavailable rather than measure a
 //! different program.
