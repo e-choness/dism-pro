@@ -31,7 +31,7 @@ mod win {
     use std::process::ExitCode;
 
     use dpro_ui::{
-        Cx,
+        Cx, Key, Popup,
         materials::GlassPref,
         platform::{self, DirectWrite, Host, Model},
     };
@@ -40,7 +40,7 @@ mod win {
         probe::{self, Args, ForceMaterials},
     };
 
-    use crate::shell::{Msg, Shell, view};
+    use crate::shell::{Msg, Shell, popup_view, view};
 
     impl Model for Shell {
         type Msg = Msg;
@@ -51,6 +51,18 @@ mod win {
 
         fn update(&mut self, msg: Msg) {
             Shell::update(self, msg);
+        }
+
+        fn popup(&self) -> Option<Popup<Msg>> {
+            Shell::popup(self)
+        }
+
+        fn popup_view(&self, cx: &mut Cx<'_, Msg>) {
+            popup_view(self, cx);
+        }
+
+        fn context_menu(&self, key: Key) -> Option<Msg> {
+            Shell::context_menu(self, key)
         }
     }
 

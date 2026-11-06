@@ -13,15 +13,21 @@
 //! All of them are checked after every step of the scripted session, with an assistive technology
 //! listening. G1's `--ui-probe idle` measures the rest on Windows: no timers, no wakes and no CPU
 //! time over 5 s.
+//!
+//! Popups (TD-0009 A1.7): a pending tooltip is one wake and no frames, a showing one the wake that
+//! hides it; an open menu asks for nothing.
 
 #[path = "../benches/fixtures/shell.rs"]
 mod shell;
 
 use dpro_ui::{
     Caret, FakeText, Input,
-    tokens::motion::{HOLD_MS, HOVER_MS},
+    tokens::{
+        motion::{HOLD_MS, HOVER_MS},
+        popup::{TIP_DELAY_MS, TIP_SHOWS_FOR},
+    },
 };
-use shell::{FRAME_MS, Run, Shell, Step, view};
+use shell::{FRAME_MS, Run, Shell, Step, popup_view, view};
 
 /// Frames until the animations stop: the first tick starts them, and they end once a whole
 /// duration has passed.
@@ -138,6 +144,48 @@ fn the_session_as_scripted_settles_and_stays_idle() {
     for k in 0..3 {
         assert_idle(&mut run, &format!("idle frame {k}"));
     }
+}
+
+/// TD-0009 A1.7: a pending tooltip costs one wake and no frames, a showing one the wake that hides
+/// it, and then nothing.
+#[test]
+fn a_tooltip_is_one_wake_at_a_time_and_no_frames() {
+    let mut run = Run::accessible(Shell::new());
+    let at = run.center(&Run::DRAWER_BUTTON);
+    run.step(Step::Input(Input::PointerMove(at)));
+    settle(&mut run, "hovered", max_ticks());
+    let delay = u64::from(TIP_DELAY_MS);
+    let due = run.wake().expect("a pending tip's wake");
+    assert!(due > 0 && due <= delay, "due in {due} ms");
+    assert!(!run.ui.wants_frame(), "a pending tip asks for no frames");
+    run.step(Step::Tick(due));
+    assert!(run.ui.tooltip().is_some(), "due, it shows");
+    assert!(!run.ui.wants_frame(), "a showing tip asks for no frames");
+    let autopop = delay * u64::from(TIP_SHOWS_FOR);
+    assert_eq!(run.wake(), Some(autopop), "one wake, to hide it");
+    run.step(Step::Tick(autopop));
+    assert!(run.ui.tooltip().is_none());
+    assert_eq!(run.wake(), None, "hidden, it asks for nothing");
+    assert_idle(&mut run, "the tip came and went");
+}
+
+/// TD-0009 A1.7: an open menu asks for no frames and no wakes, in either window.
+#[test]
+fn an_open_menu_asks_for_nothing() {
+    let mut run = Run::accessible(Shell::new());
+    let row = run.ui.find(&Run::row(4)).expect("row 4");
+    run.ui.set_focus(Some(row));
+    run.step(Step::Input(Input::ContextMenu(None)));
+    assert!(run.popup_open, "Shift+F10 opens the row's menu");
+    settle(&mut run, "the menu opened", max_ticks());
+    assert!(!run.popup.wants_frame(), "the menu asks for frames");
+    assert_eq!(run.wake(), None, "the menu asks for a wake");
+    assert_idle(&mut run, "the menu open");
+    // A frame of the menu nobody asked for finds nothing to do either.
+    run.popup.build(|cx| popup_view(&run.shell, cx));
+    run.popup.layout(&mut FakeText);
+    assert_eq!(run.popup.damage().len(), 0, "{:?}", run.popup.damage());
+    assert!(!run.popup.wants_frame());
 }
 
 #[test]

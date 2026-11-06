@@ -27,7 +27,13 @@ const VIEWS: [(&str, Option<Msg>); 4] = [
 fn has_text(role: Role) -> bool {
     matches!(
         role,
-        Role::Label | Role::Button | Role::Tab | Role::CheckBox | Role::Radio | Role::Field
+        Role::Label
+            | Role::Button
+            | Role::Tab
+            | Role::CheckBox
+            | Role::Radio
+            | Role::Field
+            | Role::ComboBox
     )
 }
 

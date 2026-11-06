@@ -43,9 +43,25 @@ raw-API baseline, measured in this job, so it holds on whatever machine the runn
       title, read through UIA, grows 2.25 times and comes back, each within 2 s (advisory: 100 ms).
       UISettings.TextScaleFactor (WinRT) is reported beside the registry value. The runner's own
       value is restored.
+  Popups (TD-0009 A1.9): real keys and clicks, each result read back through UIA within 2 s.
+      Shift+F10 on a focused table row shows a dismpro.popup window the shell owns (a tool
+      window), and UIA's FocusedElement is its first MenuItem (A1.3's verify). Down moves the
+      focus; Enter invokes the item, closes the menu and puts focus back on the row. A second
+      Shift+F10 shows the same window again, and Esc closes it, invoking nothing. A right-click on
+      a row picks it and opens its menu at the pointer; a click outside closes it and reaches
+      nothing, and the next click there does; a right-click outside closes it and opens no other
+      menu, and the next right-click there opens that row's. The pointer resting on Review
+      changes shows its ToolTip, not before Windows' delay; the tip never activates and goes when
+      the pointer leaves. Settings' Start page ComboBox: Expand opens its list focused on the picked option,
+      Down and Enter pick the next, Select in the list picks another, Collapse closes it, each
+      read back as the combo's value and ExpandCollapse state. Advisory (U3, 100 ms): the first
+      and second menu opens, the right-click and the dropdown, from the input to UIA seeing it;
+      and (U7, 2 MiB) the working set the open menu adds. Screenshots of the menu, the list and
+      the tip go to -Out for A1.3's shadow and corners, checked by hand.
 
 The probe target is dpro-ui's `shell` example until roadmap 3.2 gives dismpro.exe its shell.
-Results go to annotations and the job summary; the raw reports go to -Out.
+Results go to annotations and the job summary; the raw reports and screenshots go to -Out, which
+CI keeps as the ui-gates artifact.
 #>
 param(
     [string] $Bin = 'dist-t3',
@@ -945,6 +961,313 @@ try {
 foreach ($k in $checks.Keys) { $lines += '{0,-48} {1}' -f $k, (Format-Verdict $checks[$k]) }
 $ok = $checks.Count -gt 0 -and -not ($checks.Values -contains $false)
 Publish 'Text scaling' $lines $ok
+if (-not $ok) { $failed++ }
+
+# Popups (TD-0009 A1) ------------------------------------------------------------------------------
+Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class PopupGateWin32 {
+    delegate bool EnumProc(IntPtr hwnd, IntPtr data);
+    [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc proc, IntPtr data);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassNameW(IntPtr hwnd, StringBuilder name, int size);
+    [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr hwnd, uint cmd);
+    [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr hwnd);
+    [StructLayout(LayoutKind.Sequential)] struct RECT { public int Left, Top, Right, Bottom; }
+    [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr hwnd, out RECT r);
+    [DllImport("user32.dll")] static extern int GetWindowLongW(IntPtr hwnd, int index);
+    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] public static extern uint GetDoubleClickTime();
+    [StructLayout(LayoutKind.Sequential)]
+    struct KEYBDINPUT { public ushort wVk; public ushort wScan; public uint dwFlags; public uint time; public IntPtr dwExtraInfo; }
+    [StructLayout(LayoutKind.Sequential)]
+    struct MOUSEINPUT { public int dx; public int dy; public uint mouseData; public uint dwFlags; public uint time; public IntPtr dwExtraInfo; }
+    [StructLayout(LayoutKind.Explicit)]
+    struct InputUnion { [FieldOffset(0)] public MOUSEINPUT mi; [FieldOffset(0)] public KEYBDINPUT ki; }
+    [StructLayout(LayoutKind.Sequential)]
+    struct INPUT { public uint type; public InputUnion u; }
+    [DllImport("user32.dll", SetLastError = true)]
+    static extern uint SendInput(uint n, INPUT[] inputs, int size);
+
+    // The right button, or the left, pressed and let go where the pointer is, as mouse input.
+    // Returns the events sent.
+    public static uint Click(bool right) {
+        var inputs = new INPUT[2];
+        inputs[0].u.mi.dwFlags = right ? 0x0008u : 0x0002u; // MOUSEEVENTF_RIGHTDOWN, LEFTDOWN
+        inputs[1].u.mi.dwFlags = right ? 0x0010u : 0x0004u; // MOUSEEVENTF_RIGHTUP, LEFTUP
+        return SendInput(2, inputs, Marshal.SizeOf(typeof(INPUT)));
+    }
+
+    // The windows of class dismpro.popup that `owner` owns (GW_OWNER), the visible ones only if
+    // `shown`.
+    public static IntPtr[] Popups(IntPtr owner, bool shown) {
+        var found = new List<IntPtr>();
+        var name = new StringBuilder(64);
+        EnumWindows((hwnd, data) => {
+            name.Clear();
+            if (GetWindow(hwnd, 4) == owner && (!shown || IsWindowVisible(hwnd))
+                && GetClassNameW(hwnd, name, name.Capacity) > 0 && name.ToString() == "dismpro.popup") {
+                found.Add(hwnd);
+            }
+            return true;
+        }, IntPtr.Zero);
+        return found.ToArray();
+    }
+
+    // The window's rectangle on the screen: left, top, right, bottom.
+    public static int[] Rect(IntPtr hwnd) {
+        RECT r;
+        if (!GetWindowRect(hwnd, out r)) { return new int[] { 0, 0, 0, 0 }; }
+        return new int[] { r.Left, r.Top, r.Right, r.Bottom };
+    }
+
+    public static int ExStyle(IntPtr hwnd) { return GetWindowLongW(hwnd, -20); } // GWL_EXSTYLE
+}
+'@
+$toggleState = [Windows.Automation.ToggleState]
+$expandState = [Windows.Automation.ExpandCollapseState]
+$tipText = 'Every change before it applies'
+
+function Get-Shown([IntPtr] $Owner) { @([PopupGateWin32]::Popups($Owner, $true)) }
+# The shown popup whose tree has a `$Type` named `$Name`: its window and that element, or $null.
+function Find-Popup([IntPtr] $Owner, $Type, [string] $Name) {
+    foreach ($h in (Get-Shown $Owner)) {
+        try { $e = Find-Elements ($ae::FromHandle($h)) $Type $Name | Select-Object -First 1 } catch { $e = $null }
+        if ($null -ne $e) { return @{ Hwnd = $h; Element = $e } }
+    }
+    $null
+}
+# UIA's focused element is a `$Type` named `$Name` (FocusedElement, not the element's own flag).
+function Test-Focused($Type, [string] $Name) {
+    try {
+        $f = $ae::FocusedElement
+        $null -ne $f -and $f.Current.ControlType -eq $Type -and $f.Current.Name -eq $Name
+    } catch { $false }
+}
+function Format-Ms([double] $Ms, [double] $Advisory = 100) {
+    '{0:N1} ms{1}' -f $Ms, $(if ($Ms -gt $Advisory) { " (advisory: over $Advisory ms)" } else { '' })
+}
+# The screen around `$Rect` (left, top, right, bottom), DWM's shadow and corners included, saved
+# to -Out as `$Name` for A1.3's check by hand. Returns a report line; a failure is reported, not
+# gated.
+function Save-Screen([int[]] $Rect, [string] $Name, [int] $Margin = 16) {
+    $bmp = $null
+    $g = $null
+    try {
+        Add-Type -AssemblyName System.Drawing
+        $x = $Rect[0] - $Margin
+        $y = $Rect[1] - $Margin
+        $w = $Rect[2] - $Rect[0] + 2 * $Margin
+        $h = $Rect[3] - $Rect[1] + 2 * $Margin
+        $bmp = [Drawing.Bitmap]::new($w, $h)
+        $g = [Drawing.Graphics]::FromImage($bmp)
+        $g.CopyFromScreen($x, $y, 0, 0, [Drawing.Size]::new($w, $h), [Drawing.CopyPixelOperation]::SourceCopy -bor [Drawing.CopyPixelOperation]::CaptureBlt)
+        $bmp.Save((Join-Path $Out $Name), [Drawing.Imaging.ImageFormat]::Png)
+        "  screenshot $Name ($($Rect[2] - $Rect[0])x$($Rect[3] - $Rect[1]) at $($Rect[0]),$($Rect[1]), $Margin px around)"
+    } catch {
+        "  screenshot $Name failed: $($_.Exception.Message)"
+    } finally {
+        if ($g) { $g.Dispose() }
+        if ($bmp) { $bmp.Dispose() }
+    }
+}
+
+$lines = @("Popups on the shell at $Size (the checks are gates, each read back through UIA within 2 s; opening is advisory: <= 100 ms from the key or click to UIA seeing it, U3)")
+$checks = [ordered]@{}
+$hwnd = [IntPtr]::Zero
+$p = Start-Process -FilePath $exe.shell -ArgumentList @('--size', $Size) -PassThru
+$null = $p.Handle
+try {
+    $shown = Wait-Until {
+        $script:hwnd = [UiaGateWin32]::FindWindowW('dismpro.window', 'DISM Pro shell probe')
+        $script:hwnd -ne [IntPtr]::Zero -and [UiaGateWin32]::IsWindowVisible($script:hwnd)
+    } 30000
+    if (-not $shown) { throw "the shell showed no window in 30 s (exited: $($p.HasExited))" }
+    $root = $ae::FromHandle($hwnd)
+    $rows = @()
+    $found = Wait-Until {
+        $script:rows = @(Find-Elements $root $types::Group 'Programs' | ForEach-Object { Find-Elements $_ $types::ListItem })
+        $script:rows.Count -gt 4
+    } 10000
+    if (-not $found) { throw 'no table rows in 10 s' }
+    $row = $rows[3]
+    $label = { param([string] $Text) (Find-Elements $root $types::Text $Text).Count -eq 1 }
+    $checks['the window is active'] = [GlassGateWin32]::Activate($hwnd)
+    $p.Refresh()
+    $before = $p.WorkingSet64
+
+    # A row's menu from the keyboard: Shift+F10 on the focused row. UIA's FocusedElement follows
+    # the popup's keyboard focus (A1.3's verify).
+    $row.SetFocus()
+    $focused = Wait-Until { $row.Current.HasKeyboardFocus } 2000
+    $menu = $null
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    [void][TextGateWin32]::Chord($shift, 0x79) # Shift+F10
+    $opened = $focused -and (Wait-Until {
+        $script:menu = Find-Popup $hwnd $types::MenuItem 'Uninstall'
+        $null -ne $script:menu -and $script:menu.Element.Current.HasKeyboardFocus -and (Test-Focused $types::MenuItem 'Uninstall')
+    } 2000)
+    $firstMs = $sw.Elapsed.TotalMilliseconds
+    $checks['Shift+F10: an owned popup, its first item focused'] = $opened
+    if (-not $opened) { throw "Shift+F10 on '$($row.Current.Name)' showed no menu with Uninstall focused in 2 s ($((Get-Shown $hwnd).Count) popups shown, row focused: $focused)" }
+    $menuHwnd = $menu.Hwnd
+    $lines += "first open:  Shift+F10 to its first item focused in UIA, $(Format-Ms $firstMs)"
+    $p.Refresh()
+    $lines += '  working set {0:+0.0;-0.0;0.0} MiB with the menu open (advisory: <= 2 MiB, A1.7)' -f (($p.WorkingSet64 - $before) / 1MB)
+    $lines += Save-Screen ([PopupGateWin32]::Rect($menuHwnd)) 'popup-menu.png'
+    $menuRoot = $ae::FromHandle($menuHwnd)
+    $items = @(Find-Elements $menuRoot $types::MenuItem | ForEach-Object { $_.Current.Name })
+    $checks['a Menu "Row" of its 5 MenuItems'] = (Find-Elements $menuRoot $types::Menu 'Row').Count -eq 1 -and ($items -join ',') -eq 'Uninstall,Open file location,Copy name,Copy ID,Properties'
+    $checks['a tool window, not on the taskbar'] = ([PopupGateWin32]::ExStyle($menuHwnd) -band 0x80) -ne 0 # WS_EX_TOOLWINDOW
+    Send-Key 0x28 # Down
+    $checks['Down moves the focus to the next item'] = Wait-Until { Test-Focused $types::MenuItem 'Open file location' } 2000
+    Send-Key 0x0D # Enter
+    $checks['Enter invokes it, closes, focus back on the row'] = Wait-Until {
+        (& $label 'Opened file location') -and (Get-Shown $hwnd).Count -eq 0 -and $row.Current.HasKeyboardFocus
+    } 2000
+
+    # Again: the same window, shown again; Esc closes it with another item focused.
+    $sw.Restart()
+    [void][TextGateWin32]::Chord($shift, 0x79)
+    $again = Wait-Until {
+        $script:menu = Find-Popup $hwnd $types::MenuItem 'Uninstall'
+        $null -ne $script:menu -and (Test-Focused $types::MenuItem 'Uninstall')
+    } 2000
+    $lines += "second open: $(Format-Ms $sw.Elapsed.TotalMilliseconds)"
+    $checks['a second Shift+F10 reuses the window'] = $again -and $menu.Hwnd -eq $menuHwnd -and @([PopupGateWin32]::Popups($hwnd, $false)).Count -eq 1
+    Send-Key 0x28
+    Send-Key 0x28
+    $moved = Wait-Until { Test-Focused $types::MenuItem 'Copy name' } 2000
+    Send-Key 0x1B # Esc
+    $closed = Wait-Until { (Get-Shown $hwnd).Count -eq 0 -and $row.Current.HasKeyboardFocus } 2000
+    Start-Sleep -Milliseconds 200 # an invoked item would have shown by now
+    $checks['Esc closes it, invoking nothing'] = $again -and $moved -and $closed -and (& $label 'Opened file location')
+
+    # From the pointer: a right-click on the next row picks it and opens its menu at the pointer;
+    # a click outside closes it and reaches nothing (the Games check box stays off), and the next
+    # click there does.
+    $next = $rows[4]
+    $r = $next.Current.BoundingRectangle
+    $at = @([int] ($r.X + $r.Width / 3), [int] ($r.Y + $r.Height / 2))
+    [void][TextGateWin32]::MoveTo($at[0], $at[1])
+    $sw.Restart()
+    [void][PopupGateWin32]::Click($true)
+    $opened = Wait-Until { $script:menu = Find-Popup $hwnd $types::MenuItem 'Uninstall'; $null -ne $script:menu } 2000
+    $lines += "right-click open: $(Format-Ms $sw.Elapsed.TotalMilliseconds)"
+    $checks['a right-click on a row picks it and opens its menu'] = $opened -and (Wait-Until { Test-Selected $next } 2000)
+    if ($opened) {
+        $m = [PopupGateWin32]::Rect($menu.Hwnd)
+        $lines += "  the menu at ($($m[0]), $($m[1])), the click at ($($at[0]), $($at[1]))"
+        $checks['at the pointer, below it'] = [Math]::Abs($m[0] - $at[0]) -le 3 -and $m[1] - $at[1] -ge -3 -and $m[1] - $at[1] -le 12
+    }
+    $games = Find-First $root $types::CheckBox 'Games'
+    $toggle = Get-Pattern $games ([Windows.Automation.TogglePattern]::Pattern)
+    $g = $games.Current.BoundingRectangle
+    $gx = [int] ($g.X + $g.Width / 2)
+    $gy = [int] ($g.Y + $g.Height / 2)
+    $inside = $opened -and $gx -ge $m[0] -and $gx -lt $m[2] -and $gy -ge $m[1] -and $gy -lt $m[3]
+    if ($inside) { throw "the Games check box at ($gx, $gy) is under the menu: no click outside to make" }
+    [void][TextGateWin32]::MoveTo($gx, $gy)
+    [void][PopupGateWin32]::Click($false)
+    $closed = Wait-Until { (Get-Shown $hwnd).Count -eq 0 } 2000
+    Start-Sleep -Milliseconds 200 # a click that reached the box would have toggled it by now
+    $checks['a click outside closes it and reaches nothing'] = $opened -and $closed -and $toggle.Current.ToggleState -eq $toggleState::Off
+    [void][PopupGateWin32]::Click($false)
+    $checks['the next click there reaches the check box'] = Wait-Until { $toggle.Current.ToggleState -eq $toggleState::On } 2000
+
+    # A right-click outside an open menu, on another row above it, closes the menu and asks for
+    # no other: its release is eaten with its press. The next right-click there opens that row's.
+    [void][TextGateWin32]::MoveTo($at[0], $at[1])
+    [void][PopupGateWin32]::Click($true)
+    $reopened = Wait-Until { (Get-Shown $hwnd).Count -eq 1 } 2000
+    $o = $rows[2].Current.BoundingRectangle
+    $ox = [int] ($o.X + $o.Width / 3)
+    $oy = [int] ($o.Y + $o.Height / 2)
+    if ($reopened) {
+        $m = [PopupGateWin32]::Rect((Get-Shown $hwnd)[0])
+        if ($ox -ge $m[0] -and $ox -lt $m[2] -and $oy -ge $m[1] -and $oy -lt $m[3]) { throw "row 2 at ($ox, $oy) is under the menu: no right-click outside to make" }
+    }
+    [void][TextGateWin32]::MoveTo($ox, $oy)
+    [void][PopupGateWin32]::Click($true)
+    $closed = Wait-Until { (Get-Shown $hwnd).Count -eq 0 } 2000
+    Start-Sleep -Milliseconds 300 # a menu its release asked for would show by now
+    $checks['a right-click outside closes the menu and opens no other'] = $reopened -and $closed -and (Get-Shown $hwnd).Count -eq 0
+    [void][PopupGateWin32]::Click($true)
+    $checks['the next right-click there opens that row''s menu'] = (Wait-Until { (Get-Shown $hwnd).Count -eq 1 } 2000) -and (Wait-Until { Test-Selected $rows[2] } 2000)
+    Send-Key 0x1B # Esc
+    [void](Wait-Until { (Get-Shown $hwnd).Count -eq 0 } 2000)
+
+    # A tooltip: the pointer resting on Review changes shows its tip after Windows' delay (the
+    # double-click time); the tip never activates, and goes when the pointer leaves.
+    $delay = [int] [PopupGateWin32]::GetDoubleClickTime()
+    $b = (Find-First $root $types::Button 'Review changes').Current.BoundingRectangle
+    $tip = $null
+    [void][TextGateWin32]::MoveTo([int] ($b.X + $b.Width / 2), [int] ($b.Y + $b.Height / 2))
+    $sw.Restart()
+    $showed = Wait-Until { $script:tip = Find-Popup $hwnd $types::ToolTip $tipText; $null -ne $script:tip } ($delay + 2000)
+    $tipMs = $sw.Elapsed.TotalMilliseconds
+    $lines += "tooltip: shown $(Format-Ms $tipMs ($delay + 100)) after the pointer came to rest (the delay: $delay ms)"
+    $checks['hovering shows a ToolTip, not before the delay'] = $showed -and $tipMs -ge $delay - 20
+    if ($showed) {
+        $lines += Save-Screen ([PopupGateWin32]::Rect($tip.Hwnd)) 'popup-tooltip.png'
+        $checks['the tip never activates'] = [PopupGateWin32]::GetForegroundWindow() -eq $hwnd -and ([PopupGateWin32]::ExStyle($tip.Hwnd) -band 0x08000000) -ne 0 # WS_EX_NOACTIVATE
+    }
+    $t = (Find-First $root $types::Text 'DISM Pro').Current.BoundingRectangle
+    [void][TextGateWin32]::MoveTo([int] ($t.X + $t.Width / 2), [int] ($t.Y + $t.Height / 2))
+    $checks['the pointer leaving hides it'] = $showed -and (Wait-Until { $null -eq (Find-Popup $hwnd $types::ToolTip $tipText) } 2000)
+
+    # Settings' Start page dropdown: Expand opens its list on the picked option; Down and Enter
+    # pick the next; Select in the list picks another; Collapse closes it.
+    Select-Item (Find-First $root $types::ListItem 'Settings')
+    $combo = $null
+    $found = Wait-Until { $script:combo = Find-First $root $types::ComboBox 'Start page'; $null -ne $script:combo } 2000
+    if (-not $found) { throw 'no ComboBox "Start page" on Settings in 2 s' }
+    $expand = Get-Pattern $combo ([Windows.Automation.ExpandCollapsePattern]::Pattern)
+    $value = Get-Pattern $combo ([Windows.Automation.ValuePattern]::Pattern)
+    $checks['a ComboBox "Start page", collapsed, at Overview'] = $expand.Current.ExpandCollapseState -eq $expandState::Collapsed -and $value.Current.Value -eq 'Overview'
+    [void][GlassGateWin32]::Activate($hwnd)
+    $list = $null
+    $sw.Restart()
+    $expand.Expand()
+    $opened = Wait-Until {
+        $script:list = Find-Popup $hwnd $types::ListItem 'Overview'
+        $null -ne $script:list -and $script:list.Element.Current.HasKeyboardFocus
+    } 2000
+    $lines += "dropdown open: Expand to the picked option focused, $(Format-Ms $sw.Elapsed.TotalMilliseconds)"
+    $checks['Expand opens the list, on the picked option'] = $opened -and (Test-Selected $list.Element) -and $expand.Current.ExpandCollapseState -eq $expandState::Expanded -and (Find-Elements ($ae::FromHandle($list.Hwnd)) $types::List 'Start page').Count -eq 1
+    if ($opened) {
+        $lines += Save-Screen ([PopupGateWin32]::Rect($list.Hwnd)) 'popup-list.png'
+        Send-Key 0x28 # Down
+        Send-Key 0x0D # Enter
+    }
+    $checks['Down, Enter pick the next and close the list'] = $opened -and (Wait-Until {
+        $value.Current.Value -eq 'Clean' -and $expand.Current.ExpandCollapseState -eq $expandState::Collapsed -and (Get-Shown $hwnd).Count -eq 0
+    } 2000)
+    $expand.Expand()
+    $repair = $null
+    $reopened = Wait-Until { $script:repair = Find-Popup $hwnd $types::ListItem 'Repair'; $null -ne $script:repair } 2000
+    if ($reopened) { Select-Item $repair.Element }
+    $checks['Select(Repair) in the list picks it and closes'] = $reopened -and (Wait-Until { $value.Current.Value -eq 'Repair' -and (Get-Shown $hwnd).Count -eq 0 } 2000)
+    $expand.Expand()
+    $reopened = Wait-Until { $null -ne (Find-Popup $hwnd $types::List 'Start page') } 2000
+    $expand.Collapse()
+    $checks['Collapse closes it, the value kept'] = $reopened -and (Wait-Until {
+        (Get-Shown $hwnd).Count -eq 0 -and $expand.Current.ExpandCollapseState -eq $expandState::Collapsed
+    } 2000) -and $value.Current.Value -eq 'Repair'
+} catch {
+    $lines += "popups FAILED: $($_.Exception.Message)"
+    $checks['client'] = $false
+} finally {
+    if (-not $p.HasExited) {
+        if ($hwnd -ne [IntPtr]::Zero) { [void][UiaGateWin32]::PostMessageW($hwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) } # WM_CLOSE
+        if (-not $p.WaitForExit(5000)) { $p.Kill(); $lines += 'the shell did not close on WM_CLOSE'; $checks['closes'] = $false }
+    }
+}
+foreach ($k in $checks.Keys) { $lines += '{0,-50} {1}' -f $k, (Format-Verdict $checks[$k]) }
+$ok = $checks.Count -gt 0 -and -not ($checks.Values -contains $false)
+Publish 'Popups' $lines $ok
 if (-not $ok) { $failed++ }
 
 exit $failed

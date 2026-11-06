@@ -1,6 +1,7 @@
 //! TD-0009 §7 U2 and U3 on a shell page of 390 to 476 nodes (`fixtures/shell.rs`):
 //! - `interact`, U2: UI-thread work per input event without raster: dispatch → update → view →
-//!   reconcile → layout → damage. Budget: p99 ≤ 2 ms per event (doc 04 §5).
+//!   reconcile → layout → damage. Budget: p99 ≤ 2 ms per event (doc 04 §5), moving within a menu
+//!   included (TD-0009 A1.7).
 //! - `paint`, U3 without presenting: the same events with the damage painted into a 1000 × 700
 //!   canvas, and whole-window repaints. Budget: input to visual ≤ 50 ms (doc 04 §2); presenting is
 //!   measured on G1.
@@ -20,10 +21,10 @@ use criterion::{
     measurement::WallTime,
 };
 use dpro_ui::{Input, KeyCode, Mods, Point, Size, Theme};
-use shell::{Msg, Run, START, Shell, Step, click, key};
+use shell::{Msg, Run, START, Shell, Step, click, key, popup_key};
 
 /// The session, an unchanged event, a filter keystroke, a resize, a tab picked with the arrow
-/// keys, a progress report and a text size switch, on `run`.
+/// keys, a progress report, a text size switch and an arrow in a row's menu, on `run`.
 fn events(g: &mut BenchmarkGroup<'_, WallTime>, run: &mut Run) {
     let steps = run.session();
 
@@ -103,6 +104,25 @@ fn events(g: &mut BenchmarkGroup<'_, WallTime>, run: &mut Run) {
             run.step(Step::TextScale(1.0));
         });
     });
+
+    // A row's context menu (TD-0009 A1.7): Down then Up in the open menu, each moving the focus
+    // between two items, in the popup's Ui.
+    let row = run.ui.find(&Run::row(4));
+    run.ui.set_focus(row);
+    run.step(Step::Input(Input::ContextMenu(None)));
+    run.settle();
+    let (down, up) = (
+        popup_key(KeyCode::Down, true, Mods::default()),
+        popup_key(KeyCode::Up, true, Mods::default()),
+    );
+    g.bench_function("menu_arrow", |b| {
+        b.iter(|| {
+            run.step(down.clone());
+            run.step(up.clone());
+        });
+    });
+    run.step(popup_key(KeyCode::Escape, true, Mods::default()));
+    run.settle();
 }
 
 fn interact(c: &mut Criterion) {

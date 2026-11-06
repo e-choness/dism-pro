@@ -143,6 +143,17 @@ jobs:
         timeout-minutes: 10
         shell: pwsh
         run: ./.github/scripts/ui-gates.ps1 -Bin dist-t3 -Out ui-gates
+      - name: G1 reports and popup screenshots
+        # The probes' raw reports, and the popups as the screen shows them: TD-0009 A1.3's DWM
+        # shadow and small rounded corners are checked by hand. Only the toolkit's own pixels and
+        # numbers, no Microsoft files (decision #29).
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ui-gates
+          path: ui-gates/
+          if-no-files-found: warn
+          retention-days: 7
       - name: T3 WIMGAPI (wim_t3 probe)
         # Wine has no wimgapi.dll: WimFile against WIMs and an ESD that dism.exe captures (roadmap 2.3).
         if: ${{ !cancelled() }}

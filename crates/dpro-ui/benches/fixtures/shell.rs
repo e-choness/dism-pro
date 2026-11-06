@@ -4,7 +4,11 @@
 //! a table of 40 rows × 8 cells over 1,000 data rows; the drawer adds 20 rows, a progress bar and
 //! its actions, Hold to apply among them. §7 estimates a real page at about 600 nodes. Pages 1 to
 //! 10 show 8 summary cards instead of the toolbar and table, so switching pages replaces the
-//! content, and Settings (the last) shows a radio group.
+//! content, and Settings (the last) shows a radio group and the Start page dropdown.
+//!
+//! Popups (TD-0009 A1): a row's context menu (5 items and a separator, the last item disabled
+//! with a tooltip saying why), the Start page dropdown's list, and tooltips on the header's
+//! drawer button and on Hold to apply. [`Run`] hosts the popup's [`Ui`] as the platform does.
 //!
 //! Shared by `interact.rs`, `a11y.rs`, `ir.rs` and the tests that replay the session.
 
@@ -17,8 +21,8 @@ use std::sync::OnceLock;
 
 use dpro_ui::{
     Align, Axis, Canvas, ClipboardRequest, Cx, Dim, Element, FakeText, Input, Insets, Justify, Key,
-    KeyCode, KeyEvent, Look, Mods, Motion, Point, Radius, Size, Style, TextEdit, TextStyle, Theme,
-    Tone, Tri, Ui, accesskit::TreeUpdate, tokens,
+    KeyCode, KeyEvent, Look, Mods, Motion, Point, Popup, PopupKind, Radius, Size, Style, TextEdit,
+    TextStyle, Theme, Tone, Tri, Ui, accesskit::TreeUpdate, tokens,
 };
 
 const RAIL: u8 = 12;
@@ -39,6 +43,23 @@ const PAGES: [&str; RAIL as usize] = [
 const TABS: [&str; 2] = ["Desktop programs", "Store apps"];
 /// Settings' radio group.
 const THEMES: [&str; 3] = ["System", "Light", "Dark"];
+/// Settings' Start page dropdown: the pages the app may open on.
+pub(crate) const START_PAGES: [&str; 4] = ["Overview", "Clean", "Repair", "Packages"];
+/// A row's context menu: each item's label, and whether it's enabled. A separator follows the
+/// second. The first is a danger item: it opens the drawer, and never applies.
+pub(crate) const ROW_MENU: [(&str, bool); 5] = [
+    ("Uninstall", true),
+    ("Open file location", true),
+    ("Copy name", true),
+    ("Copy ID", true),
+    ("Properties", false),
+];
+/// What the toolbar says after the row menu's item `i` (the first opens the drawer instead).
+const DONE: [&str; 5] = ["", "Opened file location", "Copied name", "Copied ID", ""];
+/// Why Properties is disabled: its tooltip.
+pub(crate) const PROPERTIES_TIP: &str = "Not available for this program";
+/// The header's drawer button's tooltip.
+pub(crate) const DRAWER_TIP: &str = "Every change before it applies";
 /// One frame at 60 Hz, rounded down to whole milliseconds.
 pub(crate) const FRAME_MS: u64 = 16;
 
@@ -79,6 +100,28 @@ pub(crate) enum Msg {
     Apply,
     /// Hold to apply invoked by assistive technology: the typed confirmation opens instead.
     ConfirmApply,
+    /// A context request found row `r`: it's selected and its menu opens.
+    RowMenu(u32),
+    /// The row menu's item `i`, from [`ROW_MENU`].
+    RowAction(u8),
+    /// Settings' Start page dropdown asks for its list.
+    OpenStartPage,
+    /// A start page picked from the list, by its place in [`START_PAGES`].
+    StartPage(u8),
+    /// Up (`false`) or Down on the closed dropdown: the page before or after.
+    StepStartPage(bool),
+    /// The open popup closes: the host's `on_close`.
+    ClosePopup,
+}
+
+/// Which popup the shell has open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Open {
+    None,
+    /// Row `r`'s context menu.
+    RowMenu(u32),
+    /// The Start page dropdown's list.
+    StartPages,
 }
 
 /// The page's view-model.
@@ -95,6 +138,12 @@ pub(crate) struct Shell {
     applied: bool,
     /// How many times Hold to apply applied.
     applies: u32,
+    /// The popup open.
+    open: Open,
+    /// The row menu's item last invoked, as the toolbar says.
+    done: Option<u8>,
+    /// Settings' Start page, in [`START_PAGES`].
+    start_page: u8,
     /// Column 0 is the name the filter searches.
     cells: Vec<[String; CELLS]>,
     /// Data rows on the tab and matching the filter, in order; the table shows the first
@@ -133,6 +182,9 @@ impl Shell {
             confirming: false,
             applied: false,
             applies: 0,
+            open: Open::None,
+            done: None,
+            start_page: 0,
             cells,
             visible: Vec::with_capacity(DATA),
         };
@@ -177,12 +229,75 @@ impl Shell {
                 self.progress = 100;
             }
             Msg::ConfirmApply => self.confirming = true,
+            Msg::RowMenu(r) => {
+                self.selected = Some(r);
+                self.open = Open::RowMenu(r);
+            }
+            // A danger item opens the drawer: a menu never applies (A1.10 item 3).
+            Msg::RowAction(0) => {
+                self.drawer = true;
+                self.confirming = false;
+            }
+            Msg::RowAction(i) => self.done = Some(i),
+            Msg::OpenStartPage => self.open = Open::StartPages,
+            Msg::StartPage(p) => self.start_page = p.min(last(&START_PAGES)),
+            Msg::StepStartPage(down) => {
+                self.start_page = if down {
+                    (self.start_page + 1).min(last(&START_PAGES))
+                } else {
+                    self.start_page.saturating_sub(1)
+                };
+            }
+            Msg::ClosePopup => self.open = Open::None,
         }
     }
 
     /// How many times Hold to apply applied.
     pub(crate) fn applies(&self) -> u32 {
         self.applies
+    }
+
+    /// The row menu's item last invoked.
+    pub(crate) fn done(&self) -> Option<u8> {
+        self.done
+    }
+
+    /// Settings' Start page, in [`START_PAGES`].
+    pub(crate) fn start_page(&self) -> u8 {
+        self.start_page
+    }
+
+    /// Whether the drawer is open.
+    pub(crate) fn drawer(&self) -> bool {
+        self.drawer
+    }
+
+    /// The selected row.
+    pub(crate) fn selected(&self) -> Option<u32> {
+        self.selected
+    }
+
+    /// The menu or list open (`Model::popup`).
+    pub(crate) fn popup(&self) -> Option<Popup<Msg>> {
+        let kind = match self.open {
+            Open::None => return None,
+            Open::RowMenu(_) => PopupKind::Menu,
+            Open::StartPages => PopupKind::List,
+        };
+        Some(Popup {
+            kind,
+            on_close: Msg::ClosePopup,
+        })
+    }
+
+    /// The message opening the context menu of the node keyed `key`: a shown row's
+    /// (`Model::context_menu`).
+    pub(crate) fn context_menu(&self, key: Key) -> Option<Msg> {
+        self.visible
+            .iter()
+            .take(ROWS)
+            .find(|&&r| Key::index(u64::from(r)) == key)
+            .map(|&r| Msg::RowMenu(r))
     }
 
     fn refilter(&mut self) {
@@ -195,6 +310,11 @@ impl Shell {
                 .map(|(i, _)| i),
         );
     }
+}
+
+/// The last place in `items`.
+fn last(items: &[&str]) -> u8 {
+    u8::try_from(items.len().saturating_sub(1)).unwrap_or(u8::MAX)
 }
 
 /// ASCII case-insensitive containment without allocating (the real table folds once, TD-0009 §5.1).
@@ -303,7 +423,8 @@ pub(crate) fn view(s: &Shell, cx: &mut Cx<'_, Msg>) {
                 )
                 .style(sized(32.0, 16.0))
                 .text_style(STRONG)
-                .look(Look::PRIMARY),
+                .look(Look::PRIMARY)
+                .tooltip(DRAWER_TIP),
             );
         },
     );
@@ -390,10 +511,10 @@ fn toolbar(s: &Shell, cx: &mut Cx<'_, Msg>) {
             }
         },
     );
-    let selection = if s.selected.is_some() {
-        "1 selected"
-    } else {
-        ""
+    let selection = match (s.done, s.selected) {
+        (Some(i), _) => DONE[usize::from(i)],
+        (None, Some(_)) => "1 selected",
+        (None, None) => "",
     };
     cx.add(Element::text(Key::name("selection"), selection).look(ink(Tone::TextSecondary)));
     for (c, name) in (0..CATEGORIES).zip(NAMES) {
@@ -443,7 +564,8 @@ fn content(s: &Shell, cx: &mut Cx<'_, Msg>) {
                                     ..row(12.0)
                                 })
                                 .look(control(selected.then_some(Tone::Selected)))
-                                .selected(selected),
+                                .selected(selected)
+                                .context(),
                             |cx| {
                                 for (c, text) in (0..).zip(cells) {
                                     let (style, tone) = match c {
@@ -527,7 +649,8 @@ fn drawer(s: &Shell, cx: &mut Cx<'_, Msg>) {
                             .hold(|| Msg::ConfirmApply)
                             .style(sized(36.0, 16.0))
                             .text_style(STRONG)
-                            .look(Look::DANGER),
+                            .look(Look::DANGER)
+                            .tooltip("Hold until the bar fills to apply"),
                     );
                 },
             );
@@ -588,7 +711,8 @@ fn summary(s: &Shell, cx: &mut Cx<'_, Msg>) {
     );
 }
 
-/// Settings › Appearance's theme: a radio group, one Tab stop, the arrow keys pick (§4.5).
+/// Settings › Appearance's theme: a radio group, one Tab stop, the arrow keys pick (§4.5). Then
+/// the Start page: a dropdown (A1).
 fn settings(s: &Shell, cx: &mut Cx<'_, Msg>) {
     cx.add_with(
         Element::stack(Key::name("settings"))
@@ -619,8 +743,63 @@ fn settings(s: &Shell, cx: &mut Cx<'_, Msg>) {
                     }
                 },
             );
+            let page = START_PAGES[usize::from(s.start_page)];
+            cx.add(
+                Element::combo(
+                    Key::name("start"),
+                    "Start page",
+                    page,
+                    s.open == Open::StartPages,
+                    Msg::OpenStartPage,
+                )
+                .step(Msg::StepStartPage),
+            );
         },
     );
+}
+
+/// What the open popup shows (`Model::popup_view`): the row's menu, or the Start page list.
+pub(crate) fn popup_view(s: &Shell, cx: &mut Cx<'_, Msg>) {
+    if let Open::RowMenu(_) = s.open {
+        cx.add_with(Element::menu(Key::name("row-menu")).name("Row"), |cx| {
+            for (i, (label, enabled)) in (0..).zip(ROW_MENU) {
+                let mut item =
+                    Element::menu_item(Key::index(u64::from(i)), label, Msg::RowAction(i))
+                        .enabled(enabled);
+                if i == 0 {
+                    item = item.look(Look {
+                        ink: Tone::Danger,
+                        radius: Radius::Small,
+                        ..Look::PLAIN
+                    });
+                }
+                if !enabled {
+                    item = item.tooltip(PROPERTIES_TIP);
+                }
+                cx.add(item);
+                if i == 1 {
+                    cx.add(Element::separator(Key::name("sep")));
+                }
+            }
+        });
+    } else if s.open == Open::StartPages {
+        cx.add_with(
+            Element::options(Key::name("start-pages")).name("Start page"),
+            |cx| {
+                for (p, label) in (0..).zip(START_PAGES) {
+                    let on = p == s.start_page;
+                    cx.add(
+                        Element::option(Key::index(u64::from(p)), label, on, Msg::StartPage(p))
+                            .look(Look {
+                                fill: on.then_some(Tone::Selected),
+                                radius: Radius::Small,
+                                ..Look::PLAIN
+                            }),
+                    );
+                }
+            },
+        );
+    }
 }
 
 /// One step of the scripted session.
@@ -640,11 +819,19 @@ pub(crate) enum Step {
     Update(Msg),
     /// Windows' text size changed (Settings › Accessibility › Text size), as a factor: 1 to 2.25.
     TextScale(f32),
+    /// Input to the open popup's window (a menu or the dropdown's list), as the platform routes
+    /// it there.
+    Popup(Input),
 }
 
 /// A key pressed with `mods`, as a step.
 pub(crate) fn key(key: KeyCode, down: bool, mods: Mods) -> Step {
     Step::Input(Input::Key(KeyEvent { key, down, mods }))
+}
+
+/// A key pressed with `mods` in the open popup's window, as a step.
+pub(crate) fn popup_key(key: KeyCode, down: bool, mods: Mods) -> Step {
+    Step::Popup(Input::Key(KeyEvent { key, down, mods }))
 }
 
 /// Ctrl held.
@@ -673,6 +860,12 @@ pub(crate) struct Run {
     pub(crate) take_a11y: bool,
     /// The clipboard, as the platform's copy, cut and paste would use it.
     pub(crate) clipboard: String,
+    /// The open popup's UI (a menu or the dropdown's list), which the platform hosts in a window
+    /// of its own, and whether that window shows.
+    pub(crate) popup: Ui<Msg>,
+    pub(crate) popup_open: bool,
+    /// The popup's pixels, when frames are painted.
+    popup_pixels: Vec<u32>,
 }
 
 impl Run {
@@ -707,14 +900,11 @@ impl Run {
     }
 
     fn new(shell: Shell, scale: f32, theme: Option<Theme>, text_scale: f32) -> Self {
+        let motion = Motion {
+            hover_ms: tokens::motion::HOVER_MS,
+        };
         let mut run = Self {
-            ui: Ui::new(
-                START,
-                scale,
-                Motion {
-                    hover_ms: tokens::motion::HOVER_MS,
-                },
-            ),
+            ui: Ui::new(START, scale, motion),
             shell,
             text: FakeText,
             msgs: Vec::with_capacity(4),
@@ -723,10 +913,14 @@ impl Run {
             now: 0,
             take_a11y: false,
             clipboard: String::with_capacity(64),
+            popup: Ui::new(Size { w: 0.0, h: 0.0 }, scale, motion),
+            popup_open: false,
+            popup_pixels: Vec::new(),
         };
         // The window has keyboard focus, as a window the user works in does.
         run.ui.set_active(true);
         run.ui.set_text_scale(text_scale);
+        run.popup.set_text_scale(text_scale);
         run.frame();
         run
     }
@@ -748,25 +942,73 @@ impl Run {
             Step::Resize(size) => self.ui.set_viewport(size),
             Step::Tick(ms) => {
                 self.now += ms;
-                // A hold held to the end sends its message from here.
+                // A hold held to the end sends its message from here; a popup's hover eases.
                 self.ui.tick(self.now, &mut self.msgs);
+                if self.popup_open {
+                    self.popup.tick(self.now, &mut self.msgs);
+                }
             }
             Step::Update(msg) => self.msgs.push(msg),
-            Step::TextScale(t) => self.ui.set_text_scale(t),
+            Step::TextScale(t) => {
+                self.ui.set_text_scale(t);
+                self.popup.set_text_scale(t);
+            }
+            Step::Popup(input) => self.popup_input(input),
         }
         for m in self.msgs.drain(..) {
             self.shell.update(m);
         }
-        // The caret timer, as the platform runs it after every event and on its wake: the caret
-        // blinks if it's due, before the frame paints.
-        let _ = self.ui.caret_timer(self.now);
+        // The caret and tooltip timers, as the platform runs them after every event and on its
+        // wake: the caret blinks if it's due, before the frame paints, and a tip due shows.
+        let _ = self.wake();
         self.frame();
+    }
+
+    /// What the platform does with input to the popup's window: Esc (and F4 or Alt+Up in a
+    /// list) closes it, and an item's message closes it first, then runs.
+    fn popup_input(&mut self, input: Input) {
+        let Some(open) = self.shell.popup() else {
+            return;
+        };
+        if let Input::Key(k) = input
+            && k.down
+            && (k.key == KeyCode::Escape
+                || (open.kind == PopupKind::List
+                    && ((k.key == KeyCode::F4 && !k.mods.alt)
+                        || (k.mods.alt && k.key == KeyCode::Up))))
+        {
+            self.msgs.push(open.on_close);
+            return;
+        }
+        let before = self.msgs.len();
+        self.popup.dispatch(input, &mut self.msgs);
+        if self.msgs.len() > before {
+            self.msgs.insert(before, open.on_close);
+        }
+    }
+
+    /// How long until the platform's one-shot wake is due, if it is: the caret's next blink or
+    /// a tooltip's next change, in the main window or the popup.
+    pub(crate) fn wake(&mut self) -> Option<u64> {
+        [
+            self.ui.caret_timer(self.now),
+            self.ui.tooltip_timer(self.now),
+            self.popup.tooltip_timer(self.now),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+    }
+
+    /// The clock, in milliseconds.
+    pub(crate) fn now(&self) -> u64 {
+        self.now
     }
 
     /// Ticks 60 Hz frames until the UI stops asking for them: hover fades end, and a hold still
     /// pressed runs to its end.
     pub(crate) fn settle(&mut self) {
-        while self.ui.wants_frame() {
+        while self.ui.wants_frame() || (self.popup_open && self.popup.wants_frame()) {
             self.step(Step::Tick(FRAME_MS));
         }
     }
@@ -804,9 +1046,25 @@ impl Run {
     }
 
     fn frame(&mut self) {
-        let shell = &self.shell;
-        self.ui.build(|cx| view(shell, cx));
-        self.ui.layout(&mut self.text);
+        // A context request asks the shell for its node's menu.
+        if let Some(key) = self
+            .ui
+            .take_context()
+            .and_then(|id| self.ui.info(id))
+            .map(|n| n.key)
+            && let Some(msg) = self.shell.context_menu(key)
+        {
+            self.shell.update(msg);
+        }
+        self.build();
+        // A popup whose anchor went away closes (A1.8).
+        if self.ui.popup_anchor().is_none()
+            && let Some(open) = self.shell.popup()
+        {
+            self.shell.update(open.on_close);
+            self.build();
+        }
+        self.sync_popup();
         if let Some(theme) = &self.theme {
             let (w, h) = self.ui.pixel_size();
             // Within capacity after warm-up: a resize back and forth doesn't allocate.
@@ -814,11 +1072,76 @@ impl Run {
             if let Some(mut canvas) = Canvas::new(&mut self.pixels, w, h) {
                 self.ui.paint(&mut canvas, &mut self.text, theme);
             }
+            if self.popup_open {
+                let (w, h) = self.popup.pixel_size();
+                self.popup_pixels.resize(area(w, h), 0);
+                if let Some(mut canvas) = Canvas::new(&mut self.popup_pixels, w, h) {
+                    self.popup.paint(&mut canvas, &mut self.text, theme);
+                }
+            }
         }
         self.ui.clear_damage();
+        self.popup.clear_damage();
         if self.take_a11y {
             drop(self.ui.a11y_update());
         }
+    }
+
+    fn build(&mut self) {
+        let shell = &self.shell;
+        self.ui.build(|cx| view(shell, cx));
+        self.ui.layout(&mut self.text);
+    }
+
+    /// Opens, rebuilds or hides the popup to match the shell's, as the platform does: a new one
+    /// takes the activation from the main window, focuses its first item if the keyboard opened
+    /// it (a list, its picked option, either way), and is sized to its content.
+    fn sync_popup(&mut self) {
+        let Some(open) = self.shell.popup() else {
+            if std::mem::take(&mut self.popup_open) {
+                self.popup.cancel_press();
+                let mut none = Vec::new();
+                self.popup.dispatch(Input::PointerLeave, &mut none);
+                self.popup.set_focus(None);
+                self.popup.set_active(false);
+                // The activation comes back to the main window, its focus on the anchor.
+                self.ui.set_active(true);
+            }
+            return;
+        };
+        let opening = !self.popup_open;
+        let shell = &self.shell;
+        self.popup.build(|cx| popup_view(shell, cx));
+        if opening {
+            let keyboard = self.ui.focus_visible();
+            if keyboard || open.kind == PopupKind::List {
+                self.popup.focus_first(keyboard);
+            } else {
+                self.popup.set_focus(None);
+            }
+            self.ui.set_active(false);
+            self.popup.set_active(true);
+            self.popup_open = true;
+        }
+        let size = self.popup.natural_size(&mut self.text, START.w);
+        self.popup.set_viewport(size);
+        self.popup.layout(&mut self.text);
+        if opening {
+            self.popup.repaint_all();
+        }
+    }
+
+    /// The popup's painted pixels, and its canvas's width.
+    pub(crate) fn popup_pixels(&self) -> (&[u32], u32) {
+        (&self.popup_pixels, self.popup.pixel_size().0)
+    }
+
+    /// The center of the popup's node at `path`.
+    pub(crate) fn popup_center(&self, path: &[Key]) -> Point {
+        self.popup
+            .find(path)
+            .and_then(|id| self.popup.info(id))
+            .map_or(Point::default(), |n| n.rect.center())
     }
 
     /// The accessibility update the frames since the last one taken left, as the platform would
@@ -869,6 +1192,33 @@ impl Run {
         Key::name("apply"),
     ];
 
+    /// Settings' Start page dropdown's path from the root, on the Settings page.
+    pub(crate) const START_COMBO: [Key; 3] =
+        [Key::name("body"), Key::name("settings"), Key::name("start")];
+
+    /// The header's drawer button's path from the root.
+    pub(crate) const DRAWER_BUTTON: [Key; 2] = [Key::name("header"), Key::name("drawer")];
+
+    /// Data row `r`'s path from the root, while it's shown on the first page.
+    pub(crate) fn row(r: u64) -> [Key; 4] {
+        [
+            Key::name("body"),
+            Key::name("content"),
+            Key::name("table"),
+            Key::index(r),
+        ]
+    }
+
+    /// The row menu's item `i`'s path in the popup's Ui ([`ROW_MENU`]).
+    pub(crate) fn menu_item(i: u64) -> [Key; 2] {
+        [Key::name("row-menu"), Key::index(i)]
+    }
+
+    /// The Start page list's option `p`'s path in the popup's Ui.
+    pub(crate) fn start_option(p: u64) -> [Key; 2] {
+        [Key::name("start-pages"), Key::index(p)]
+    }
+
     /// Tab `t`'s path from the root.
     pub(crate) fn tab(t: u64) -> [Key; 5] {
         [
@@ -898,6 +1248,30 @@ impl Run {
         for s in click(self.center(&Self::tab(0))) {
             self.step(s);
         }
+        self.settle();
+        self
+    }
+
+    /// Row 4 (a desktop program the first page shows) focused, as the keyboard leaves it.
+    pub(crate) fn row_focused(mut self) -> Self {
+        let row = self.ui.find(&Self::row(4));
+        self.ui.set_focus(row);
+        self
+    }
+
+    /// Row 4's menu open from the keyboard (Shift+F10), its first item focused, nothing
+    /// animating.
+    pub(crate) fn menu_open(self) -> Self {
+        let mut run = self.row_focused();
+        run.step(Step::Input(Input::ContextMenu(None)));
+        run.settle();
+        run
+    }
+
+    /// The pointer resting on the header's drawer button, its hover settled, its tip pending.
+    pub(crate) fn tip_pending(mut self) -> Self {
+        let at = self.center(&Self::DRAWER_BUTTON);
+        self.step(Step::Input(Input::PointerMove(at)));
         self.settle();
         self
     }

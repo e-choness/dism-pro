@@ -3,8 +3,9 @@
 //! it, a summary page and Settings.
 //!
 //! A target is any enabled node that takes input: buttons (table rows and rail pages included),
-//! check boxes, fields, tabs and radio buttons. Their size is the layout's, in logical pixels,
-//! which are effective pixels at any scale.
+//! check boxes, fields, tabs, radio buttons and dropdowns (a popup's items are checked in
+//! `popups.rs`). Their size is the layout's, in logical pixels, which are effective pixels at any
+//! scale.
 
 #[path = "../benches/fixtures/shell.rs"]
 mod shell;
@@ -21,7 +22,7 @@ fn too_small(ui: &Ui<Msg>, id: NodeId, out: &mut Vec<String>) {
         let Some(n) = ui.info(c) else { continue };
         let target = matches!(
             n.role,
-            Role::Button | Role::CheckBox | Role::Field | Role::Tab | Role::Radio
+            Role::Button | Role::CheckBox | Role::Field | Role::Tab | Role::Radio | Role::ComboBox
         );
         if target && n.enabled && (n.rect.w < MIN || n.rect.h < MIN) {
             out.push(format!(
@@ -69,7 +70,12 @@ fn count(ui: &Ui<Msg>, id: NodeId) -> usize {
                 n.enabled
                     && matches!(
                         n.role,
-                        Role::Button | Role::CheckBox | Role::Field | Role::Tab | Role::Radio
+                        Role::Button
+                            | Role::CheckBox
+                            | Role::Field
+                            | Role::Tab
+                            | Role::Radio
+                            | Role::ComboBox
                     )
             });
             usize::from(own) + count(ui, c)
