@@ -338,12 +338,19 @@ public static class ThemeGateWin32 {
     [DllImport("user32.dll")] public static extern int ReleaseDC(IntPtr hwnd, IntPtr hdc);
     [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr hwnd, out RECT r);
     [DllImport("gdi32.dll")] public static extern uint GetPixel(IntPtr hdc, int x, int y);
+    [DllImport("gdi32.dll")] public static extern bool BitBlt(IntPtr dst, int x, int y, int w, int h, IntPtr src, int sx, int sy, uint rop);
+    [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     public static extern IntPtr SendMessageTimeoutW(IntPtr hwnd, uint msg, IntPtr wp, string lp, uint flags, uint ms, out IntPtr result);
 
-    // The mean brightness (0..1, Rec. 709 weights over sRGB) of a 16 x 10 grid over the client
-    // area; -1 if unreadable.
+    // The grid points the last Luminance call couldn't read (CLR_INVALID: outside the DC's clip,
+    // for example under another window).
+    public static int Unreadable;
+
+    // The mean brightness (0..1, Rec. 709 weights over sRGB) of the readable points of a 16 x 10
+    // grid over the client area; -1 if none is readable.
     public static double Luminance(IntPtr hwnd) {
+        Unreadable = 0;
         RECT r;
         if (!GetClientRect(hwnd, out r) || r.Right < 16 || r.Bottom < 10) return -1;
         IntPtr dc = GetDC(hwnd);
@@ -354,13 +361,13 @@ public static class ThemeGateWin32 {
             for (int i = 0; i < 16; i++) {
                 for (int j = 0; j < 10; j++) {
                     uint c = GetPixel(dc, (2 * i + 1) * r.Right / 32, (2 * j + 1) * r.Bottom / 20);
-                    if (c == 0xFFFFFFFF) return -1;
+                    if (c == 0xFFFFFFFF) { Unreadable++; continue; }
                     sum += 0.2126 * ((c & 0xFF) / 255.0) + 0.7152 * (((c >> 8) & 0xFF) / 255.0) + 0.0722 * (((c >> 16) & 0xFF) / 255.0);
                     n++;
                 }
             }
         } finally { ReleaseDC(hwnd, dc); }
-        return sum / n;
+        return n == 0 ? -1 : sum / n;
     }
 }
 '@
@@ -384,6 +391,9 @@ $p = $null
 $hwnd = [IntPtr]::Zero
 try {
     Set-ItemProperty -Path $personalize -Name AppsUseLightTheme -Value 1 -Type DWord -ErrorAction SilentlyContinue
+    # The pointer rests in the screen's corner, off the window: a pointer resting on one of the
+    # shell's tooltip anchors would show a tip over the sampled points.
+    [void][ThemeGateWin32]::SetCursorPos(0, 0)
     $p = Start-Process -FilePath $exe.shell -ArgumentList @('--size', $Size) -PassThru
     $null = $p.Handle
     $shown = Wait-Until {
@@ -391,7 +401,10 @@ try {
         $script:hwnd -ne [IntPtr]::Zero -and [UiaGateWin32]::IsWindowVisible($script:hwnd)
     } 30000
     if (-not $shown) { throw "the shell showed no window in 30 s (exited: $($p.HasExited))" }
-    $checks['starts light'] = Wait-Until { [ThemeGateWin32]::Luminance($hwnd) -gt 0.5 } 5000
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    $script:startLum = -1
+    $checks['starts light'] = Wait-Until { $script:startLum = [ThemeGateWin32]::Luminance($hwnd); $script:startLum -gt 0.5 } 5000
+    $lines += '{0,-12} {1,7:N1} ms  luminance {2:N2}{3}' -f 'light', $sw.Elapsed.TotalMilliseconds, $script:startLum, $(if ([ThemeGateWin32]::Unreadable -gt 0) { " ($([ThemeGateWin32]::Unreadable) of 160 points unreadable)" } else { '' })
     foreach ($step in @(@{ Name = 'dark'; Light = 0 }, @{ Name = 'light again'; Light = 1 })) {
         $sw = [Diagnostics.Stopwatch]::StartNew()
         Set-AppMode $step.Light $hwnd
@@ -1063,7 +1076,15 @@ function Save-Screen([int[]] $Rect, [string] $Name, [int] $Margin = 16) {
         $h = $Rect[3] - $Rect[1] + 2 * $Margin
         $bmp = [Drawing.Bitmap]::new($w, $h)
         $g = [Drawing.Graphics]::FromImage($bmp)
-        $g.CopyFromScreen($x, $y, 0, 0, [Drawing.Size]::new($w, $h), [Drawing.CopyPixelOperation]::SourceCopy -bor [Drawing.CopyPixelOperation]::CaptureBlt)
+        # BitBlt itself: CopyFromScreen rejects SRCCOPY | CAPTUREBLT as an undefined enum value.
+        $dst = $g.GetHdc()
+        $screen = [ThemeGateWin32]::GetDC([IntPtr]::Zero)
+        try {
+            if (-not [ThemeGateWin32]::BitBlt($dst, 0, 0, $w, $h, $screen, $x, $y, 0x40CC0020)) { throw 'BitBlt failed' } # SRCCOPY | CAPTUREBLT
+        } finally {
+            [void][ThemeGateWin32]::ReleaseDC([IntPtr]::Zero, $screen)
+            $g.ReleaseHdc($dst)
+        }
         $bmp.Save((Join-Path $Out $Name), [Drawing.Imaging.ImageFormat]::Png)
         "  screenshot $Name ($($Rect[2] - $Rect[0])x$($Rect[3] - $Rect[1]) at $($Rect[0]),$($Rect[1]), $Margin px around)"
     } catch {
