@@ -79,5 +79,5 @@ pub use input::{Input, KeyCode, KeyEvent, Mods};
 pub use style::{Align, Axis, Dim, Justify, Style};
 pub use text::{CaretStop, FakeText, GlyphSink, Icon, TextMetrics, TextStyle, TextSystem};
 pub use theme::{Color, Scheme, SysColors, Theme, Tone, tokens};
-pub use tree::{Element, Key, Look, NodeId, NodeInfo, Radius, Role};
+pub use tree::{Element, Group, Key, Look, NodeId, NodeInfo, Radius, Role};
 pub use ui::{Motion, Ui};

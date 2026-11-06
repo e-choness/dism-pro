@@ -449,11 +449,15 @@ impl<M> Ui<M> {
     }
 
     /// Whether the window is active (has keyboard focus): only then is a caret or selection shown.
+    /// A window that goes inactive lets go of its hold, whose key's release it may never see.
     pub fn set_active(&mut self, active: bool) {
         if self.active != active {
             self.active = active;
             self.reset_caret();
             self.damage_caret_field();
+            if !active {
+                self.end_hold();
+            }
         }
     }
 

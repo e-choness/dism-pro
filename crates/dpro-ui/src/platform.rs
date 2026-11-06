@@ -387,7 +387,11 @@ impl<P: Model> Handler for Host<P> {
             }
             Event::Frame => {
                 let now = self.now_ms();
-                self.ui.tick(now);
+                // A hold that comes to its end sends its message here.
+                self.ui.tick(now, &mut self.msgs);
+                for msg in self.msgs.drain(..) {
+                    self.model.update(msg);
+                }
                 true
             }
             Event::Close => {

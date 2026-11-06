@@ -8,11 +8,15 @@
 //!
 //! What each node shows:
 //! - its [`Look`](crate::Look)'s fill, then its border, both with the look's radius;
-//! - buttons: a state layer while hovered (following the hover fade) or pressed;
+//! - buttons and tabs: a state layer while hovered (following the hover fade) or pressed. A hold
+//!   button held shows the part still to go in the permanent fill, its own fill growing from its
+//!   start as the hold runs, and its text in the ink that pairs with each part;
 //! - text in the look's ink (secondary when disabled), centered vertically in the content box,
 //!   and horizontally too in a button. A node with children (a table row) shows no text of its
 //!   own: its text is its accessible name;
 //! - check boxes: a box a line high, with the state layer, then the label half a line after it;
+//!   radio buttons the same with a circle, the accent with a dot in it when picked;
+//! - progress bars: a pill-shaped track, the accent along it as far as its value;
 //! - while focus is visible, Windows 11's focus visual over everything else: a ring in text color
 //!   with a one-pixel surface-colored ring inside it, so it shows on any fill, accent included.
 //!
@@ -108,14 +112,19 @@ impl<M> Ui<M> {
         }
         let under = fill.unwrap_or(under);
         let interactive = node.enabled && node.role.interactive();
-        if interactive && node.role == Role::Button {
+        let button = matches!(node.role, Role::Button | Role::Tab);
+        // A hold pressed: the part still to go turns permanent, and its fill grows back from the
+        // start as it's held (doc 05 §4). Where they meet, in physical pixels.
+        let split = (node.hold && self.hold.node == i && (node.pressed || self.hold.done))
+            .then(|| p.hold(rect, corner, self.hold.t, visible));
+        if interactive && button && split.is_none() {
             p.state_layer(node, rect, corner);
         }
         if let Some(border) = node.look.border {
             p.canvas
                 .ring(rect, corner, 1, p.theme.stroke(border, node.enabled));
         }
-        if interactive && node.role == Role::Button {
+        if interactive && button {
             p.outline(node, rect, corner, under);
         }
         let ink = p.theme.ink(
@@ -128,12 +137,32 @@ impl<M> Ui<M> {
         );
         match node.role {
             Role::CheckBox => p.check_box(node, interactive, ink),
+            Role::Radio => p.radio(node, interactive, ink),
             Role::Field => self.paint_field(i, visible, under, ink, p),
-            Role::Label | Role::Button if node.first == NIL && !node.text.is_empty() => {
+            Role::Progress => p.progress(node, rect),
+            Role::Label | Role::Button | Role::Tab
+                if node.first == NIL && !node.text.is_empty() =>
+            {
                 let content = node.rect.inset(node.style.padding);
-                p.text(node, content, node.role == Role::Button, ink);
+                if let Some(x) = split {
+                    // Each part's text in the ink that pairs with its fill.
+                    let to_go = p.theme.ink(Tone::PermanentText, Tone::PermanentFill);
+                    for (part, ink) in [
+                        (RectPx { x1: x, ..rect }, ink),
+                        (RectPx { x0: x, ..rect }, to_go),
+                    ] {
+                        let clip = part.intersect(visible);
+                        if !clip.is_empty() {
+                            p.canvas.set_clip(clip);
+                            p.text(node, content, button, ink);
+                        }
+                    }
+                    p.canvas.set_clip(visible);
+                } else {
+                    p.text(node, content, button, ink);
+                }
             }
-            Role::Container | Role::Label | Role::Button => {}
+            Role::Container | Role::Label | Role::Button | Role::Tab => {}
         }
         let mut child = node.first;
         while child != NIL {
@@ -299,8 +328,45 @@ impl Painter<'_, '_> {
             .draw(text, &n.text_style, rect, self.scale, &mut sink);
     }
 
-    /// The box, a line high, then the label half a line after it (the size layout measured).
-    fn check_box<M>(&mut self, n: &Node<M>, interactive: bool, ink: Color) {
+    /// A hold's two parts over the fill already painted: from `t` of the way along `rect` to its
+    /// end, the permanent fill. Returns where the parts meet. The clip is `visible` again after.
+    fn hold(&mut self, rect: RectPx, corner: f32, t: f32, visible: RectPx) -> i32 {
+        let x = rect.x0 + px_width((t.clamp(0.0, 1.0) * f(rect.x1 - rect.x0)).round());
+        let to_go = RectPx { x0: x, ..rect }.intersect(visible);
+        if !to_go.is_empty() {
+            self.canvas.set_clip(to_go);
+            self.canvas
+                .rrect(rect, corner, self.theme.color(Tone::PermanentFill));
+            self.canvas.set_clip(visible);
+        }
+        x
+    }
+
+    /// A progress bar: a pill-shaped track (a ring in high contrast, which has no tints), and the
+    /// accent from its start, as far as its value.
+    fn progress<M>(&mut self, n: &Node<M>, track: RectPx) {
+        let round = half(track);
+        if self.theme.scheme() == Scheme::HighContrast {
+            self.canvas
+                .ring(track, round, 1, self.theme.stroke(Tone::Border, true));
+        } else {
+            self.canvas
+                .rrect(track, round, self.theme.color(Tone::Hover));
+        }
+        let w = px_width((n.value.clamp(0.0, 1.0) * f(track.x1 - track.x0)).round());
+        if w > 0 {
+            let bar = RectPx {
+                x1: track.x0 + w,
+                ..track
+            };
+            let accent = self.theme.fill(Tone::Accent, true);
+            self.canvas.rrect(bar, round, self.theme.color(accent));
+        }
+    }
+
+    /// Where a check box's box (or a radio button's circle) goes: a line high, centered
+    /// vertically in the content box. Returns the content box, the line and the box.
+    fn mark_box<M>(&mut self, n: &Node<M>) -> (Rect, f32, Rect) {
         let content = n.rect.inset(n.style.padding);
         let line = self.text.measure("", &n.text_style, f32::INFINITY).height;
         let b = Rect::new(
@@ -309,6 +375,60 @@ impl Painter<'_, '_> {
             line,
             line,
         );
+        (content, line, b)
+    }
+
+    /// A check box's or radio button's label, half a line after its box.
+    fn mark_label<M>(&mut self, n: &Node<M>, content: Rect, line: f32, ink: Color) {
+        if !n.text.is_empty() {
+            let label = Rect::new(
+                content.x + line * 1.5,
+                content.y,
+                (content.w - line * 1.5).max(0.0),
+                content.h,
+            );
+            self.text(n, label, false, ink);
+        }
+    }
+
+    /// The circle, a line high, then the label half a line after it, as for a check box: picked,
+    /// the accent with a dot in it; else a ring.
+    fn radio<M>(&mut self, n: &Node<M>, interactive: bool, ink: Color) {
+        let (content, line, b) = self.mark_box(n);
+        let r = b.snap(self.scale);
+        let round = half(r);
+        let on = n.selected == Some(true);
+        let fill = match (on, n.enabled) {
+            (true, true) => Tone::Accent,
+            (true, false) => Tone::TextSecondary,
+            (false, _) => Tone::Surface,
+        };
+        self.canvas.rrect(r, round, self.theme.color(fill));
+        if !on {
+            let edge = if n.enabled {
+                Tone::TextSecondary
+            } else {
+                Tone::Border
+            };
+            self.canvas
+                .ring(r, round, 1, self.theme.stroke(edge, n.enabled));
+        }
+        if interactive {
+            self.state_layer(n, r, round);
+            self.outline(n, r, round, fill);
+        }
+        if on {
+            let dot = Rect::new(b.x + line * 0.3, b.y + line * 0.3, line * 0.4, line * 0.4)
+                .snap(self.scale);
+            self.canvas
+                .rrect(dot, half(dot), self.theme.ink(Tone::OnAccent, fill));
+        }
+        self.mark_label(n, content, line, ink);
+    }
+
+    /// The box, a line high, then the label half a line after it (the size layout measured).
+    fn check_box<M>(&mut self, n: &Node<M>, interactive: bool, ink: Color) {
+        let (content, line, b) = self.mark_box(n);
         let r = b.snap(self.scale);
         let corner = radius::SMALL * self.scale;
         let on = n.check != Tri::Off;
@@ -352,15 +472,7 @@ impl Painter<'_, '_> {
             }
             Tri::Off => {}
         }
-        if !n.text.is_empty() {
-            let label = Rect::new(
-                content.x + line * 1.5,
-                content.y,
-                (content.w - line * 1.5).max(0.0),
-                content.h,
-            );
-            self.text(n, label, false, ink);
-        }
+        self.mark_label(n, content, line, ink);
     }
 }
 
@@ -397,6 +509,20 @@ fn fraction(a: u8, t: f32) -> u8 {
 )]
 fn px_width(w: f32) -> i32 {
     w as i32
+}
+
+/// A pixel count as a float.
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "canvas sizes are far below 2^24"
+)]
+fn f(v: i32) -> f32 {
+    v as f32
+}
+
+/// Half of `r`'s shorter side: the radius that rounds it into a circle or a pill.
+fn half(r: RectPx) -> f32 {
+    f((r.x1 - r.x0).min(r.y1 - r.y0).max(0)) / 2.0
 }
 
 #[cfg(test)]
@@ -574,6 +700,145 @@ mod tests {
         assert_eq!(
             focused.at(r.x0, i32::midpoint(r.y0, r.y1)),
             opaque(sys.highlight)
+        );
+    }
+
+    /// A danger hold button 0..200 × 0..20, a progress bar 0..200 × 20..26 at 41 %, and a picked
+    /// radio button from y 26, its circle 16 px across.
+    fn controls() -> Ui<u8> {
+        let mut ui = Ui::new(Size { w: 200.0, h: 60.0 }, 1.0, Motion::default());
+        let high = |h| Style {
+            height: crate::Dim::Fixed(h),
+            ..Style::default()
+        };
+        ui.build(|cx| {
+            cx.add(
+                Element::button(Key(1), "Hold", 1)
+                    .hold(|| 2)
+                    .look(Look::DANGER)
+                    .style(high(20.0)),
+            );
+            cx.add(Element::progress(Key(2), 0.41).style(high(6.0)));
+            cx.add(Element::radio(Key(3), "On", true, 3));
+        });
+        ui.layout(&mut FakeText);
+        ui
+    }
+
+    fn opaque(c: crate::Color) -> u32 {
+        0xFF00_0000 | u32::from(c.r) << 16 | u32::from(c.g) << 8 | u32::from(c.b)
+    }
+
+    #[test]
+    fn a_held_button_fills_from_its_start_and_a_bar_to_its_value() {
+        let t = Theme::LIGHT;
+        let mut ui = controls();
+        let f = paint(&ui, &t);
+        // At rest, the danger fill (above the text, clear of the corners).
+        assert_eq!(
+            (f.at(50, 2), f.at(150, 2)),
+            (argb(&t, Tone::Danger), argb(&t, Tone::Danger))
+        );
+        // The bar: the accent to 41 % of 200 px, then the track.
+        assert_eq!(f.at(40, 23), argb(&t, Tone::Accent));
+        // Clear of its rounded end, which ends at 82.
+        assert_eq!(f.at(78, 23), argb(&t, Tone::Accent));
+        // The track: the hover tint over the window, within the canvas's rounding of it.
+        let track = opaque(t.color(Tone::Hover).over(t.color(Tone::App)));
+        let near = |p: u32| {
+            (0..3).all(|k| ((p >> (8 * k)) & 0xFF).abs_diff((track >> (8 * k)) & 0xFF) <= 1)
+        };
+        assert!(
+            near(f.at(83, 23)) && f.at(150, 23) == f.at(83, 23),
+            "{:x}",
+            f.at(83, 23)
+        );
+        // The radio button: an accent circle with an on-accent dot.
+        assert_eq!(
+            (f.at(3, 34), f.at(8, 34)),
+            (argb(&t, Tone::Accent), argb(&t, Tone::OnAccent))
+        );
+
+        // Pressed: all of it still to go, in the permanent fill; then the fill grows back.
+        let mut out = Vec::new();
+        ui.dispatch(
+            Input::PointerDown(crate::Point { x: 100.0, y: 10.0 }),
+            &mut out,
+        );
+        let f = paint(&ui, &t);
+        assert_eq!(
+            (f.at(50, 2), f.at(150, 2)),
+            (argb(&t, Tone::PermanentFill), argb(&t, Tone::PermanentFill))
+        );
+        ui.tick(0, &mut out);
+        ui.tick(750, &mut out);
+        let f = paint(&ui, &t);
+        assert_eq!(
+            (f.at(99, 2), f.at(100, 2)),
+            (argb(&t, Tone::Danger), argb(&t, Tone::PermanentFill))
+        );
+        ui.tick(1_500, &mut out);
+        let f = paint(&ui, &t);
+        assert_eq!(
+            (out.as_slice(), f.at(150, 2)),
+            (&[1_u8] as &[u8], argb(&t, Tone::Danger))
+        );
+        // Let go, and the pointer gone (so no hover layer): as it was.
+        ui.dispatch(
+            Input::PointerUp(crate::Point { x: 100.0, y: 10.0 }),
+            &mut out,
+        );
+        ui.dispatch(Input::PointerLeave, &mut out);
+        assert_eq!(paint(&ui, &t).at(150, 2), argb(&t, Tone::Danger));
+    }
+
+    /// High contrast mid-hold: still only the system's colors.
+    #[test]
+    fn controls_in_high_contrast_paint_only_system_colors() {
+        use crate::{Color, SysColors};
+        let sys = SysColors {
+            window: Color::hex(0x00_0001),
+            window_text: Color::hex(0x00_0002),
+            highlight: Color::hex(0x00_0003),
+            highlight_text: Color::hex(0x00_0004),
+            hot_light: Color::hex(0x00_0005),
+            gray_text: Color::hex(0x00_0006),
+            btn_face: Color::hex(0x00_0007),
+            btn_text: Color::hex(0x00_0008),
+        };
+        let t = Theme::high_contrast(sys);
+        let allowed = [
+            sys.window,
+            sys.window_text,
+            sys.highlight,
+            sys.highlight_text,
+            sys.hot_light,
+            sys.gray_text,
+            sys.btn_face,
+            sys.btn_text,
+        ]
+        .map(opaque);
+        let mut ui = controls();
+        let mut out = Vec::new();
+        ui.dispatch(
+            Input::PointerDown(crate::Point { x: 100.0, y: 10.0 }),
+            &mut out,
+        );
+        ui.tick(0, &mut out);
+        ui.tick(750, &mut out);
+        let f = paint(&ui, &t);
+        assert!(
+            f.px.iter().all(|p| allowed.contains(p)),
+            "a color that isn't a system color"
+        );
+        // The elapsed part is Highlight, the rest Window; the bar's track is a WindowText ring.
+        assert_eq!(
+            (f.at(50, 2), f.at(150, 2)),
+            (opaque(sys.highlight), opaque(sys.window))
+        );
+        assert_eq!(
+            (f.at(150, 20), f.at(150, 23)),
+            (opaque(sys.window_text), opaque(sys.window))
         );
     }
 

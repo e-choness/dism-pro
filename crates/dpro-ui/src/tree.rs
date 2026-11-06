@@ -6,7 +6,7 @@ use dpro_app::table::Tri;
 use crate::{
     field::TextEdit,
     geom::{Rect, Size},
-    style::Style,
+    style::{Axis, Style},
     text::TextStyle,
     theme::{Tone, tokens::radius},
 };
@@ -63,12 +63,35 @@ pub enum Role {
     CheckBox,
     /// One line of editable text (`field.rs`); the view owns the value.
     Field,
+    /// One of a [tab list](Group::Tabs)'s tabs: picked or not, and its message picks it.
+    Tab,
+    /// One of a [radio group](Group::Radios)'s options: picked or not, and its message picks it.
+    Radio,
+    /// How far a job has come, as a bar: a fraction from 0 to 1. Not interactive.
+    Progress,
 }
 
 impl Role {
     pub(crate) fn interactive(self) -> bool {
-        matches!(self, Self::Button | Self::CheckBox | Self::Field)
+        matches!(
+            self,
+            Self::Button | Self::CheckBox | Self::Field | Self::Tab | Self::Radio
+        )
     }
+}
+
+/// A container whose items the arrow keys move through (TD-0009 §4.3): the whole group is one Tab
+/// stop, which lands on its picked item (or its first), and Home and End go to its ends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Group {
+    /// [Tabs](Element::tab), in a row: Left and Right move focus and pick, wrapping.
+    Tabs,
+    /// [Radio buttons](Element::radio): every arrow key moves focus and picks, wrapping, as
+    /// Windows' radio buttons do.
+    Radios,
+    /// Items the arrows move focus through along the container's axis, without picking or
+    /// wrapping (a navigation rail): Enter or Space opens one.
+    List,
 }
 
 /// How a node is painted, in theme tokens only (doc 05 §4). Changing it repaints the node; it never
@@ -90,6 +113,63 @@ impl Look {
         fill: None,
         border: None,
         radius: Radius::None,
+        ink: Tone::Text,
+    };
+
+    /// The primary button (doc 05; artboard 06): the accent, text on it. Give it semibold text.
+    pub const PRIMARY: Self = Self {
+        fill: Some(Tone::Accent),
+        border: None,
+        radius: Radius::Control,
+        ink: Tone::OnAccent,
+    };
+
+    /// A secondary button: the quiet control layer (`layer.control` on glass) in a hairline.
+    pub const SECONDARY: Self = Self {
+        fill: Some(Tone::Subtle),
+        border: Some(Tone::Border),
+        radius: Radius::Control,
+        ink: Tone::Text,
+    };
+
+    /// A danger button, as Hold to apply is: the danger color, text on it. Give it semibold text.
+    pub const DANGER: Self = Self {
+        fill: Some(Tone::Danger),
+        border: None,
+        radius: Radius::Control,
+        ink: Tone::OnAccent,
+    };
+
+    /// A button that is only its text until hovered or pressed (caption buttons, icon buttons).
+    pub const SUBTLE: Self = Self {
+        fill: None,
+        border: None,
+        radius: Radius::Control,
+        ink: Tone::Text,
+    };
+
+    /// Artboard 08's segmented tab list: the tabs on a quiet track (ink at 6 %).
+    pub const TABS: Self = Self {
+        fill: Some(Tone::Hover),
+        border: None,
+        radius: Radius::Control,
+        ink: Tone::Text,
+    };
+
+    /// A tab not picked: secondary text on the track.
+    pub const TAB: Self = Self {
+        fill: None,
+        border: None,
+        radius: Radius::Control,
+        ink: Tone::TextSecondary,
+    };
+
+    /// The picked tab: a surface in a hairline (the canvas's raised segment), in primary text.
+    /// Give it semibold text.
+    pub const TAB_SELECTED: Self = Self {
+        fill: Some(Tone::Surface),
+        border: Some(Tone::Border),
+        radius: Radius::Control,
         ink: Tone::Text,
     };
 }
@@ -141,13 +221,41 @@ pub struct Element<'s, M> {
     pub(crate) check: Tri,
     pub(crate) enabled: bool,
     pub(crate) selected: Option<bool>,
-    /// A field's accessible name.
-    pub(crate) label: &'s str,
-    /// What a field shows while it's empty.
-    pub(crate) placeholder: &'s str,
-    /// A field's edits as the view's messages; `None` for a read-only field.
-    pub(crate) on_edit: Option<fn(TextEdit) -> M>,
+    /// What only its role describes.
+    pub(crate) extra: Extra<'s, M>,
 }
+
+/// What only some roles describe. One at a time, so an [`Element`] carries one field for all of
+/// them, and building a node of any other role skips them all.
+#[derive(Debug)]
+pub(crate) enum Extra<'s, M> {
+    None,
+    /// A field's accessible name, what it shows while it's empty, and its edits as the view's
+    /// messages (`None` for a read-only field).
+    Field {
+        label: &'s str,
+        placeholder: &'s str,
+        on_edit: Option<fn(TextEdit) -> M>,
+    },
+    /// A container whose items the arrow keys move through.
+    Group(Group),
+    /// A progress bar's fraction, 0 to 1.
+    Progress(f32),
+    /// What UI Automation's Invoke sends for a [hold](Element::hold) button, instead of its
+    /// message.
+    Hold(fn() -> M),
+}
+
+// Copy whatever `M` is: it holds no `M`, only functions that make one, so building a node drops
+// nothing of it (measured on the shell fixture: with an `M` here, rebuilding a view in which
+// nothing changed cost 7 % more).
+impl<M> Clone for Extra<'_, M> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<M> Copy for Extra<'_, M> {}
 
 impl<'s, M> Element<'s, M> {
     fn new(key: Key, role: Role, text: &'s str, msg: Option<M>) -> Self {
@@ -162,9 +270,7 @@ impl<'s, M> Element<'s, M> {
             check: Tri::Off,
             enabled: true,
             selected: None,
-            label: "",
-            placeholder: "",
-            on_edit: None,
+            extra: Extra::None,
         }
     }
 
@@ -172,6 +278,92 @@ impl<'s, M> Element<'s, M> {
     #[must_use]
     pub fn stack(key: Key) -> Self {
         Self::new(key, Role::Container, "", None)
+    }
+
+    /// A container for [tabs](Self::tab), in a row: one Tab stop, Left and Right pick
+    /// ([`Group::Tabs`]). Name it.
+    #[must_use]
+    pub fn tabs(key: Key) -> Self {
+        Self {
+            extra: Extra::Group(Group::Tabs),
+            style: Style {
+                axis: Axis::Row,
+                ..Style::default()
+            },
+            ..Self::stack(key)
+        }
+    }
+
+    /// A container for [radio buttons](Self::radio): one Tab stop, the arrow keys pick
+    /// ([`Group::Radios`]). Name it.
+    #[must_use]
+    pub fn radios(key: Key) -> Self {
+        Self {
+            extra: Extra::Group(Group::Radios),
+            ..Self::stack(key)
+        }
+    }
+
+    /// A container for [selectable](Self::selected) buttons, a navigation rail's pages: one Tab
+    /// stop, the arrow keys move focus along its axis, Enter or Space opens ([`Group::List`]).
+    /// Name it.
+    #[must_use]
+    pub fn list(key: Key) -> Self {
+        Self {
+            extra: Extra::Group(Group::List),
+            ..Self::stack(key)
+        }
+    }
+
+    /// A tab in a [tab list](Self::tabs), `selected` or not; `msg` picks it, from a click,
+    /// Enter, Space, the arrow keys or UI Automation's Select. The view chooses its look
+    /// ([`Look::TAB`], [`Look::TAB_SELECTED`]).
+    #[must_use]
+    pub fn tab(key: Key, label: &'s str, selected: bool, msg: M) -> Self {
+        Self {
+            selected: Some(selected),
+            look: Look::TAB,
+            ..Self::new(key, Role::Tab, label, Some(msg))
+        }
+    }
+
+    /// A radio button in a [radio group](Self::radios), `selected` or not; `msg` picks it, as
+    /// for a [tab](Self::tab). Drawn as a circle a line high, then its label.
+    #[must_use]
+    pub fn radio(key: Key, label: &'s str, selected: bool, msg: M) -> Self {
+        Self {
+            selected: Some(selected),
+            ..Self::new(key, Role::Radio, label, Some(msg))
+        }
+    }
+
+    /// A progress bar, `fraction` (0 to 1, clamped) of the way: a pill-shaped track as wide and
+    /// high as its style makes it, filled from the start in the accent. Name it; UI Automation
+    /// reads it as a range value from 0 to 100.
+    #[must_use]
+    pub fn progress(key: Key, fraction: f32) -> Self {
+        Self {
+            extra: Extra::Progress(if fraction.is_nan() {
+                0.0
+            } else {
+                fraction.clamp(0.0, 1.0)
+            }),
+            ..Self::new(key, Role::Progress, "", None)
+        }
+    }
+
+    /// Makes a button a hold button (TD-0009 §5.2, doc 05 §4): its message is sent only after a
+    /// continuous press of [`motion::HOLD_MS`](crate::tokens::motion::HOLD_MS), by the pointer
+    /// held on it, or Enter or Space held while it has focus, timed on the frame clock. Letting
+    /// go earlier sends nothing. While held, it fills from its start toward its end. UI
+    /// Automation's Invoke, which can't hold, sends `invoke()` instead: the typed confirmation
+    /// (§8). For danger buttons ([`Look::DANGER`]); other roles ignore it.
+    #[must_use]
+    pub fn hold(mut self, invoke: fn() -> M) -> Self {
+        if self.role == Role::Button {
+            self.extra = Extra::Hold(invoke);
+        }
+        self
     }
 
     #[must_use]
@@ -207,7 +399,11 @@ impl<'s, M> Element<'s, M> {
     #[must_use]
     pub fn field(key: Key, value: &'s str, on_edit: fn(TextEdit) -> M) -> Self {
         Self {
-            on_edit: Some(on_edit),
+            extra: Extra::Field {
+                label: "",
+                placeholder: "",
+                on_edit: Some(on_edit),
+            },
             // A text box: a surface inside a border.
             look: Look {
                 fill: Some(Tone::Surface),
@@ -221,20 +417,20 @@ impl<'s, M> Element<'s, M> {
 
     /// A field whose text can be selected and copied, but not changed.
     #[must_use]
-    pub fn read_only(self) -> Self {
-        Self {
-            on_edit: None,
-            ..self
+    pub fn read_only(mut self) -> Self {
+        if let Extra::Field { on_edit, .. } = &mut self.extra {
+            *on_edit = None;
         }
+        self
     }
 
     /// What a field shows, in secondary text, while it's empty; UI Automation's help text then.
     #[must_use]
-    pub fn placeholder(self, placeholder: &'s str) -> Self {
-        Self {
-            placeholder,
-            ..self
+    pub fn placeholder(mut self, text: &'s str) -> Self {
+        if let Extra::Field { placeholder, .. } = &mut self.extra {
+            *placeholder = text;
         }
+        self
     }
 
     /// The message Enter sends while the field has focus (a palette runs its command).
@@ -280,15 +476,13 @@ impl<'s, M> Element<'s, M> {
     /// The accessible name of a container, which draws no text ("Pages" for a rail, a table's
     /// title), or of a field, whose text is its value. Labels and buttons are named by their text.
     #[must_use]
-    pub fn name(self, name: &'s str) -> Self {
-        if self.role == Role::Field {
-            Self {
-                label: name,
-                ..self
-            }
+    pub fn name(mut self, name: &'s str) -> Self {
+        if let Extra::Field { label, .. } = &mut self.extra {
+            *label = name;
         } else {
-            Self { text: name, ..self }
+            self.text = name;
         }
+        self
     }
 }
 
@@ -317,6 +511,14 @@ pub(crate) struct Node<M> {
     pub(crate) selected: Option<bool>,
     /// A field's slot in the Ui's field table; [`NIL`] for other roles.
     pub(crate) field: u32,
+    /// The arrow keys move through this container's items.
+    pub(crate) group: Option<Group>,
+    /// A progress bar's fraction, 0 to 1.
+    pub(crate) value: f32,
+    /// A hold button: its Invoke message is in the Ui's hold table.
+    pub(crate) hold: bool,
+    /// It has a group, a progress value or a hold, which an element without them clears.
+    pub(crate) special: bool,
 
     pub(crate) parent: u32,
     pub(crate) first: u32,
@@ -364,6 +566,10 @@ impl<M> Node<M> {
             enabled: true,
             selected: None,
             field: NIL,
+            group: None,
+            value: 0.0,
+            hold: false,
+            special: false,
             parent: NIL,
             first: NIL,
             last: NIL,
@@ -437,13 +643,28 @@ mod tests {
     }
 
     #[test]
-    fn only_enabled_buttons_checkboxes_and_fields_are_interactive() {
+    fn only_enabled_controls_are_interactive() {
         let mut n: Node<()> = Node::new(Key(1), Role::Button);
         assert!(n.interactive());
         n.enabled = false;
         assert!(!n.interactive());
-        assert!(!Node::<()>::new(Key(1), Role::Label).interactive());
-        assert!(Node::<()>::new(Key(1), Role::CheckBox).interactive());
-        assert!(Node::<()>::new(Key(1), Role::Field).interactive());
+        for role in [Role::Container, Role::Label, Role::Progress] {
+            assert!(!Node::<()>::new(Key(1), role).interactive(), "{role:?}");
+        }
+        for role in [Role::CheckBox, Role::Field, Role::Tab, Role::Radio] {
+            assert!(Node::<()>::new(Key(1), role).interactive(), "{role:?}");
+        }
+    }
+
+    #[test]
+    fn progress_is_a_clamped_fraction() {
+        let value = |f: f32| match Element::<()>::progress(Key(1), f).extra {
+            Extra::Progress(v) => v,
+            _ => f32::NAN,
+        };
+        assert_eq!(
+            [value(-1.0), value(0.41), value(2.0), value(f32::NAN)],
+            [0.0, 0.41, 1.0, 0.0]
+        );
     }
 }
