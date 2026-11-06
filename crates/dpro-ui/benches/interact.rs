@@ -1,4 +1,4 @@
-//! TD-0009 §7 U2 and U3 on a shell page of 387 to 488 nodes (`fixtures/shell.rs`):
+//! TD-0009 §7 U2 and U3 on a shell page of 390 to 476 nodes (`fixtures/shell.rs`):
 //! - `interact`, U2: UI-thread work per input event without raster: dispatch → update → view →
 //!   reconcile → layout → damage. Budget: p99 ≤ 2 ms per event (doc 04 §5).
 //! - `paint`, U3 without presenting: the same events with the damage painted into a 1000 × 700
@@ -20,9 +20,10 @@ use criterion::{
     measurement::WallTime,
 };
 use dpro_ui::{Input, KeyCode, Mods, Point, Size, Theme};
-use shell::{Run, START, Shell, Step, key};
+use shell::{Msg, Run, START, Shell, Step, click, key};
 
-/// The session, an unchanged event, a filter keystroke and a resize, on `run`.
+/// The session, an unchanged event, a filter keystroke, a resize, a tab picked with the arrow
+/// keys and a progress report, on `run`.
 fn events(g: &mut BenchmarkGroup<'_, WallTime>, run: &mut Run) {
     let steps = run.session();
 
@@ -65,6 +66,34 @@ fn events(g: &mut BenchmarkGroup<'_, WallTime>, run: &mut Run) {
             run.step(narrow.clone());
         });
     });
+
+    // The standard controls (§11 step 4). Right then Left on the focused tab: each picks a tab,
+    // and the table refilters.
+    for s in click(run.center(&Run::tab(0))) {
+        run.step(s);
+    }
+    run.settle();
+    let (right, left) = (
+        key(KeyCode::Right, true, Mods::default()),
+        key(KeyCode::Left, true, Mods::default()),
+    );
+    g.bench_function("tab_arrow", |b| {
+        b.iter(|| {
+            run.step(right.clone());
+            run.step(left.clone());
+        });
+    });
+    // The apply job's progress, reported to the open drawer.
+    run.step(Step::Update(Msg::Drawer));
+    run.settle();
+    g.bench_function("progress_report", |b| {
+        b.iter(|| {
+            run.step(Step::Update(Msg::Progress(41)));
+            run.step(Step::Update(Msg::Progress(42)));
+        });
+    });
+    run.step(Step::Update(Msg::Drawer));
+    run.settle();
 }
 
 fn interact(c: &mut Criterion) {

@@ -2,11 +2,12 @@
 //! fixture with a client listening. Advisory timings (C1); `ir.rs` gates the same scenarios'
 //! instruction counts.
 //!
-//! - `full_tree`: the whole tree, for the client's first request (387 nodes).
+//! - `full_tree`: the whole tree, for the client's first request.
 //! - `update_*`: one frame's incremental update, after the frame that made the change:
 //!   - `unchanged`: an event that changes nothing a client sees;
 //!   - `row_selection`: another row selected (two rows and nothing else);
-//!   - `page_away` and `page_back`: the rail switching pages, which replaces the content.
+//!   - `page_away` and `page_back`: the rail switching pages, which replaces the content;
+//!   - `progress`: the apply job's progress reported to the open drawer (one range value).
 //!
 //! Budget: 0.5 ms per frame for the update (U12). Run: `docker compose run --rm bench -- -p
 //! dpro-ui --bench a11y`.
@@ -71,6 +72,13 @@ fn a11y(c: &mut Criterion) {
         (
             "update_page_back",
             after(Some(away), Step::Update(Msg::Page(0))),
+        ),
+        (
+            "update_progress",
+            after(
+                Some(Step::Update(Msg::Drawer)),
+                Step::Update(Msg::Progress(41)),
+            ),
         ),
     ];
     for (name, setup) in cases {

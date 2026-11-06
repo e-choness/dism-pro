@@ -1,10 +1,10 @@
 //! A synthetic shell page for TD-0009 §7 U2, U3, U8 and U12, and S-01's scripted session.
 //!
-//! 387 live nodes, or 488 with the drawer open: a header, a rail of 12 pages, a toolbar with 4
-//! category toggles, a table of 40 rows × 8 cells over 1,000 data rows, and a drawer of 25 rows. §7
-//! estimates a real page at about 600, so per-event costs there are about half again as high. The
-//! other pages show 8 summary cards instead of the toolbar and table, so switching pages replaces
-//! the content.
+//! A header, a rail of 12 pages, a toolbar (the filter, two tabs and 4 category check boxes), and
+//! a table of 40 rows × 8 cells over 1,000 data rows; the drawer adds 20 rows, a progress bar and
+//! its actions, Hold to apply among them. §7 estimates a real page at about 600 nodes. Pages 1 to
+//! 10 show 8 summary cards instead of the toolbar and table, so switching pages replaces the
+//! content, and Settings (the last) shows a radio group.
 //!
 //! Shared by `interact.rs`, `a11y.rs`, `ir.rs` and the tests that replay the session.
 
@@ -22,9 +22,11 @@ use dpro_ui::{
 };
 
 const RAIL: u8 = 12;
+/// The last page: a radio group instead of summary cards.
+pub(crate) const SETTINGS: u8 = RAIL - 1;
 const ROWS: usize = 40;
 const CELLS: usize = 8;
-const DRAWER_ROWS: u64 = 25;
+pub(crate) const DRAWER_ROWS: u64 = 20;
 const CATEGORIES: u8 = 4;
 const DATA: usize = 1_000;
 /// The text typed into the filter: 10 keystrokes.
@@ -33,6 +35,12 @@ const PAGES: [&str; RAIL as usize] = [
     "Overview", "Clean", "Repair", "Packages", "Features", "Drivers", "Updates", "Apps", "Startup",
     "Services", "Images", "Settings",
 ];
+/// The table's tabs: every fourth data row is a Store app (Tailspin's), the rest desktop programs.
+const TABS: [&str; 2] = ["Desktop programs", "Store apps"];
+/// Settings' radio group.
+const THEMES: [&str; 3] = ["System", "Light", "Dark"];
+/// One frame at 60 Hz, rounded down to whole milliseconds.
+pub(crate) const FRAME_MS: u64 = 16;
 
 pub(crate) const START: Size = Size {
     w: 1000.0,
@@ -61,6 +69,16 @@ pub(crate) enum Msg {
     Filter(TextEdit),
     /// Clears the filter, as Esc in the field would (the app's accelerator, not the field's).
     ClearFilter,
+    /// A table tab picked.
+    Tab(u8),
+    /// Settings' theme picked.
+    Theme(u8),
+    /// The apply job's progress, in percent, as the engine reports it.
+    Progress(u8),
+    /// Held to the end: the changes apply.
+    Apply,
+    /// Hold to apply invoked by assistive technology: the typed confirmation opens instead.
+    ConfirmApply,
 }
 
 /// The page's view-model.
@@ -70,9 +88,17 @@ pub(crate) struct Shell {
     categories: [bool; CATEGORIES as usize],
     drawer: bool,
     filter: String,
+    tab: u8,
+    theme: u8,
+    progress: u8,
+    confirming: bool,
+    applied: bool,
+    /// How many times Hold to apply applied.
+    applies: u32,
     /// Column 0 is the name the filter searches.
     cells: Vec<[String; CELLS]>,
-    /// Data rows matching the filter, in order; the table shows the first [`ROWS`].
+    /// Data rows on the tab and matching the filter, in order; the table shows the first
+    /// [`ROWS`].
     visible: Vec<u32>,
 }
 
@@ -101,6 +127,12 @@ impl Shell {
             drawer: false,
             // Room for the typed text, so typing doesn't allocate (U8).
             filter: String::with_capacity(64),
+            tab: 0,
+            theme: 0,
+            progress: 0,
+            confirming: false,
+            applied: false,
+            applies: 0,
             cells,
             visible: Vec::with_capacity(DATA),
         };
@@ -116,7 +148,10 @@ impl Shell {
                     *on = !*on;
                 }
             }
-            Msg::Drawer => self.drawer = !self.drawer,
+            Msg::Drawer => {
+                self.drawer = !self.drawer;
+                self.confirming = false;
+            }
             Msg::Row(r) => self.selected = Some(r),
             Msg::Filter(edit) => {
                 if edit.apply(&mut self.filter) {
@@ -127,16 +162,36 @@ impl Shell {
                 self.filter.clear();
                 self.refilter();
             }
+            Msg::Tab(t) => {
+                if self.tab != t {
+                    self.tab = t;
+                    self.refilter();
+                }
+            }
+            Msg::Theme(t) => self.theme = t,
+            Msg::Progress(p) => self.progress = p.min(100),
+            Msg::Apply => {
+                self.applies += 1;
+                self.applied = true;
+                self.confirming = false;
+                self.progress = 100;
+            }
+            Msg::ConfirmApply => self.confirming = true,
         }
+    }
+
+    /// How many times Hold to apply applied.
+    pub(crate) fn applies(&self) -> u32 {
+        self.applies
     }
 
     fn refilter(&mut self) {
         self.visible.clear();
-        let filter = self.filter.as_str();
+        let (filter, store) = (self.filter.as_str(), self.tab == 1);
         self.visible.extend(
             (0u32..)
                 .zip(&self.cells)
-                .filter(|(_, c)| contains_folded(&c[0], filter))
+                .filter(|(i, c)| (i % 4 == 3) == store && contains_folded(&c[0], filter))
                 .map(|(i, _)| i),
         );
     }
@@ -161,6 +216,15 @@ fn row(gap: f32) -> Style {
         axis: Axis::Row,
         gap,
         align: Align::Center,
+        ..Style::default()
+    }
+}
+
+/// A control `height` high, `pad` from its text at each side (doc 05: 30, 36 or 40 px).
+fn sized(height: f32, pad: f32) -> Style {
+    Style {
+        height: Dim::Fixed(height),
+        padding: Insets::xy(pad, 0.0),
         ..Style::default()
     }
 }
@@ -197,6 +261,10 @@ const BODY: TextStyle = TextStyle {
     mono: false,
     wrap: false,
 };
+const STRONG: TextStyle = TextStyle {
+    weight: 600,
+    ..BODY
+};
 const TITLE: TextStyle = TextStyle {
     size: 20.0,
     weight: 600,
@@ -226,10 +294,9 @@ pub(crate) fn view(s: &Shell, cx: &mut Cx<'_, Msg>) {
                     },
                     Msg::Drawer,
                 )
-                .look(Look {
-                    ink: Tone::OnAccent,
-                    ..control(Some(Tone::Accent))
-                }),
+                .style(sized(32.0, 16.0))
+                .text_style(STRONG)
+                .look(Look::PRIMARY),
             );
         },
     );
@@ -241,10 +308,10 @@ pub(crate) fn view(s: &Shell, cx: &mut Cx<'_, Msg>) {
         }),
         |cx| {
             rail(s, cx);
-            if s.page == 0 {
-                content(s, cx);
-            } else {
-                summary(s, cx);
+            match s.page {
+                0 => content(s, cx),
+                SETTINGS => settings(s, cx),
+                _ => summary(s, cx),
             }
             if s.drawer {
                 drawer(s, cx);
@@ -253,9 +320,10 @@ pub(crate) fn view(s: &Shell, cx: &mut Cx<'_, Msg>) {
     );
 }
 
+/// A list: one Tab stop, the arrow keys move through its pages, Enter or Space opens one.
 fn rail(s: &Shell, cx: &mut Cx<'_, Msg>) {
     cx.add_with(
-        Element::stack(Key::name("rail"))
+        Element::list(Key::name("rail"))
             .style(Style {
                 width: Dim::Fixed(200.0),
                 padding: Insets::all(8.0),
@@ -271,11 +339,7 @@ fn rail(s: &Shell, cx: &mut Cx<'_, Msg>) {
             for (p, label) in (0..RAIL).zip(PAGES) {
                 cx.add(
                     Element::button(Key::index(u64::from(p)), label, Msg::Page(p))
-                        .style(Style {
-                            height: Dim::Fixed(36.0),
-                            padding: Insets::xy(12.0, 0.0),
-                            ..Style::default()
-                        })
+                        .style(sized(36.0, 12.0))
                         .look(control((p == s.page).then_some(Tone::Selected)))
                         .selected(p == s.page),
                 );
@@ -284,8 +348,61 @@ fn rail(s: &Shell, cx: &mut Cx<'_, Msg>) {
     );
 }
 
-fn content(s: &Shell, cx: &mut Cx<'_, Msg>) {
+/// The table page's toolbar: the filter, the program types, the selection and the categories.
+fn toolbar(s: &Shell, cx: &mut Cx<'_, Msg>) {
     const NAMES: [&str; CATEGORIES as usize] = ["Apps", "Games", "Tools", "System"];
+    cx.add(
+        Element::field(Key::name("filter"), &s.filter, Msg::Filter)
+            .name("Filter rows")
+            .placeholder("Filter")
+            .style(Style {
+                width: Dim::Fixed(240.0),
+                padding: Insets::xy(8.0, 4.0),
+                ..Style::default()
+            })
+            .look(card(Radius::Control)),
+    );
+    // Artboard 08's segmented tabs: the arrow keys pick, one Tab stop.
+    cx.add_with(
+        Element::tabs(Key::name("tabs"))
+            .name("Program types")
+            .style(Style {
+                padding: Insets::all(3.0),
+                ..row(2.0)
+            })
+            .look(Look::TABS),
+        |cx| {
+            for (t, label) in (0..).zip(TABS) {
+                let on = s.tab == t;
+                cx.add(
+                    Element::tab(Key::index(u64::from(t)), label, on, Msg::Tab(t))
+                        .style(sized(30.0, 12.0))
+                        .text_style(if on { STRONG } else { BODY })
+                        .look(if on { Look::TAB_SELECTED } else { Look::TAB }),
+                );
+            }
+        },
+    );
+    let selection = if s.selected.is_some() {
+        "1 selected"
+    } else {
+        ""
+    };
+    cx.add(Element::text(Key::name("selection"), selection).look(ink(Tone::TextSecondary)));
+    for (c, name) in (0..CATEGORIES).zip(NAMES) {
+        let on = if s.categories[usize::from(c)] {
+            Tri::On
+        } else {
+            Tri::Off
+        };
+        cx.add(
+            Element::toggle(Key::index(u64::from(c)), name, on, Msg::Category(c))
+                .style(sized(32.0, 4.0)),
+        );
+    }
+}
+
+fn content(s: &Shell, cx: &mut Cx<'_, Msg>) {
     cx.add_with(
         Element::stack(Key::name("content")).style(Style {
             grow: 1.0,
@@ -295,38 +412,7 @@ fn content(s: &Shell, cx: &mut Cx<'_, Msg>) {
         }),
         |cx| {
             cx.add_with(Element::stack(Key::name("toolbar")).style(row(8.0)), |cx| {
-                cx.add(
-                    Element::field(Key::name("filter"), &s.filter, Msg::Filter)
-                        .name("Filter rows")
-                        .placeholder("Filter")
-                        .style(Style {
-                            width: Dim::Fixed(240.0),
-                            padding: Insets::xy(8.0, 4.0),
-                            ..Style::default()
-                        })
-                        .look(card(Radius::Control)),
-                );
-                let selection = if s.selected.is_some() {
-                    "1 selected"
-                } else {
-                    ""
-                };
-                cx.add(
-                    Element::text(Key::name("selection"), selection).look(ink(Tone::TextSecondary)),
-                );
-                for (c, name) in (0..CATEGORIES).zip(NAMES) {
-                    let on = if s.categories[usize::from(c)] {
-                        Tri::On
-                    } else {
-                        Tri::Off
-                    };
-                    cx.add(Element::toggle(
-                        Key::index(u64::from(c)),
-                        name,
-                        on,
-                        Msg::Category(c),
-                    ));
-                }
+                toolbar(s, cx);
             });
             cx.add_with(
                 Element::stack(Key::name("table"))
@@ -377,6 +463,9 @@ fn content(s: &Shell, cx: &mut Cx<'_, Msg>) {
     );
 }
 
+/// The Preview drawer: the changes, the apply job's progress, and its actions. Hold to apply is a
+/// danger button: held for `motion.hold` it applies, and UI Automation's Invoke asks for the typed
+/// confirmation instead (TD-0009 §5.2, §8).
 fn drawer(s: &Shell, cx: &mut Cx<'_, Msg>) {
     cx.add_with(
         Element::stack(Key::name("drawer"))
@@ -399,11 +488,47 @@ fn drawer(s: &Shell, cx: &mut Cx<'_, Msg>) {
                     cx.add(Element::text(Key::name("undo"), "Undoable").look(ink(Tone::Ok)));
                 });
             }
+            cx.add(
+                Element::progress(Key::name("progress"), f32::from(s.progress) / 100.0)
+                    .name("Applying")
+                    .style(Style {
+                        height: Dim::Fixed(6.0),
+                        ..Style::default()
+                    }),
+            );
+            let status = if s.applied {
+                "Applied"
+            } else if s.confirming {
+                "Type 20 to confirm"
+            } else {
+                ""
+            };
+            cx.add(Element::text(Key::name("status"), status).look(ink(Tone::TextSecondary)));
+            cx.add_with(
+                Element::stack(Key::name("actions")).style(Style {
+                    justify: Justify::End,
+                    ..row(8.0)
+                }),
+                |cx| {
+                    cx.add(
+                        Element::button(Key::name("cancel"), "Cancel", Msg::Drawer)
+                            .style(sized(36.0, 14.0))
+                            .look(Look::SECONDARY),
+                    );
+                    cx.add(
+                        Element::button(Key::name("apply"), "Hold to apply", Msg::Apply)
+                            .hold(|| Msg::ConfirmApply)
+                            .style(sized(36.0, 16.0))
+                            .text_style(STRONG)
+                            .look(Look::DANGER),
+                    );
+                },
+            );
         },
     );
 }
 
-/// Every page but the first: a heading and 8 summary cards (artboard 02).
+/// Every page but the first and Settings: a heading and 8 summary cards (artboard 02).
 fn summary(s: &Shell, cx: &mut Cx<'_, Msg>) {
     const CARDS: [(&str, &str); 8] = [
         ("Temporary files", "1.2 GB"),
@@ -445,16 +570,48 @@ fn summary(s: &Shell, cx: &mut Cx<'_, Msg>) {
                             Element::text(Key::name("size"), size).look(ink(Tone::TextSecondary)),
                         );
                         cx.add(
-                            Element::button(Key::name("review"), "Review", Msg::Drawer).style(
-                                Style {
-                                    padding: Insets::xy(12.0, 4.0),
-                                    ..Style::default()
-                                },
-                            ),
+                            Element::button(Key::name("review"), "Review", Msg::Drawer)
+                                .style(sized(30.0, 12.0))
+                                .look(Look::SECONDARY),
                         );
                     },
                 );
             }
+        },
+    );
+}
+
+/// Settings › Appearance's theme: a radio group, one Tab stop, the arrow keys pick (§4.5).
+fn settings(s: &Shell, cx: &mut Cx<'_, Msg>) {
+    cx.add_with(
+        Element::stack(Key::name("settings"))
+            .style(Style {
+                grow: 1.0,
+                padding: Insets::all(16.0),
+                align: Align::Start,
+                ..column(8.0)
+            })
+            .name("Settings"),
+        |cx| {
+            cx.add(Element::text(Key::name("heading"), "Appearance").text_style(TITLE));
+            cx.add_with(
+                Element::radios(Key::name("theme"))
+                    .name("Theme")
+                    .style(column(4.0)),
+                |cx| {
+                    for (t, label) in (0..).zip(THEMES) {
+                        cx.add(
+                            Element::radio(
+                                Key::index(u64::from(t)),
+                                label,
+                                s.theme == t,
+                                Msg::Theme(t),
+                            )
+                            .style(sized(32.0, 4.0)),
+                        );
+                    }
+                },
+            );
         },
     );
 }
@@ -468,11 +625,11 @@ pub(crate) enum Step {
     /// Text from the clipboard, pasted into the focused field.
     Paste(&'static str),
     Resize(Size),
-    /// The clock moves on by this many milliseconds: animations advance and the caret blinks, as
-    /// on the platform's frame and caret timers.
+    /// The clock moves on by this many milliseconds: animations and holds advance and the caret
+    /// blinks, as on the platform's frame and caret timers.
     Tick(u64),
-    /// A message straight to the view-model, as from a keyboard accelerator or assistive
-    /// technology.
+    /// A message straight to the view-model, as from a keyboard accelerator, the engine or
+    /// assistive technology.
     Update(Msg),
 }
 
@@ -570,7 +727,8 @@ impl Run {
             Step::Resize(size) => self.ui.set_viewport(size),
             Step::Tick(ms) => {
                 self.now += ms;
-                self.ui.tick(self.now);
+                // A hold held to the end sends its message from here.
+                self.ui.tick(self.now, &mut self.msgs);
             }
             Step::Update(msg) => self.msgs.push(msg),
         }
@@ -581,6 +739,14 @@ impl Run {
         // blinks if it's due, before the frame paints.
         let _ = self.ui.caret_timer(self.now);
         self.frame();
+    }
+
+    /// Ticks 60 Hz frames until the UI stops asking for them: hover fades end, and a hold still
+    /// pressed runs to its end.
+    pub(crate) fn settle(&mut self) {
+        while self.ui.wants_frame() {
+            self.step(Step::Tick(FRAME_MS));
+        }
     }
 
     /// What the platform does for a copy, cut or paste the Ui asked for, with `self.clipboard` as
@@ -658,7 +824,7 @@ impl Run {
     }
 
     /// The center of the node at `path`, from the current layout.
-    fn center(&self, path: &[Key]) -> Point {
+    pub(crate) fn center(&self, path: &[Key]) -> Point {
         self.ui
             .find(path)
             .and_then(|id| self.ui.info(id))
@@ -673,15 +839,73 @@ impl Run {
         Key::name("filter"),
     ];
 
+    /// The drawer's Hold to apply button's path from the root, while the drawer is open.
+    pub(crate) const APPLY: [Key; 4] = [
+        Key::name("body"),
+        Key::name("drawer"),
+        Key::name("actions"),
+        Key::name("apply"),
+    ];
+
+    /// Tab `t`'s path from the root.
+    pub(crate) fn tab(t: u64) -> [Key; 5] {
+        [
+            Key::name("body"),
+            Key::name("content"),
+            Key::name("toolbar"),
+            Key::name("tabs"),
+            Key::index(t),
+        ]
+    }
+
     /// A click at the filter field's center: focus, and the caret where the click was.
     pub(crate) fn focus_filter(&self) -> [Step; 2] {
         click(self.center(&Self::FILTER))
     }
 
+    /// Where Hold to apply is once the drawer opens: measured on a shell of its own, so `self`
+    /// stays as it is.
+    pub(crate) fn apply_button() -> Point {
+        let mut open = Self::with(Shell::new());
+        open.step(Step::Update(Msg::Drawer));
+        open.center(&Self::APPLY)
+    }
+
+    /// The selected tab focused by a click, the hover fade it started over.
+    pub(crate) fn in_tabs(mut self) -> Self {
+        for s in click(self.center(&Self::tab(0))) {
+            self.step(s);
+        }
+        self.settle();
+        self
+    }
+
+    /// The drawer open, nothing animating.
+    pub(crate) fn drawer_open(mut self) -> Self {
+        self.step(Step::Update(Msg::Drawer));
+        self.settle();
+        self
+    }
+
+    /// The drawer open, the pointer resting on Hold to apply, then pressed: two frames into the
+    /// hold, its clock running.
+    pub(crate) fn holding(self) -> Self {
+        let mut run = self.drawer_open();
+        let at = run.center(&Self::APPLY);
+        run.step(Step::Input(Input::PointerMove(at)));
+        run.settle();
+        run.step(Step::Input(Input::PointerDown(at)));
+        run.step(Step::Tick(FRAME_MS));
+        run.step(Step::Tick(FRAME_MS));
+        run
+    }
+
     /// TD-0009 §7's session: a hover sweep over the rail, Tab through the shell, a click into the
-    /// filter, typing 10 characters into it and clearing it with Ctrl+A and Backspace, opening and
-    /// closing the drawer, toggling a category on and off, and a resize from 1000 to 1400 px and
-    /// back. It ends where it started, so it can repeat.
+    /// filter, typing 10 characters into it and clearing it with Ctrl+A and Backspace, opening the
+    /// drawer, pressing Hold to apply for three frames and letting go early, two progress reports,
+    /// closing the drawer, toggling a category on and off, clicking the second tab and going back
+    /// with Left, and a resize from 1000 to 1400 px and back. It ends where it started, so it can
+    /// repeat.
     pub(crate) fn session(&self) -> Vec<Step> {
         let plain = |code, down| key(code, down, Mods::default());
         let body = [Key::name("body")];
@@ -701,6 +925,12 @@ impl Run {
         steps.push(key(KeyCode::Backspace, true, Mods::default()));
         let drawer = self.center(&[Key::name("header"), Key::name("drawer")]);
         steps.extend(click(drawer));
+        let apply = Self::apply_button();
+        steps.push(Step::Input(Input::PointerDown(apply)));
+        steps.extend(std::iter::repeat_n(Step::Tick(FRAME_MS), 3));
+        steps.push(Step::Input(Input::PointerUp(apply)));
+        steps.push(Step::Update(Msg::Progress(41)));
+        steps.push(Step::Update(Msg::Progress(0)));
         steps.extend(click(drawer));
         let category = self.center(&[
             body[0],
@@ -710,6 +940,9 @@ impl Run {
         ]);
         steps.extend(click(category));
         steps.extend(click(category));
+        steps.extend(click(self.center(&Self::tab(1))));
+        steps.push(plain(KeyCode::Left, true));
+        steps.push(plain(KeyCode::Left, false));
         for w in [1080.0, 1160.0, 1240.0, 1320.0, 1400.0, 1000.0] {
             steps.push(Step::Resize(Size { w, h: START.h }));
         }
