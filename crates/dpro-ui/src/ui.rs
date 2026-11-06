@@ -7,6 +7,7 @@
 use crate::{
     a11y::A11y,
     damage::Damage,
+    field::{Caret, ClipboardRequest, Field},
     geom::{Point, Rect, RectPx, Size},
     pool::TextPool,
     tree::{Key, NIL, Node, NodeId, NodeInfo, Role},
@@ -67,6 +68,19 @@ pub struct Ui<M> {
     pub(crate) texts: TextPool,
     /// What the next accessibility update sends.
     pub(crate) a11y: A11y,
+    /// The state of field nodes, by their `field` slot; freed slots keep their buffers.
+    pub(crate) fields: Vec<Field<M>>,
+    pub(crate) free_fields: Vec<u32>,
+    /// Windows' caret settings.
+    pub(crate) caret: Caret,
+    /// The caret is in its on phase (it shows only where a field has focus).
+    pub(crate) caret_on: bool,
+    /// When the caret's blink started: at the first caret timer after it was last used.
+    pub(crate) caret_epoch: Option<u64>,
+    /// The window has keyboard focus.
+    pub(crate) active: bool,
+    /// What the last input asked of the clipboard.
+    pub(crate) clipboard: Option<ClipboardRequest>,
 }
 
 /// The root: index 0, never freed.
@@ -74,7 +88,8 @@ pub(crate) const ROOT: u32 = 0;
 
 impl<M> Ui<M> {
     /// An empty window of `viewport` logical pixels at `scale` physical pixels per logical pixel.
-    /// The whole window is damaged for its first paint.
+    /// The whole window is damaged for its first paint. It's inactive, so a focused field shows
+    /// no caret, until [`set_active`](Self::set_active) says it has keyboard focus.
     #[must_use]
     pub fn new(viewport: Size, scale: f32, motion: Motion) -> Self {
         let mut ui = Self {
@@ -93,6 +108,13 @@ impl<M> Ui<M> {
             anims: Vec::new(),
             texts: TextPool::default(),
             a11y: A11y::new(),
+            fields: Vec::new(),
+            free_fields: Vec::new(),
+            caret: Caret::WINDOWS,
+            caret_on: true,
+            caret_epoch: None,
+            active: false,
+            clipboard: None,
         };
         ui.damage_all();
         ui
@@ -242,14 +264,19 @@ impl<M> Ui<M> {
     /// `text_len` bytes when there is one.
     pub(crate) fn alloc(&mut self, key: Key, role: Role, text_len: usize) -> u32 {
         let text = self.texts.take(text_len);
-        if let Some(i) = self.free.pop() {
+        let i = if let Some(i) = self.free.pop() {
             self.nodes[i as usize].reuse(key, role, text);
-            return i;
+            i
+        } else {
+            let i = u32::try_from(self.nodes.len()).unwrap_or(NIL);
+            let mut node = Node::new(key, role);
+            node.text = text;
+            self.nodes.push(node);
+            i
+        };
+        if role == Role::Field {
+            self.nodes[i as usize].field = self.alloc_field(i);
         }
-        let i = u32::try_from(self.nodes.len()).unwrap_or(NIL);
-        let mut node = Node::new(key, role);
-        node.text = text;
-        self.nodes.push(node);
         i
     }
 
@@ -331,6 +358,10 @@ impl<M> Ui<M> {
             && let Some(k) = self.anims.iter().position(|a| a.index == i)
         {
             self.anims.swap_remove(k);
+        }
+        let field = std::mem::replace(&mut self.nodes[i as usize].field, NIL);
+        if field != NIL {
+            self.release_field(field);
         }
         let n = &mut self.nodes[i as usize];
         n.live = false;

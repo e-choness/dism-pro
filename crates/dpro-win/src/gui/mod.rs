@@ -30,8 +30,14 @@
 //!   with one posted message, and they reach [`Handler::a11y_action`] on the UI thread.
 //! - **Environment.** [`Event::Env`] gives Windows' look-and-motion settings ([`env::Env`]) at
 //!   creation and whenever one of them changes, so the handler re-themes live (TD-0009 §5.2).
+//! - **Text input.** Typed characters come as [`Event::Char`] after their key (`TranslateMessage`
+//!   runs in the loop; an input method's result arrives the same way). The handler reads and
+//!   writes the clipboard's text through [`WindowCx`], asks for a one-shot [`Event::Wake`] to
+//!   blink a caret ([`WindowCx::wake_after`]), and picks the pointer's shape
+//!   ([`Handler::cursor`]).
 
 mod a11y;
+mod clipboard;
 mod compose;
 pub mod env;
 mod lru;
@@ -116,6 +122,9 @@ pub enum Event {
         down: bool,
         mods: Mods,
     },
+    /// A typed character (`WM_CHAR`), after its key; a surrogate pair comes as one character, and
+    /// an unpaired surrogate not at all. Control characters come too (Backspace is U+0008).
+    Char(char),
     /// The client area's size. Sent before the first paint, and the canvas is new and blank each
     /// time, so the handler damages all of it.
     Resize(SizePx),
@@ -132,6 +141,8 @@ pub enum Event {
     Env(env::Env),
     /// The frame timer fired: advance the animations.
     Frame,
+    /// The time [`WindowCx::wake_after`] asked for came.
+    Wake,
     /// The user asked to close the window. It closes when the handler calls [`WindowCx::close`].
     Close,
 }
@@ -151,6 +162,15 @@ impl std::fmt::Debug for Frame<'_> {
     }
 }
 
+/// The pointer's shape over the client area.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Cursor {
+    #[default]
+    Arrow,
+    /// The I-beam, over text that can be selected or edited.
+    IBeam,
+}
+
 /// The application side of a [`Window`]. It must not pump messages (no modal loop) while it
 /// handles an event: an event that arrives meanwhile is dropped.
 pub trait Handler {
@@ -161,6 +181,12 @@ pub trait Handler {
 
     /// Paints what the handler damaged into the canvas; the window presents it after.
     fn paint(&mut self, frame: &mut Frame<'_>);
+
+    /// The pointer's shape where it is, as of the last event: asked on `WM_SETCURSOR` and after
+    /// every pointer move.
+    fn cursor(&self) -> Cursor {
+        Cursor::Arrow
+    }
 
     /// The whole accessibility tree, for a UI Automation client's first request. From then on
     /// the window asks [`a11y_update`](Self::a11y_update) after every event. `None` serves an

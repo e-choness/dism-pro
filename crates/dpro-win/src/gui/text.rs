@@ -17,6 +17,9 @@
 //!   Semilight, Semibold and Bold), regular text is set in Semilight (350), so the metrics stay in
 //!   one family rather than DirectWrite picking the nearest weight.
 //! - **Icons** from Segoe Fluent Icons, else Segoe MDL2 Assets (in base `WinPE`), by code point.
+//! - **Caret stops** are the layout's cluster boundaries (`GetClusterMetrics`), so a caret never
+//!   splits a character from its marks. Left to right, each is the clusters' widths before it;
+//!   a line with a right-to-left run asks the layout where each one is (`HitTestTextPosition`).
 
 use std::{
     cell::OnceCell,
@@ -28,16 +31,17 @@ use std::{
 
 use windows::{
     Win32::Graphics::DirectWrite::{
-        DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
-        DWRITE_FONT_WEIGHT, DWRITE_GLYPH_RUN, DWRITE_GLYPH_RUN_DESCRIPTION,
-        DWRITE_GRID_FIT_MODE_DEFAULT, DWRITE_MATRIX, DWRITE_MEASURING_MODE,
-        DWRITE_MEASURING_MODE_NATURAL, DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC,
-        DWRITE_STRIKETHROUGH, DWRITE_TEXT_ANTIALIAS_MODE_GRAYSCALE, DWRITE_TEXT_METRICS,
-        DWRITE_TEXTURE_ALIASED_1x1, DWRITE_TRIMMING, DWRITE_TRIMMING_GRANULARITY_CHARACTER,
-        DWRITE_UNDERLINE, DWRITE_WORD_WRAPPING_NO_WRAP, DWRITE_WORD_WRAPPING_WRAP,
-        DWriteCreateFactory, IDWriteFactory, IDWriteFactory2, IDWriteFontCollection,
-        IDWriteFontFace, IDWriteInlineObject, IDWritePixelSnapping_Impl, IDWriteTextFormat,
-        IDWriteTextLayout, IDWriteTextRenderer, IDWriteTextRenderer_Impl,
+        DWRITE_CLUSTER_METRICS, DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL,
+        DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT, DWRITE_GLYPH_RUN,
+        DWRITE_GLYPH_RUN_DESCRIPTION, DWRITE_GRID_FIT_MODE_DEFAULT, DWRITE_HIT_TEST_METRICS,
+        DWRITE_MATRIX, DWRITE_MEASURING_MODE, DWRITE_MEASURING_MODE_NATURAL,
+        DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC, DWRITE_STRIKETHROUGH,
+        DWRITE_TEXT_ANTIALIAS_MODE_GRAYSCALE, DWRITE_TEXT_METRICS, DWRITE_TEXTURE_ALIASED_1x1,
+        DWRITE_TRIMMING, DWRITE_TRIMMING_GRANULARITY_CHARACTER, DWRITE_UNDERLINE,
+        DWRITE_WORD_WRAPPING_NO_WRAP, DWRITE_WORD_WRAPPING_WRAP, DWriteCreateFactory,
+        IDWriteFactory, IDWriteFactory2, IDWriteFontCollection, IDWriteFontFace,
+        IDWriteInlineObject, IDWritePixelSnapping_Impl, IDWriteTextFormat, IDWriteTextLayout,
+        IDWriteTextRenderer, IDWriteTextRenderer_Impl,
     },
     core::{BOOL, HSTRING, IUnknown, Interface, Ref, w},
 };
@@ -53,6 +57,9 @@ pub const LAYOUT_CACHE_CAP: usize = 4_096;
 const UNBOUNDED: f32 = 1.0e6;
 /// Slack for widths that went through layout arithmetic.
 const EPSILON: f32 = 1.0e-3;
+/// `DWRITE_CLUSTER_METRICS`' `isRightToLeft` bit, after `canWrapLineAfter`, `isWhitespace`,
+/// `isNewline` and `isSoftHyphen`.
+const RIGHT_TO_LEFT: u16 = 1 << 4;
 
 /// How a run of text is set, in logical pixels.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -100,6 +107,8 @@ pub struct Text {
     faces: HashMap<usize, IDWriteFontFace>,
     /// The icon font's face, looked up on first use; `None` if neither font is installed.
     icons: OnceCell<Option<IDWriteFontFace>>,
+    /// Caret stops' cluster metrics, kept for the next text.
+    clusters: Vec<DWRITE_CLUSTER_METRICS>,
 }
 
 impl std::fmt::Debug for Text {
@@ -296,6 +305,7 @@ impl Text {
             glyphs: Lru::new(GLYPH_CACHE_CAP),
             faces: HashMap::new(),
             icons: OnceCell::new(),
+            clusters: Vec::new(),
         })
     }
 
@@ -365,6 +375,65 @@ impl Text {
                 rect.y,
             )
         };
+    }
+
+    /// Calls `stop(index, x)` for each caret stop of `text` set on one line in `style`, untrimmed,
+    /// in logical order: where each cluster starts, then the end. `index` is a byte offset into
+    /// `text`, and `x` in logical pixels from the line's start. If the layout fails, the stops are
+    /// the start and the end, at 0.
+    pub fn caret_stops(&mut self, text: &str, style: &Style, mut stop: impl FnMut(u32, f32)) {
+        let end = u32::try_from(text.len()).unwrap_or(u32::MAX);
+        let style = Style {
+            wrap: false,
+            ..*style
+        };
+        // Uncached: a field's text is new at every keystroke, and its stops are kept by the caller.
+        let laid = (!text.is_empty())
+            .then(|| create_layout(&mut self.formats, text, style, UNBOUNDED))
+            .flatten();
+        let units = text.encode_utf16().count();
+        self.clusters.clear();
+        self.clusters
+            .resize(units, DWRITE_CLUSTER_METRICS::default());
+        let mut count = 0_u32;
+        // SAFETY: a live layout; the buffer holds a cluster per code unit, the most there can be.
+        let ok = laid.as_ref().is_some_and(|l| unsafe {
+            l.layout
+                .GetClusterMetrics(Some(self.clusters.as_mut_slice()), &raw mut count)
+                .is_ok()
+        });
+        let (Some(laid), true) = (laid, ok) else {
+            stop(0, 0.0);
+            if end > 0 {
+                stop(end, 0.0);
+            }
+            return;
+        };
+        self.clusters.truncate(usize::try_from(count).unwrap_or(0));
+        let rtl = self
+            .clusters
+            .iter()
+            .any(|c| c._bitfield & RIGHT_TO_LEFT != 0);
+        let at = |unit: usize, trailing: bool| hit_x(&laid.layout, unit, trailing);
+        let mut chars = text.chars();
+        let (mut unit, mut byte, mut x, mut last) = (0_usize, 0_usize, 0.0_f32, 0_usize);
+        for c in &self.clusters {
+            stop(
+                u32::try_from(byte).unwrap_or(u32::MAX),
+                if rtl { at(unit, false) } else { x },
+            );
+            last = unit;
+            let next = unit + usize::from(c.length);
+            while unit < next {
+                let Some(ch) = chars.next() else {
+                    break;
+                };
+                unit += ch.len_utf16();
+                byte += ch.len_utf8();
+            }
+            x += c.width;
+        }
+        stop(end, if rtl { at(last, true) } else { x });
     }
 
     /// Draws the icon font's glyph for `codepoint` centered in `rect`, its em as large as fits.
@@ -488,6 +557,19 @@ fn create_layout(
             trimmed: false,
         },
     })
+}
+
+/// Where a caret at code unit `unit` sits in `layout`, on the cluster's leading edge or (`trailing`)
+/// its trailing one; 0 if the layout can't say.
+fn hit_x(layout: &IDWriteTextLayout, unit: usize, trailing: bool) -> f32 {
+    let (mut x, mut y) = (0.0_f32, 0.0_f32);
+    let mut metrics = DWRITE_HIT_TEST_METRICS::default();
+    let position = u32::try_from(unit).unwrap_or(u32::MAX);
+    // SAFETY: a live layout and live out-pointers.
+    let hit = unsafe {
+        layout.HitTestTextPosition(position, trailing, &raw mut x, &raw mut y, &raw mut metrics)
+    };
+    if hit.is_ok() { x } else { 0.0 }
 }
 
 fn system_fonts(factory: &IDWriteFactory2) -> windows::core::Result<IDWriteFontCollection> {
@@ -899,6 +981,26 @@ mod tests {
             peak > GLYPH_CACHE_CAP / 2,
             "the test never filled the cache: {peak}"
         );
+    }
+
+    /// A caret stops at cluster boundaries only: never inside a surrogate pair. Left to right,
+    /// the stops grow and end at the line's width.
+    #[test]
+    fn caret_stops_fall_between_clusters_and_end_at_the_width() {
+        let mut text = Text::new().expect("DirectWrite");
+        let mut stops = Vec::new();
+        let line = "a\u{1F600}b c";
+        text.caret_stops(line, &BODY, |index, x| stops.push((index, x)));
+        let at: Vec<u32> = stops.iter().map(|s| s.0).collect();
+        assert_eq!(at, [0, 1, 5, 6, 7, 8], "{stops:?}");
+        assert!(stops.windows(2).all(|w| w[0].1 < w[1].1), "{stops:?}");
+        let width = text.measure(line, &BODY, f32::INFINITY).width;
+        let end = stops.last().map_or(0.0, |s| s.1);
+        assert!((end - width).abs() < 0.5, "{end} vs {width}");
+        // Nothing to step over: one stop.
+        stops.clear();
+        text.caret_stops("", &BODY, |index, x| stops.push((index, x)));
+        assert_eq!(stops, [(0, 0.0)]);
     }
 
     #[test]
