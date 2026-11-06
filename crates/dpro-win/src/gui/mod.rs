@@ -1,15 +1,21 @@
 //! The GUI's Win32 platform (TD-0009 §5.1; feature `gui`): a top-level window and its message loop,
-//! the GDI presenter, the animation timer, DirectWrite text, and the probes G1 measures with.
+//! its two presenters, the animation timer, DirectWrite text, and the probes G1 measures with.
 //!
 //! The boundary has no `dpro-ui` types, because layers point down; `dpro-ui`'s `platform` module
 //! adapts it. A [`Handler`] gets [`Event`]s and paints [`Frame`]s, and the window presents them.
 //!
-//! - **Presenting (GDI).** The canvas is a top-down 32-bit DIB section of premultiplied BGRA, so the
-//!   toolkit paints straight into the memory GDI copies from: no conversion and no staging copy.
-//!   The handler names what it damaged with [`WindowCx::invalidate`]. On `WM_PAINT` it paints that
-//!   into the canvas ([`Handler::paint`]), and the window copies each rectangle of the update region
-//!   to the screen. A region the system invalidated (an uncovered window) is copied from the
-//!   canvas, which still holds it, without asking the handler.
+//! - **Presenting.** The handler names what it damaged with [`WindowCx::invalidate`]. On `WM_PAINT`
+//!   it paints that into the canvas ([`Handler::paint`]), premultiplied BGRA, and the window
+//!   presents it. Which presenter is chosen once, when the window is made ([`Compose`]), and the
+//!   handler hears which ([`Event::Presenter`]):
+//!   - **GDI.** The canvas is a top-down 32-bit DIB section, so the toolkit paints straight into
+//!     the memory GDI copies from: no conversion and no staging copy. The window copies each
+//!     rectangle of the update region to the screen. A region the system invalidated (an uncovered
+//!     window) is copied from the canvas, which still holds it, without asking the handler.
+//!   - **Composition** (`compose`): the canvas is uploaded into a `DirectComposition` swap chain,
+//!     which DWM composes over the system backdrop ([`WindowCx::set_backdrop`]), so pixels the
+//!     handler leaves translucent show Mica. Only damage is uploaded. A lost device is rebuilt,
+//!     on WARP after a second loss within a minute.
 //! - **Frames.** While the handler wants frames ([`WindowCx::want_frames`], animations running), a
 //!   16 ms timer sends [`Event::Frame`]. The timer is killed when they stop, so a settled window
 //!   has no timer and its thread sleeps in `GetMessageW` (U6).
@@ -26,6 +32,7 @@
 //!   creation and whenever one of them changes, so the handler re-themes live (TD-0009 §5.2).
 
 mod a11y;
+mod compose;
 pub mod env;
 mod lru;
 pub mod probe;
@@ -33,7 +40,30 @@ pub mod text;
 mod window;
 
 pub use accesskit;
+pub use compose::Compose;
 pub use window::{Window, WindowCx};
+
+/// How a window puts its frames on screen (TD-0009 §5.2), as [`Event::Presenter`] reports it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Presenter {
+    /// `DirectComposition`, over the system backdrop; otherwise GDI, which is always opaque.
+    pub composed: bool,
+    /// Composed on a hardware device, not WARP.
+    pub hardware: bool,
+    /// A lost device moved the window to WARP: a second loss within a minute, or no hardware
+    /// device to rebuild on.
+    pub device_lost: bool,
+}
+
+/// The system backdrop DWM draws behind a composed window's client area (ADR-0007).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Backdrop {
+    /// None: the solid materials, which paint the client area opaque.
+    #[default]
+    None,
+    /// Mica, the main window's glass.
+    Mica,
+}
 
 /// A size in physical pixels.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -94,8 +124,11 @@ pub enum Event {
     Dpi(u32),
     /// Keyboard focus came to the window, or left it.
     Focus(bool),
-    /// Windows' settings for how the window looks and moves. Sent first, before [`Event::Dpi`],
-    /// then whenever any of them changes.
+    /// How the window presents. Sent first, before [`Event::Env`], and again when a lost device
+    /// changes it.
+    Presenter(Presenter),
+    /// Windows' settings for how the window looks and moves. Sent before [`Event::Dpi`], then
+    /// whenever any of them changes.
     Env(env::Env),
     /// The frame timer fired: advance the animations.
     Frame,
@@ -156,4 +189,6 @@ pub struct WindowOptions<'a> {
     pub size: (u32, u32),
     /// The smallest client area the user can size it to, at 100 % scale.
     pub min_size: (u32, u32),
+    /// Which presenters it may use.
+    pub compose: Compose,
 }

@@ -6,7 +6,8 @@
 //! rebuild.
 //!
 //! The colors are doc 05's solid-fallback values, which every contrast check is made against
-//! (tested below: WCAG 2.2 AA). The glass materials come with the composition presenter.
+//! (tested below: WCAG 2.2 AA). [`Theme::glass`] turns light or dark into the glass materials
+//! (ADR-0007), for a composed window over Mica.
 //!
 //! **High contrast** ([`Theme::high_contrast`], TD-0009 §4.4) shows the system's colors only: no
 //! tints, no state layers. Text takes the color the system pairs with the fill under it
@@ -260,6 +261,36 @@ impl Theme {
             ],
             sys: Some(sys),
         }
+    }
+
+    /// The glass materials (ADR-0007, doc 05 §4) of light or dark: the window's background is
+    /// clear, so Mica shows; cards (`layer.card`), quiet fills (`layer.control`), their hairlines
+    /// and the selection are translucent layers over it. Text, accent, status colors, badges and
+    /// buttons stay opaque, as do the state layers. High contrast is never glass, and comes back
+    /// as it is.
+    #[must_use]
+    pub const fn glass(self) -> Self {
+        // Doc 05's percentages of 255, rounded: 62, 70, 78 % light; 5, 6, 8 % dark.
+        let (card, control, border, selected) = match self.scheme {
+            Scheme::Light => (158, 179, 199, 34),
+            Scheme::Dark => (13, 15, 20, 36),
+            Scheme::HighContrast => return self,
+        };
+        let white = Color::hex(0xFF_FFFF);
+        let mut colors = self.colors;
+        colors[Tone::App as usize] = white.alpha(0);
+        colors[Tone::Surface as usize] = white.alpha(card);
+        colors[Tone::Subtle as usize] = white.alpha(control);
+        colors[Tone::Border as usize] = white.alpha(border);
+        // `fill.selected` unflattened: accent at 13–14 % over whatever is under it.
+        colors[Tone::Selected as usize] = self.color(Tone::Accent).alpha(selected);
+        Self { colors, ..self }
+    }
+
+    /// Whether this is [`glass`](Self::glass): its background is clear.
+    #[must_use]
+    pub const fn is_glass(&self) -> bool {
+        self.color(Tone::App).a == 0
     }
 
     #[must_use]
@@ -546,5 +577,118 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// ADR-0007: glass changes only the layers; everything opaque, and high contrast, stays.
+    #[test]
+    fn glass_layers_are_translucent_and_the_rest_unchanged() {
+        use Tone::{App, Border, Selected, Subtle, Surface};
+        for theme in [Theme::LIGHT, Theme::DARK] {
+            let glass = theme.glass();
+            assert!(glass.is_glass() && !theme.is_glass());
+            assert_eq!(glass.scheme(), theme.scheme());
+            assert_eq!(glass.color(App).a, 0);
+            for tone in Tone::ALL {
+                let layer = matches!(tone, App | Surface | Subtle | Border | Selected);
+                assert_eq!(glass.color(tone) == theme.color(tone), !layer, "{tone:?}");
+            }
+            // `fill.selected`: 13 % light, 14 % dark, of the accent itself.
+            let selected = if theme.scheme() == Scheme::Light {
+                34
+            } else {
+                36
+            };
+            assert_eq!(
+                glass.color(Selected),
+                theme.color(Tone::Accent).alpha(selected)
+            );
+        }
+        assert_eq!(
+            (
+                Theme::LIGHT.glass().color(Surface).a,
+                Theme::DARK.glass().color(Surface).a
+            ),
+            (158, 13),
+            "layer.card: 62 % and 5 % white"
+        );
+        let hc = Theme::high_contrast(SysColors {
+            window: Color::hex(0),
+            window_text: Color::hex(0xFF_FFFF),
+            highlight: Color::hex(0x1A_EBFF),
+            highlight_text: Color::hex(0),
+            hot_light: Color::hex(0xFF_FF00),
+            gray_text: Color::hex(0x3F_F23F),
+            btn_face: Color::hex(0),
+            btn_text: Color::hex(0xFF_FFFF),
+        });
+        assert_eq!(hc.glass(), hc);
+        assert!(!hc.is_glass());
+    }
+
+    /// Over untinted Mica (#F3F3F3 light, #202020 dark), glass text keeps WCAG 2.2 AA wherever
+    /// the solid fallback does, except the pairs listed. Real Mica is tinted by the wallpaper, so
+    /// the gate is the solid fallback (ADR-0007, tested above); this records how far glass strays
+    /// from it, so a token change that moves any pair shows here. The listed ones are secondary
+    /// text where white layers stack (a card, a control or the selection, a state layer); they
+    /// wait on the design source (doc 05) for glass's own `text.secondary`.
+    #[test]
+    fn glass_text_contrast_over_untinted_mica() {
+        use Tone::{
+            Accent, App, Danger, Hover, Image, Offline, Ok, Pressed, Selected, Subtle, Surface,
+            Text, TextSecondary, Warn,
+        };
+        let mut short = Vec::new();
+        for (theme, mica) in [
+            (Theme::LIGHT.glass(), Color::hex(0xF3_F3F3)),
+            (Theme::DARK.glass(), Color::hex(0x20_2020)),
+        ] {
+            // Each background as it's stacked: on the window, on a card, a selection on a card.
+            let flat = |stack: &[Tone]| {
+                stack
+                    .iter()
+                    .fold(mica, |under, t| theme.color(*t).over(under))
+            };
+            let mut pairs: Vec<(Tone, Vec<Tone>)> = Vec::new();
+            let stacks = [
+                vec![App],
+                vec![Surface],
+                vec![Subtle],
+                vec![Surface, Subtle],
+                vec![Surface, Selected],
+            ];
+            for stack in &stacks {
+                for fg in [Text, TextSecondary] {
+                    pairs.push((fg, stack.clone()));
+                    for layer in [Hover, Pressed] {
+                        let mut layered = stack.clone();
+                        layered.push(layer);
+                        pairs.push((fg, layered));
+                    }
+                }
+            }
+            for stack in [vec![App], vec![Surface]] {
+                for fg in [Accent, Offline, Image, Ok, Warn, Danger] {
+                    pairs.push((fg, stack.clone()));
+                }
+            }
+            for (fg, stack) in pairs {
+                let ratio = contrast(theme.color(fg), flat(&stack));
+                if ratio < 4.5 {
+                    short.push(format!(
+                        "{:?} {fg:?} on {stack:?}: {ratio:.2}",
+                        theme.scheme()
+                    ));
+                }
+            }
+        }
+        let known = [
+            "Light TextSecondary on [Surface, Selected, Hover]: 4.38",
+            "Dark TextSecondary on [Surface, Subtle, Hover]: 3.89",
+            "Dark TextSecondary on [Surface, Subtle, Pressed]: 4.14",
+            "Dark TextSecondary on [Surface, Selected]: 4.37",
+            "Dark TextSecondary on [Surface, Selected, Hover]: 3.67",
+            "Dark TextSecondary on [Surface, Selected, Pressed]: 3.87",
+        ];
+        assert_eq!(short, known, "glass pairs below 4.5:1");
     }
 }

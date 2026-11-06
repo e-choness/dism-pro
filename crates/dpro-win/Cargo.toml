@@ -20,7 +20,7 @@ accesskit = { workspace = true, optional = true }
 accesskit_windows = { workspace = true, optional = true }
 
 [features]
-# The GUI's Win32 platform (TD-0009 §5.1): window, message loop, GDI presenter, DirectWrite text,
+# The GUI's Win32 platform (TD-0009 §5.1): window, message loop, presenters, DirectWrite text,
 # UI Automation, G1 probes. dismpro.exe needs it; the CLI and the broker don't.
 gui = ["dep:windows", "dep:windows-core", "dep:accesskit", "dep:accesskit_windows"]
 

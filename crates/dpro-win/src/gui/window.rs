@@ -1,4 +1,11 @@
-//! The top-level window, its message loop and the GDI presenter (TD-0009 §5.1, §5.2).
+//! The top-level window, its message loop and its presenters (TD-0009 §5.1, §5.2).
+//!
+//! **Presenter.** [`Window::new`] makes the devices [`Compose`] allows before the window, because
+//! a composed window needs `WS_EX_NOREDIRECTIONBITMAP` from creation, and GDI can't draw such a
+//! window. Without devices it makes a GDI window. If the swap chain can't be shown in the new
+//! window, that window is destroyed and a GDI one made for the same handler. A composed window's
+//! canvas is plain memory; a GDI window's is the DIB. A lost device is rebuilt in the same window
+//! (TD-0009 §5.2), and the handler hears the new [`Presenter`].
 //!
 //! **Ownership.** [`Window::new`] boxes the window's [`State`] and hands it to the window at
 //! `WM_NCCREATE` (`GWLP_USERDATA`). The state is freed after `WM_NCDESTROY`. Only shared references
@@ -22,6 +29,7 @@ use std::{
     ptr::{null, null_mut},
     rc::Rc,
     sync::Arc,
+    time::{Duration, Instant},
 };
 
 use accesskit_windows::Adapter;
@@ -34,7 +42,10 @@ use windows_sys::{
             WPARAM,
         },
         Graphics::{
-            Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute},
+            Dwm::{
+                DWMSBT_MAINWINDOW, DWMSBT_NONE, DWMWA_SYSTEMBACKDROP_TYPE,
+                DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute,
+            },
             Gdi::{
                 BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, BitBlt, CreateCompatibleDC,
                 CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject, EndPaint, GdiFlush,
@@ -64,20 +75,22 @@ use windows_sys::{
                 PBT_POWERSETTINGCHANGE, PostQuitMessage, RegisterClassExW, SIZE_MINIMIZED,
                 SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SetTimer,
                 SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, WM_CAPTURECHANGED,
-                WM_CLOSE, WM_CREATE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO,
-                WM_GETOBJECT, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP,
-                WM_MOUSEMOVE, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_POWERBROADCAST, WM_SETFOCUS,
-                WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_SYSKEYDOWN, WM_SYSKEYUP,
-                WM_THEMECHANGED, WM_TIMER, WM_WTSSESSION_CHANGE, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
+                WM_CLOSE, WM_CREATE, WM_DESTROY, WM_DPICHANGED, WM_DWMCOMPOSITIONCHANGED,
+                WM_ERASEBKGND, WM_GETMINMAXINFO, WM_GETOBJECT, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS,
+                WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_NCDESTROY, WM_PAINT,
+                WM_POWERBROADCAST, WM_SETFOCUS, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE,
+                WM_SYSKEYDOWN, WM_SYSKEYUP, WM_THEMECHANGED, WM_TIMER, WM_WTSSESSION_CHANGE,
+                WNDCLASSEXW, WS_EX_NOREDIRECTIONBITMAP, WS_OVERLAPPEDWINDOW,
             },
         },
     },
-    core::{BOOL, w},
+    core::{BOOL, HRESULT, w},
 };
 
 use super::{
-    Event, Frame, Handler, Mods, PointPx, RectPx, SizePx, WindowOptions,
+    Backdrop, Event, Frame, Handler, Mods, PointPx, Presenter, RectPx, SizePx, WindowOptions,
     a11y::{Initial, Requests, ToUiThread, WM_APP_A11Y},
+    compose::{Composer, Device, Gpu, Rects, after_loss},
     env::{Env, GUID_POWER_SAVING_STATUS},
     probe,
 };
@@ -90,11 +103,31 @@ const CLASS: *const u16 = w!("dismpro.window");
 const FRAME_TIMER: usize = 1;
 /// One frame at 60 Hz, rounded down: `SetTimer`'s resolution is the system tick anyway.
 const FRAME_MS: u32 = 16;
+/// A presenter rebuild that comes sooner than [`REBUILD_GAP`] after the last one waits on this
+/// timer, so a device that fails at once costs a rebuild a second, not one per paint.
+const REBUILD_TIMER: usize = 2;
+const REBUILD_GAP: Duration = Duration::from_secs(1);
 /// The DPI that is 100 %.
 const BASE_DPI: u32 = 96;
 /// `WinUser.h`'s value; windows-sys files it under `Win32_UI_Controls`, a large feature for one
 /// constant.
 const WM_MOUSELEAVE: u32 = 0x02A3;
+
+/// `uxtheme.h`'s `MARGINS`, which windows-sys also files under `Win32_UI_Controls`.
+#[repr(C)]
+struct Margins {
+    left: i32,
+    right: i32,
+    top: i32,
+    bottom: i32,
+}
+
+// Linked as windows-sys links dwmapi (raw-dylib, verbatim), so the import table has one entry
+// for it.
+#[link(name = "dwmapi.dll", kind = "raw-dylib", modifiers = "+verbatim")]
+unsafe extern "system" {
+    fn DwmExtendFrameIntoClientArea(hwnd: HWND, margins: *const Margins) -> HRESULT;
+}
 
 /// A top-level window that presents its [`Handler`]'s frames. `!Send`: a window belongs to the
 /// thread that created it, which runs its loop.
@@ -122,12 +155,30 @@ enum Life {
 }
 
 impl Window {
-    /// Creates the window, hidden, with its client area at `options.size` scaled to its monitor.
-    /// The handler gets [`Event::Env`], [`Event::Dpi`] and [`Event::Resize`] before this returns.
+    /// Creates the window, hidden, with its client area at `options.size` scaled to its monitor,
+    /// presenting as `options.compose` allows. The handler gets [`Event::Presenter`],
+    /// [`Event::Env`], [`Event::Dpi`] and [`Event::Resize`] before this returns.
     ///
     /// # Errors
     /// The title holds a NUL, or the class or window can't be created.
     pub fn new(options: &WindowOptions<'_>, handler: Box<dyn Handler>) -> Result<Self> {
+        let (mut handler, mut gpu) = (handler, Gpu::open(options.compose));
+        // Twice at most: a window without devices never hands the handler back.
+        loop {
+            match Self::create(options, handler, gpu.take())? {
+                Made::Window(window) => return Ok(window),
+                Made::Gdi(back) => handler = back,
+            }
+        }
+    }
+
+    /// The window, composed with `gpu` if given. If the swap chain can't be shown in it, it's
+    /// destroyed, and the handler comes back for a GDI window.
+    fn create(
+        options: &WindowOptions<'_>,
+        handler: Box<dyn Handler>,
+        gpu: Option<Gpu>,
+    ) -> Result<Made> {
         let title = WideCString::new(options.title)?;
         // SAFETY: no preconditions; a null name means this executable.
         let instance = unsafe { GetModuleHandleW(null()) };
@@ -135,33 +186,30 @@ impl Window {
         // SAFETY: no preconditions.
         let system_dpi = unsafe { GetDpiForSystem() };
         let life = Rc::new(Cell::new(Life::Unborn));
-        let state = Box::into_raw(Box::new(State {
-            handler: RefCell::new(handler),
-            canvas: RefCell::new(None),
-            size: Cell::new(SizePx::default()),
-            dpi: Cell::new(system_dpi),
-            min_size: options.min_size,
-            dirty: Cell::new(false),
-            frames: Cell::new(false),
-            close: Cell::new(false),
-            tracking: Cell::new(false),
-            pressed: Cell::new(false),
-            a11y: RefCell::new(None),
-            requests: Arc::new(Requests::default()),
-            a11y_whole: Cell::new(false),
-            a11y_served: Cell::new(false),
-            env: Cell::new(Env::default()),
-            power: Cell::new(0),
-            sessions: Cell::new(false),
-            depth: Cell::new(0),
-            life: Rc::clone(&life),
-        }));
+        let composed = gpu.is_some();
+        let presenter = Presenter {
+            composed,
+            hardware: gpu.as_ref().is_some_and(|g| !g.warp()),
+            device_lost: false,
+        };
+        let state = Box::into_raw(Box::new(State::new(
+            handler,
+            presenter,
+            options.min_size,
+            system_dpi,
+            Rc::clone(&life),
+        )));
         let (w, h) = outer_size(options.size, system_dpi);
+        let ex_style = if composed {
+            WS_EX_NOREDIRECTIONBITMAP
+        } else {
+            0
+        };
         // SAFETY: the class is registered, the strings outlive the call, and `state` is a live
         // allocation the window takes at WM_NCCREATE.
         let hwnd = unsafe {
             CreateWindowExW(
-                0,
+                ex_style,
                 CLASS,
                 title.as_ptr(),
                 WS_OVERLAPPEDWINDOW,
@@ -205,6 +253,20 @@ impl Window {
         // WM_SIZE may not have come during creation.
         // SAFETY: hwnd is this thread's window of our class.
         unsafe { with_state(hwnd, |s| s.sync_size(hwnd)) };
+        if let Some(gpu) = gpu {
+            // SAFETY: as above.
+            let shown = unsafe { with_state(hwnd, |s| s.show_swap_chain(hwnd, gpu)) };
+            if shown != Some(true) {
+                // SAFETY: as above. No message is being handled, so nothing holds the handler.
+                if let Some(handler) = unsafe { with_state(hwnd, State::give_back) }.flatten() {
+                    // Destroying the window frees its state, which now holds an inert handler.
+                    drop(window);
+                    return Ok(Made::Gdi(handler));
+                }
+            }
+        } else {
+            probe::presenter(false, false);
+        }
         // SAFETY: as above. Not inside WM_GETOBJECT, and before the window shows, as
         // `Adapter::new` requires: UI Automation learns the window serves it before any client asks.
         unsafe {
@@ -217,7 +279,7 @@ impl Window {
                 }
             })
         };
-        Ok(window)
+        Ok(Made::Window(window))
     }
 
     /// Shows the window; its first frame paints once the loop runs.
@@ -259,6 +321,24 @@ impl Drop for Window {
             unsafe { DestroyWindow(self.hwnd) };
         }
     }
+}
+
+/// What [`Window::create`] made.
+enum Made {
+    Window(Window),
+    /// The composed window couldn't show its swap chain and is gone; its handler, for a GDI one.
+    Gdi(Box<dyn Handler>),
+}
+
+/// Holds a destroyed window's place after its handler moved to a new window.
+struct Inert;
+
+impl Handler for Inert {
+    fn event(&mut self, _: Event, _: &mut WindowCx<'_>) -> bool {
+        false
+    }
+
+    fn paint(&mut self, _: &mut Frame<'_>) {}
 }
 
 /// Registers the window class, once per process.
@@ -312,6 +392,11 @@ impl WindowCx<'_> {
         // SAFETY: hwnd is live, and rect a live local. Sends no message.
         unsafe { InvalidateRect(self.hwnd, &raw const rect, 0) };
         self.state.dirty.set(true);
+        if self.state.composed
+            && let Ok(mut damage) = self.state.damage.try_borrow_mut()
+        {
+            damage.push(r);
+        }
     }
 
     /// Whether the handler wants [`Event::Frame`]s, every 16 ms, until it says otherwise.
@@ -353,8 +438,23 @@ impl WindowCx<'_> {
         self.state.env.get()
     }
 
-    /// Draws the title bar and frame dark or light, to match the client area. Windows before
-    /// 10 20H1, and `WinPE` without DWM, keep their frame.
+    /// How the window presents, as [`Event::Presenter`] last said.
+    #[must_use]
+    pub fn presenter(&self) -> Presenter {
+        self.state.presenter.get()
+    }
+
+    /// The system backdrop behind the client area, for the materials the handler paints: Mica
+    /// under glass, none under solid. A GDI window is opaque and has none, so it ignores this.
+    pub fn set_backdrop(&mut self, backdrop: Backdrop) {
+        self.state.backdrop.set(backdrop);
+        if self.state.composed {
+            apply_backdrop(self.hwnd, backdrop);
+        }
+    }
+
+    /// Draws the title bar and frame dark or light, to match the client area (and a composed
+    /// window's Mica). Windows before 10 20H1, and `WinPE` without DWM, keep their frame.
     pub fn set_dark_frame(&mut self, dark: bool) {
         let on = BOOL::from(dark);
         // SAFETY: hwnd is live; the attribute's value is one BOOL, read during the call.
@@ -373,7 +473,27 @@ impl WindowCx<'_> {
 struct State {
     handler: RefCell<Box<dyn Handler>>,
     /// The client area's pixels; `None` while the client area is empty.
-    canvas: RefCell<Option<Dib>>,
+    canvas: RefCell<Option<Canvas>>,
+    /// The composition presenter; `None` in a GDI window, and in a composed one until its swap
+    /// chain shows (or after every rebuild failed: the next paint tries again).
+    composer: RefCell<Option<Composer>>,
+    /// Made to be composed (`WS_EX_NOREDIRECTIONBITMAP`): GDI can't draw it.
+    composed: bool,
+    /// As the handler last heard it.
+    presenter: Cell<Presenter>,
+    /// When the device was last lost.
+    lost_at: Cell<Option<Instant>>,
+    /// When the presenter was last rebuilt.
+    rebuilt_at: Cell<Option<Instant>>,
+    /// A rebuild waits on [`REBUILD_TIMER`], for this device.
+    rebuild_on: Cell<Option<Device>>,
+    /// What the handler damaged since the last present, for a composed window.
+    damage: RefCell<Rects>,
+    /// The system backdrop the handler asked for.
+    backdrop: Cell<Backdrop>,
+    /// Destroying the window ends the loop; not for a composed window whose handler moved to a
+    /// GDI one.
+    quit_on_destroy: Cell<bool>,
     size: Cell<SizePx>,
     dpi: Cell<u32>,
     min_size: (u32, u32),
@@ -461,11 +581,52 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
 }
 
 impl State {
+    /// A new window's state, presenting as `presenter` says; the window takes it at `WM_NCCREATE`.
+    fn new(
+        handler: Box<dyn Handler>,
+        presenter: Presenter,
+        min_size: (u32, u32),
+        dpi: u32,
+        life: Rc<Cell<Life>>,
+    ) -> Self {
+        Self {
+            handler: RefCell::new(handler),
+            canvas: RefCell::new(None),
+            composer: RefCell::new(None),
+            composed: presenter.composed,
+            presenter: Cell::new(presenter),
+            lost_at: Cell::new(None),
+            rebuilt_at: Cell::new(None),
+            rebuild_on: Cell::new(None),
+            damage: RefCell::new(Rects::default()),
+            backdrop: Cell::new(Backdrop::None),
+            quit_on_destroy: Cell::new(true),
+            size: Cell::new(SizePx::default()),
+            dpi: Cell::new(dpi),
+            min_size,
+            dirty: Cell::new(false),
+            frames: Cell::new(false),
+            close: Cell::new(false),
+            tracking: Cell::new(false),
+            pressed: Cell::new(false),
+            a11y: RefCell::new(None),
+            requests: Arc::new(Requests::default()),
+            a11y_whole: Cell::new(false),
+            a11y_served: Cell::new(false),
+            env: Cell::new(Env::default()),
+            power: Cell::new(0),
+            sessions: Cell::new(false),
+            depth: Cell::new(0),
+            life,
+        }
+    }
+
     /// The message's result, or `None` for default handling.
     fn handle(&self, hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
         match msg {
             WM_CREATE => {
                 self.subscribe(hwnd);
+                self.send(hwnd, Event::Presenter(self.presenter.get()));
                 let env = Env::read();
                 self.env.set(env);
                 self.send(hwnd, Event::Env(env));
@@ -519,10 +680,13 @@ impl State {
             }
             // The canvas covers the client area; erasing would only flicker.
             WM_ERASEBKGND => return Some(1),
+            WM_PAINT if self.composed => self.compose(hwnd),
             WM_PAINT => self.paint(hwnd),
+            WM_DWMCOMPOSITIONCHANGED if self.composed => self.dwm_restarted(hwnd),
             WM_TIMER if wp == FRAME_TIMER => {
                 self.send(hwnd, Event::Frame);
             }
+            WM_TIMER if wp == REBUILD_TIMER => self.rebuild_due(hwnd),
             WM_SETFOCUS | WM_KILLFOCUS => {
                 let focused = msg == WM_SETFOCUS;
                 self.send(hwnd, Event::Focus(focused));
@@ -537,28 +701,63 @@ impl State {
                     self.dispatch(hwnd, |h, cx| h.a11y_action(&request, cx));
                 }
             }
-            WM_DESTROY => {
-                self.unsubscribe(hwnd);
-                self.requests.detach();
-                if self.a11y_served.get() {
-                    // UI Automation may release what it holds for this window (the documented
-                    // call for a window that served it).
-                    // SAFETY: hwnd is live until this message returns.
-                    unsafe {
-                        UiaReturnRawElementProvider(
-                            accesskit_windows::HWND(hwnd),
-                            accesskit_windows::WPARAM(0),
-                            accesskit_windows::LPARAM(0),
-                            None::<&IRawElementProviderSimple>,
-                        )
-                    };
-                }
-                // SAFETY: ends this thread's message loop.
-                unsafe { PostQuitMessage(0) };
-            }
+            WM_DESTROY => self.destroyed(hwnd),
             _ => return self.input(hwnd, msg, wp, lp),
         }
         Some(0)
+    }
+
+    /// `WM_DESTROY`: unsubscribes, lets UI Automation go, and ends the loop.
+    fn destroyed(&self, hwnd: HWND) {
+        self.unsubscribe(hwnd);
+        self.requests.detach();
+        if self.a11y_served.get() {
+            // UI Automation may release what it holds for this window (the documented call for a
+            // window that served it).
+            // SAFETY: hwnd is live until this message returns.
+            unsafe {
+                UiaReturnRawElementProvider(
+                    accesskit_windows::HWND(hwnd),
+                    accesskit_windows::WPARAM(0),
+                    accesskit_windows::LPARAM(0),
+                    None::<&IRawElementProviderSimple>,
+                )
+            };
+        }
+        if self.quit_on_destroy.get() {
+            // SAFETY: ends this thread's message loop.
+            unsafe { PostQuitMessage(0) };
+        }
+    }
+
+    /// `WM_DWMCOMPOSITIONCHANGED` (DWM restarted): the frame and backdrop are set again, and a
+    /// device it invalidated is rebuilt on the same kind (not a loss: the adapter is fine).
+    fn dwm_restarted(&self, hwnd: HWND) {
+        extend_frame(hwnd);
+        apply_backdrop(hwnd, self.backdrop.get());
+        let healthy = self
+            .composer
+            .try_borrow()
+            .ok()
+            .and_then(|c| c.as_ref().map(Composer::healthy));
+        if healthy == Some(false) {
+            let device = if self.presenter.get().hardware {
+                Device::Hardware
+            } else {
+                Device::Warp
+            };
+            self.rebuild(hwnd, device);
+        }
+    }
+
+    /// [`REBUILD_TIMER`] fired: the rebuild that waited runs now.
+    fn rebuild_due(&self, hwnd: HWND) {
+        // SAFETY: hwnd is live; the timer is this window's. One shot.
+        unsafe { KillTimer(hwnd, REBUILD_TIMER) };
+        if let Some(device) = self.rebuild_on.take() {
+            self.rebuilt_at.set(None);
+            self.rebuild(hwnd, device);
+        }
     }
 
     /// Pointer and keyboard messages, as [`handle`](Self::handle).
@@ -773,9 +972,23 @@ impl State {
         }
         // The old buffer goes first, so there's never more than one (TD-0009 §7 U7).
         *canvas = None;
-        *canvas = Dib::new(size);
+        *canvas = Canvas::new(size, self.composed);
         drop(canvas);
         self.size.set(size);
+        if self.composed {
+            // The handler damages everything for the new canvas; the old damage is moot.
+            if let Ok(mut damage) = self.damage.try_borrow_mut() {
+                damage.clear();
+            }
+            let lost = self
+                .composer
+                .try_borrow_mut()
+                .ok()
+                .and_then(|mut c| c.as_mut().map(|c| c.resize(size).is_err()));
+            if lost == Some(true) {
+                self.lost(hwnd);
+            }
+        }
         self.send(hwnd, Event::Resize(size));
     }
 
@@ -804,7 +1017,7 @@ impl State {
         let dc = unsafe { BeginPaint(hwnd, &raw mut ps) };
         if !dc.is_null()
             && let Ok(mut canvas) = self.canvas.try_borrow_mut()
-            && let Some(dib) = canvas.as_mut()
+            && let Some(Canvas::Dib(dib)) = canvas.as_mut()
         {
             if self.dirty.get()
                 && let Ok(mut handler) = self.handler.try_borrow_mut()
@@ -837,12 +1050,224 @@ impl State {
         }
         // SAFETY: pairs with BeginPaint above.
         unsafe { EndPaint(hwnd, &raw const ps) };
+        self.repaint_if_busy(hwnd);
+        probe::painted();
+    }
+
+    /// `WM_PAINT` in a composed window: the handler paints its damage into the canvas, and the
+    /// composer uploads and presents it. DWM keeps what's on screen, so a region the system
+    /// invalidated needs nothing.
+    fn compose(&self, hwnd: HWND) {
+        // SAFETY: plain data; all-zero is a valid value.
+        let mut ps: PAINTSTRUCT = unsafe { std::mem::zeroed() };
+        // SAFETY: hwnd is live, and ps a live local. Validates the update region: the window has
+        // no redirection bitmap, so its DC draws nothing.
+        unsafe {
+            BeginPaint(hwnd, &raw mut ps);
+            EndPaint(hwnd, &raw const ps);
+        }
+        if self.composer.try_borrow().is_ok_and(|c| c.is_none()) {
+            // Every rebuild failed so far: try again.
+            self.rebuild(hwnd, after_loss(self.lost_at.get(), Instant::now()));
+        }
+        let lost = {
+            let Ok(mut canvas) = self.canvas.try_borrow_mut() else {
+                return;
+            };
+            let Some(canvas) = canvas.as_mut() else {
+                return;
+            };
+            let Ok(mut damage) = self.damage.try_borrow_mut() else {
+                return;
+            };
+            let mut painted = Rects::default();
+            if self.dirty.get()
+                && let Ok(mut handler) = self.handler.try_borrow_mut()
+            {
+                self.dirty.set(false);
+                painted = std::mem::take(&mut *damage);
+                let size = canvas.size();
+                handler.paint(&mut Frame {
+                    pixels: canvas.pixels(),
+                    size,
+                });
+            }
+            let Ok(mut composer) = self.composer.try_borrow_mut() else {
+                return;
+            };
+            composer.as_mut().is_some_and(|c| {
+                (!painted.is_empty() || c.due()) && c.present(canvas.pixels(), &painted).is_err()
+            })
+        };
+        if lost {
+            self.lost(hwnd);
+        }
+        self.repaint_if_busy(hwnd);
+        probe::painted();
+    }
+
+    /// The handler was busy at a paint: its damage waits for the next one, of the whole window.
+    fn repaint_if_busy(&self, hwnd: HWND) {
         if self.dirty.get() {
-            // The handler was busy: its damage waits for the next paint, of the whole window.
             // SAFETY: hwnd is live. Sends no message.
             unsafe { InvalidateRect(hwnd, null(), 0) };
         }
-        probe::painted();
+    }
+
+    /// Shows `gpu`'s swap chain in this new window, over its system backdrop. False if it can't.
+    fn show_swap_chain(&self, hwnd: HWND, gpu: Gpu) -> bool {
+        let warp = gpu.warp();
+        let Some(composer) = Composer::new(gpu, hwnd, self.size.get()) else {
+            return false;
+        };
+        let Ok(mut slot) = self.composer.try_borrow_mut() else {
+            return false;
+        };
+        *slot = Some(composer);
+        extend_frame(hwnd);
+        apply_backdrop(hwnd, self.backdrop.get());
+        probe::presenter(true, warp);
+        true
+    }
+
+    /// Takes the handler out of a window about to be destroyed, for a GDI window: an [`Inert`] one
+    /// takes its place, and destroying this window doesn't end the loop.
+    fn give_back(&self) -> Option<Box<dyn Handler>> {
+        let mut handler = self.handler.try_borrow_mut().ok()?;
+        self.quit_on_destroy.set(false);
+        Some(std::mem::replace(&mut *handler, Box::new(Inert)))
+    }
+
+    /// The device was lost (TD-0009 §5.2): rebuilt on hardware, or on WARP after a second loss
+    /// within a minute.
+    fn lost(&self, hwnd: HWND) {
+        let now = Instant::now();
+        let device = after_loss(self.lost_at.replace(Some(now)), now);
+        self.rebuild(hwnd, device);
+    }
+
+    /// A new presenter in place of the old one, on `device` or else WARP, presented whole at the
+    /// next paint. The handler hears if the presenter changed; if no device can be made, the next
+    /// paint tries again. Within [`REBUILD_GAP`] of the last rebuild, the old one goes now and
+    /// the new one waits on [`REBUILD_TIMER`].
+    fn rebuild(&self, hwnd: HWND, device: Device) {
+        let now = Instant::now();
+        let soon = self
+            .rebuilt_at
+            .get()
+            .is_some_and(|t| now.saturating_duration_since(t) < REBUILD_GAP);
+        let warp = {
+            let Ok(mut slot) = self.composer.try_borrow_mut() else {
+                return;
+            };
+            // The old one goes first: a window has one composition target at a time.
+            *slot = None;
+            if soon || self.rebuild_on.get().is_some() {
+                if self.rebuild_on.replace(Some(device)).is_none() {
+                    let gap = u32::try_from(REBUILD_GAP.as_millis()).unwrap_or(u32::MAX);
+                    // SAFETY: hwnd is live; WM_TIMER comes through the loop (no callback).
+                    if unsafe { SetTimer(hwnd, REBUILD_TIMER, gap, None) } == 0 {
+                        // No timer: the next paint tries again.
+                        self.rebuild_on.set(None);
+                    }
+                }
+                return;
+            }
+            self.rebuilt_at.set(Some(now));
+            let size = self.size.get();
+            let made = match device {
+                Device::Hardware => Composer::open(hwnd, size, Device::Hardware),
+                Device::Warp => None,
+            }
+            .or_else(|| Composer::open(hwnd, size, Device::Warp));
+            let Some(composer) = made else {
+                return;
+            };
+            let on_warp = composer.warp();
+            *slot = Some(composer);
+            on_warp
+        };
+        probe::presenter(true, warp);
+        let was = self.presenter.get();
+        let now = Presenter {
+            composed: true,
+            hardware: !warp,
+            // Hardware lost for WARP: the materials fall back to solid (TD-0009 §5.2).
+            device_lost: warp && (was.hardware || was.device_lost),
+        };
+        if now != was {
+            self.presenter.set(now);
+            self.send(hwnd, Event::Presenter(now));
+        }
+        // SAFETY: hwnd is live. Sends no message; the paint presents the canvas whole.
+        unsafe { InvalidateRect(hwnd, null(), 0) };
+    }
+}
+
+/// Lets DWM draw the system backdrop under all of a composed window's client area.
+fn extend_frame(hwnd: HWND) {
+    let all = Margins {
+        left: -1,
+        right: -1,
+        top: -1,
+        bottom: -1,
+    };
+    // SAFETY: hwnd is live, and the margins a live local read during the call. Without DWM
+    // (`WinPE`) it fails, and nothing changes.
+    unsafe { DwmExtendFrameIntoClientArea(hwnd, &raw const all) };
+}
+
+/// Sets the system backdrop DWM draws behind a composed window. Before Windows 11 22H2 the
+/// attribute doesn't exist and nothing changes; the caller composes only from there.
+fn apply_backdrop(hwnd: HWND, backdrop: Backdrop) {
+    let kind = match backdrop {
+        Backdrop::None => DWMSBT_NONE,
+        Backdrop::Mica => DWMSBT_MAINWINDOW,
+    };
+    // SAFETY: hwnd is live; the attribute's value is one DWM_SYSTEMBACKDROP_TYPE, read during the
+    // call.
+    unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            u32::try_from(DWMWA_SYSTEMBACKDROP_TYPE).unwrap_or(0),
+            (&raw const kind).cast(),
+            u32::try_from(size_of_val(&kind)).unwrap_or(0),
+        )
+    };
+}
+
+/// The client area's pixels: GDI's DIB section, or memory a composed window uploads from.
+enum Canvas {
+    Dib(Dib),
+    Memory(Vec<u32>, SizePx),
+}
+
+impl Canvas {
+    /// `None` if the size doesn't fit or memory runs out; the window then shows nothing until its
+    /// next resize.
+    fn new(size: SizePx, composed: bool) -> Option<Self> {
+        if !composed {
+            return Dib::new(size).map(Self::Dib);
+        }
+        let len = usize::try_from(u64::from(size.w) * u64::from(size.h)).ok()?;
+        let mut pixels = Vec::new();
+        pixels.try_reserve_exact(len).ok()?;
+        pixels.resize(len, 0);
+        Some(Self::Memory(pixels, size))
+    }
+
+    fn size(&self) -> SizePx {
+        match self {
+            Self::Dib(dib) => dib.size,
+            Self::Memory(_, size) => *size,
+        }
+    }
+
+    fn pixels(&mut self) -> &mut [u32] {
+        match self {
+            Self::Dib(dib) => dib.pixels(),
+            Self::Memory(pixels, _) => pixels,
+        }
     }
 }
 
@@ -993,6 +1418,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::gui::{Compose, compose::on_wine};
 
     #[test]
     fn words_of_an_lparam() {
@@ -1065,6 +1491,10 @@ mod tests {
     }
 
     fn open(frames: u32) -> (Window, Log, Rc<Cell<u32>>) {
+        open_with(frames, Compose::Never)
+    }
+
+    fn open_with(frames: u32, compose: Compose) -> (Window, Log, Rc<Cell<u32>>) {
         let events = Rc::new(RefCell::new(Vec::new()));
         let paints = Rc::new(Cell::new(0));
         let handler = Recorder {
@@ -1076,6 +1506,7 @@ mod tests {
             title: "dpro-win gui test",
             size: (320, 200),
             min_size: (100, 100),
+            compose,
         };
         let window = Window::new(&options, Box::new(handler)).expect("a window");
         (window, events, paints)
@@ -1085,9 +1516,18 @@ mod tests {
     fn the_handler_learns_the_env_the_dpi_then_the_size_and_paints_its_damage() {
         let (window, events, paints) = open(0);
         let recorded = events.borrow().clone();
-        let [Event::Env(env), Event::Dpi(dpi), ..] = recorded[..] else {
-            panic!("the first events aren't the environment and the DPI: {recorded:?}");
+        let [
+            Event::Presenter(presenter),
+            Event::Env(env),
+            Event::Dpi(dpi),
+            ..,
+        ] = recorded[..]
+        else {
+            panic!(
+                "the first events aren't the presenter, the environment and the DPI: {recorded:?}"
+            );
         };
+        assert_eq!(presenter, Presenter::default(), "GDI");
         assert_eq!(env, Env::read());
         let scaled = |v: u32| v * dpi / BASE_DPI;
         assert_eq!(
@@ -1106,6 +1546,104 @@ mod tests {
         // SAFETY: as above.
         unsafe { SendMessageW(window.hwnd, WM_PAINT, 0, 0) };
         assert_eq!(paints.get(), 1, "nothing new was damaged");
+    }
+
+    /// The last presenter the handler heard of.
+    fn last_presenter(events: &Log) -> Option<Presenter> {
+        events.borrow().iter().rev().find_map(|e| match e {
+            Event::Presenter(p) => Some(*p),
+            _ => None,
+        })
+    }
+
+    /// T2 and T3: a window that may compose does, or (Wine) falls back to GDI for the same handler;
+    /// either way the handler heard which, and paints its damage once.
+    #[test]
+    fn a_window_that_may_compose_presents_or_falls_back_to_gdi() {
+        let (window, events, paints) = open_with(0, Compose::Any);
+        let presenter = last_presenter(&events).expect("a presenter");
+        println!("presenter: {presenter:?}");
+        // SAFETY: this test's window, on its thread.
+        let (composed, has_composer) =
+            unsafe { with_state(window.hwnd, |s| (s.composed, s.composer.borrow().is_some())) }
+                .expect("a live window");
+        assert_eq!(presenter.composed, composed, "{:?}", events.borrow());
+        assert_eq!(has_composer, composed);
+        if !on_wine() {
+            assert!(composed, "Windows always has WARP and DirectComposition");
+        }
+        assert!(!presenter.device_lost);
+        // SAFETY: messages sent to this test's live window, on its thread.
+        unsafe { SendMessageW(window.hwnd, WM_PAINT, 0, 0) };
+        assert_eq!(paints.get(), 1);
+        // SAFETY: as above.
+        unsafe { SendMessageW(window.hwnd, WM_PAINT, 0, 0) };
+        assert_eq!(paints.get(), 1, "nothing new was damaged");
+    }
+
+    /// T3: a lost device is rebuilt in the same window, and a move from hardware to WARP reaches
+    /// the handler, so its materials go solid (TD-0009 §5.2).
+    #[test]
+    fn a_lost_device_is_rebuilt_and_leaving_hardware_is_heard() {
+        let (window, events, paints) = open_with(0, Compose::Any);
+        let hwnd = window.hwnd;
+        // SAFETY: this test's window, on its thread (for every block below).
+        if unsafe { with_state(hwnd, |s| s.composed) } != Some(true) {
+            assert!(on_wine(), "{:?}", events.borrow());
+            return;
+        }
+        // SAFETY: as above.
+        let composer = |f: fn(&Composer) -> bool| unsafe {
+            with_state(hwnd, |s| s.composer.borrow().as_ref().map(f)).flatten()
+        };
+        // SAFETY: as above.
+        unsafe { SendMessageW(hwnd, WM_PAINT, 0, 0) };
+        assert_eq!((paints.get(), composer(Composer::due)), (1, Some(false)));
+        // As if it had composed on hardware: the runner has no GPU, so rebuilds land on WARP.
+        let hardware = Presenter {
+            composed: true,
+            hardware: true,
+            device_lost: false,
+        };
+        // SAFETY: as above.
+        unsafe {
+            with_state(hwnd, |s| {
+                s.presenter.set(hardware);
+                s.lost(hwnd);
+            })
+        };
+        let warp = Presenter {
+            composed: true,
+            hardware: false,
+            device_lost: true,
+        };
+        assert_eq!(last_presenter(&events), Some(warp));
+        assert_eq!(composer(Composer::warp), Some(true));
+        // A second loss within a minute, and a second of the last rebuild: the lost presenter
+        // goes at once, and the new one, on WARP, waits on the timer.
+        let heard = events.borrow().len();
+        // SAFETY: as above.
+        let waiting = unsafe {
+            with_state(hwnd, |s| {
+                s.lost(hwnd);
+                s.rebuild_on.get()
+            })
+        };
+        assert_eq!(waiting, Some(Some(Device::Warp)));
+        assert_eq!(composer(Composer::warp), None);
+        // Paints meanwhile neither rebuild nor spin.
+        // SAFETY: as above.
+        unsafe { SendMessageW(hwnd, WM_PAINT, 0, 0) };
+        assert_eq!(composer(Composer::warp), None);
+        // SAFETY: as above; the timer's message, as the loop would dispatch it.
+        unsafe { SendMessageW(hwnd, WM_TIMER, REBUILD_TIMER, 0) };
+        assert_eq!(composer(Composer::warp), Some(true));
+        assert_eq!(events.borrow().len(), heard, "{:?}", events.borrow());
+        // The new buffers show the canvas without the handler painting again.
+        assert_eq!(composer(Composer::due), Some(true));
+        // SAFETY: as above.
+        unsafe { SendMessageW(hwnd, WM_PAINT, 0, 0) };
+        assert_eq!((paints.get(), composer(Composer::due)), (1, Some(false)));
     }
 
     /// A settings signal reaches the handler only when a setting it sees changed.
@@ -1216,6 +1754,7 @@ mod tests {
             title: "dpro-win a11y test",
             size: (200, 100),
             min_size: (100, 100),
+            compose: Compose::Never,
         };
         let window = Window::new(&options, Box::new(handler)).expect("a window");
         // Events before any client asked don't ask the handler for its tree.

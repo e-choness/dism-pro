@@ -36,7 +36,7 @@ mod win {
         platform::{self, DirectWrite, Host, Model},
     };
     use dpro_win::gui::{
-        WindowOptions,
+        Compose, WindowOptions,
         probe::{self, Args, ForceMaterials},
     };
 
@@ -63,6 +63,8 @@ mod win {
             title: "DISM Pro shell probe",
             size: args.size.unwrap_or((1280, 800)),
             min_size: (500, 400),
+            // `platform::run` decides.
+            compose: Compose::Never,
         };
         let Ok(text) = DirectWrite::new() else {
             return ExitCode::FAILURE;

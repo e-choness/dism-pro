@@ -73,7 +73,8 @@ impl<M> Ui<M> {
             return;
         }
         canvas.set_clip(region);
-        canvas.fill(region, theme.color(Tone::App));
+        // Set, not blended: under glass the background is clear, and the old pixels must go.
+        canvas.clear(region, theme.color(Tone::App));
         let mut p = Painter {
             canvas,
             text,

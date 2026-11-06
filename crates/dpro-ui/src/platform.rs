@@ -1,6 +1,6 @@
 //! The Win32 platform (TD-0009 §5.1): a [`Ui`] hosted in a `dpro_win::gui::Window`.
 //!
-//! `dpro-win` owns the window, its loop and the GDI presenter, and knows nothing of the toolkit;
+//! `dpro-win` owns the window, its loop and its presenters, and knows nothing of the toolkit;
 //! [`Host`] adapts one to the other. Each event goes through the frame pipeline (§5.2): input is
 //! dispatched and its messages update the [`Model`], the view is rebuilt and laid out, and the
 //! damage is handed to the window. On `WM_PAINT` the damage is painted into the window's canvas,
@@ -9,22 +9,30 @@
 //!
 //! [`DirectWrite`] is the [`TextSystem`] over `dpro_win`'s DirectWrite text.
 //!
-//! **Environment** (TD-0009 §5.2). The window reports Windows' settings at creation and on every
-//! change. The host turns them into the theme (high contrast's system colors, else dark or light),
-//! the motion (*Animation effects* off is reduced motion) and the [`Materials`]. A new theme
-//! repaints the whole window once; any other change repaints nothing. The GDI presenter is the
-//! only one so far, so the materials are always solid.
+//! **Presenter** (TD-0009 §5.2). [`run`] decides what the window may compose with:
+//! nothing in `WinPE` or before Windows 11 22H2 (no system backdrop), any device for
+//! `--materials glass`, else a hardware one. The window reports which it got, and again if a lost
+//! device changes it.
+//!
+//! **Environment.** The window reports Windows' settings at creation and on every change. The
+//! host turns them, and the presenter, into the theme (high contrast's system colors, else dark or
+//! light, as glass or solid), the motion (*Animation effects* off is reduced motion), the
+//! [`Materials`] and the window's backdrop (Mica under glass). A new theme repaints the whole
+//! window once; any other change repaints nothing.
 
 use std::time::Instant;
 
 use dpro_win::gui::{
-    self, Event, Frame, Handler, PointPx, SizePx, Window, WindowCx, WindowOptions, text,
+    self, Backdrop, Compose, Event, Frame, Handler, PointPx, Presenter, SizePx, Window, WindowCx,
+    WindowOptions, text,
 };
 
 use crate::{
     Canvas, Color, Cx, GlyphSink, Icon, Input, KeyCode, KeyEvent, Mods, Motion, Point, Rect,
     Scheme, Size, SysColors, TextMetrics, TextStyle, TextSystem, Theme, Ui,
-    materials::{Environment, GlassPref, Materials, PresenterKind, SolidReason, materials},
+    materials::{
+        Environment, GLASS_BUILD, GlassPref, Materials, PresenterKind, SolidReason, materials,
+    },
 };
 
 /// Text measured and drawn with DirectWrite.
@@ -119,9 +127,21 @@ pub struct Host<P: Model> {
     theme: Theme,
     glass: GlassPref,
     materials: Materials,
+    /// Windows' settings, once the window has sent them.
+    env: Option<gui::env::Env>,
+    presenter: Presenter,
     msgs: Vec<P::Msg>,
     /// The animation clock's zero.
     start: Instant,
+}
+
+/// What new settings or a new presenter changed in how the window looks.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Restyle {
+    /// A new theme: everything repaints, and the frame follows dark or light.
+    theme: bool,
+    /// Glass came (`true`) or went: the backdrop follows.
+    glass: Option<bool>,
 }
 
 impl<P: Model> std::fmt::Debug for Host<P> {
@@ -136,8 +156,9 @@ impl<P: Model> std::fmt::Debug for Host<P> {
 }
 
 impl<P: Model> Host<P> {
-    /// The window sends Windows' settings, its DPI and its size before the first frame, so the
-    /// [`Ui`] starts empty, light and solid. `glass` is the user's preference (or `--materials`).
+    /// The window sends its presenter, Windows' settings, its DPI and its size before the first
+    /// frame, so the [`Ui`] starts empty, light and solid. `glass` is the user's preference (or
+    /// `--materials`).
     #[must_use]
     pub fn new(model: P, text: Box<dyn TextSystem>, glass: GlassPref) -> Self {
         Self {
@@ -147,6 +168,8 @@ impl<P: Model> Host<P> {
             theme: Theme::LIGHT,
             glass,
             materials: Materials::Solid(SolidReason::NoHardwareGpu),
+            env: None,
+            presenter: Presenter::default(),
             msgs: Vec::with_capacity(4),
             start: Instant::now(),
         }
@@ -169,18 +192,56 @@ impl<P: Model> Host<P> {
         &self.theme
     }
 
-    /// Windows' settings changed (or arrived): the theme, motion and materials follow. Returns
-    /// whether the theme changed, which repaints everything.
-    fn environment(&mut self, env: &gui::env::Env) -> bool {
-        self.materials = materials(&environment(env), self.glass);
+    /// Windows' settings changed (or arrived): the motion follows, and the look.
+    fn set_env(&mut self, env: gui::env::Env) -> Restyle {
+        self.env = Some(env);
         self.ui.set_motion(Motion::system(env.animations));
-        let theme = theme_of(env);
-        if theme == self.theme {
-            return false;
+        self.restyle()
+    }
+
+    /// The window's presenter changed (or was chosen): the look follows.
+    fn set_presenter(&mut self, presenter: Presenter) -> Restyle {
+        self.presenter = presenter;
+        self.restyle()
+    }
+
+    /// The materials and the theme for the settings and presenter as they are. A new theme
+    /// repaints everything.
+    fn restyle(&mut self) -> Restyle {
+        let Some(env) = self.env else {
+            return Restyle::default();
+        };
+        let was_glass = matches!(self.materials, Materials::Glass { .. });
+        self.materials = materials(&environment(&env, self.presenter), self.glass);
+        let glass = matches!(self.materials, Materials::Glass { .. });
+        let theme = if glass {
+            theme_of(&env).glass()
+        } else {
+            theme_of(&env)
+        };
+        let new_theme = theme != self.theme;
+        if new_theme {
+            self.theme = theme;
+            self.ui.repaint_all();
         }
-        self.theme = theme;
-        self.ui.repaint_all();
-        true
+        Restyle {
+            theme: new_theme,
+            glass: (glass != was_glass).then_some(glass),
+        }
+    }
+
+    /// Tells the window what changed: the frame's dark or light, and the backdrop.
+    fn apply(&self, restyle: Restyle, cx: &mut WindowCx<'_>) {
+        if restyle.theme {
+            cx.set_dark_frame(self.theme.scheme() == Scheme::Dark);
+        }
+        if let Some(glass) = restyle.glass {
+            cx.set_backdrop(if glass {
+                Backdrop::Mica
+            } else {
+                Backdrop::None
+            });
+        }
     }
 
     /// Dispatches `input` and updates the model with the messages it produced.
@@ -248,10 +309,14 @@ impl<P: Model> Handler for Host<P> {
                     win: mods.win,
                 },
             })),
+            Event::Presenter(presenter) => {
+                let restyle = self.set_presenter(presenter);
+                self.apply(restyle, cx);
+                true
+            }
             Event::Env(env) => {
-                if self.environment(&env) {
-                    cx.set_dark_frame(self.theme.scheme() == Scheme::Dark);
-                }
+                let restyle = self.set_env(env);
+                self.apply(restyle, cx);
                 true
             }
             Event::Focus(_) => false,
@@ -295,7 +360,8 @@ impl<P: Model> Handler for Host<P> {
     }
 }
 
-/// Opens a window on `host` and runs it until it closes.
+/// Opens a window on `host` and runs it until it closes. The window composes as Windows and the
+/// host's glass preference allow ([`compose_for`]), whatever `options.compose` says.
 ///
 /// # Errors
 /// The window couldn't be created, or its message loop failed.
@@ -303,21 +369,43 @@ pub fn run<P: Model + 'static>(
     options: &WindowOptions<'_>,
     host: Host<P>,
 ) -> Result<(), dpro_win::Error> {
-    let window = Window::new(options, Box::new(host))?;
+    let options = WindowOptions {
+        compose: compose_for(&gui::env::Env::read(), host.glass),
+        ..*options
+    };
+    let window = Window::new(&options, Box::new(host))?;
     window.show();
     window.run()
 }
 
-/// The materials' view of Windows' settings. The GDI presenter is the only one yet: it never
-/// composes, whatever the GPU, so `hardware_gpu` stays false until the composition presenter
-/// probes the adapter.
-const fn environment(env: &gui::env::Env) -> Environment {
+/// What a window may compose with (TD-0009 §5.2): nothing where there's no system backdrop
+/// (`WinPE`, Windows before 11 22H2), any device when glass is forced (`--materials glass`, which
+/// G1 runs on WARP), else a hardware one. Every other reason for solid materials can change while
+/// the window is open, so the window composes and the materials decide.
+#[must_use]
+pub const fn compose_for(env: &gui::env::Env, pref: GlassPref) -> Compose {
+    if env.winpe || env.build < GLASS_BUILD {
+        Compose::Never
+    } else if matches!(pref, GlassPref::Force) {
+        Compose::Any
+    } else {
+        Compose::Hardware
+    }
+}
+
+/// The materials' view of Windows' settings and the window's presenter.
+const fn environment(env: &gui::env::Env, presenter: Presenter) -> Environment {
     Environment {
         winpe: env.winpe,
         build: env.build,
-        presenter: PresenterKind::Gdi,
-        hardware_gpu: false,
-        device_lost: false,
+        presenter: if presenter.composed {
+            PresenterKind::Composition
+        } else {
+            PresenterKind::Gdi
+        },
+        // A device lost for WARP still means the machine has a GPU: the reason is the loss.
+        hardware_gpu: presenter.hardware || presenter.device_lost,
+        device_lost: presenter.device_lost,
         transparency: env.transparency,
         high_contrast: env.high_contrast,
         remote: env.remote,
@@ -521,8 +609,10 @@ mod tests {
             },
             ..gui::env::Env::default()
         };
+        // The presenter comes first, before any settings: nothing to decide yet.
+        assert_eq!(host.set_presenter(Presenter::default()), Restyle::default());
         // Light is where the host starts: nothing to repaint.
-        assert!(!host.environment(&light));
+        assert_eq!(host.set_env(light), Restyle::default());
         assert_eq!(host.ui.damage().len(), 0);
         assert_eq!(host.ui.motion(), Motion::STANDARD);
         // GDI never composes.
@@ -535,7 +625,7 @@ mod tests {
             dark: true,
             ..light
         };
-        assert!(host.environment(&dark));
+        assert!(host.set_env(dark).theme);
         assert_eq!(*host.theme(), Theme::DARK);
         assert_ne!(host.ui.damage().len(), 0);
         host.ui.clear_damage();
@@ -545,7 +635,7 @@ mod tests {
             transparency: false,
             ..dark
         };
-        assert!(!host.environment(&calm));
+        assert_eq!(host.set_env(calm), Restyle::default());
         assert_eq!(host.ui.motion(), Motion::REDUCED);
         assert_eq!(host.ui.damage().len(), 0);
         // High contrast: the system's colors, whatever the app mode.
@@ -553,7 +643,7 @@ mod tests {
             high_contrast: true,
             ..calm
         };
-        assert!(host.environment(&hc));
+        assert!(host.set_env(hc).theme);
         assert_eq!(host.theme().scheme(), Scheme::HighContrast);
         assert_eq!(
             host.theme().color(crate::Tone::Accent),
@@ -561,7 +651,95 @@ mod tests {
         );
         // WinPE says so, whatever else holds.
         let pe = gui::env::Env { winpe: true, ..hc };
-        host.environment(&pe);
+        host.set_env(pe);
         assert_eq!(host.materials(), Materials::Solid(SolidReason::WinPe));
+    }
+
+    /// TD-0009 §5.2: a composed window on hardware shows glass and asks for Mica; switching
+    /// *Transparency effects* off goes solid live, and a lost device for WARP stays solid.
+    #[test]
+    fn a_composed_window_goes_glass_and_back_live() {
+        let mut host = Host::new(Counter::default(), Box::new(FakeText), GlassPref::Auto);
+        host.ui.set_viewport(Size { w: 200.0, h: 100.0 });
+        let hardware = Presenter {
+            composed: true,
+            hardware: true,
+            device_lost: false,
+        };
+        assert_eq!(host.set_presenter(hardware), Restyle::default());
+        let env = gui::env::Env {
+            build: 26_100,
+            transparency: true,
+            animations: true,
+            ..gui::env::Env::default()
+        };
+        host.ui.clear_damage();
+        let glass = Restyle {
+            theme: true,
+            glass: Some(true),
+        };
+        assert_eq!(host.set_env(env), glass);
+        assert_eq!(
+            host.materials(),
+            Materials::Glass {
+                in_app_acrylic: true
+            }
+        );
+        assert_eq!(*host.theme(), Theme::LIGHT.glass());
+        assert_ne!(host.ui.damage().len(), 0, "the new theme repaints");
+        let solid = Restyle {
+            theme: true,
+            glass: Some(false),
+        };
+        let opaque = gui::env::Env {
+            transparency: false,
+            ..env
+        };
+        assert_eq!(host.set_env(opaque), solid);
+        assert_eq!(*host.theme(), Theme::LIGHT);
+        assert_eq!(host.set_env(env), glass);
+        // Hardware lost for WARP: solid until the window is opened again.
+        let warp = Presenter {
+            hardware: false,
+            device_lost: true,
+            ..hardware
+        };
+        assert_eq!(host.set_presenter(warp), solid);
+        assert_eq!(host.materials(), Materials::Solid(SolidReason::DeviceLost));
+        // Forced glass (G1) composes on WARP.
+        let mut forced = Host::new(Counter::default(), Box::new(FakeText), GlassPref::Force);
+        forced.set_presenter(Presenter {
+            hardware: false,
+            ..hardware
+        });
+        assert_eq!(forced.set_env(env), glass);
+        assert_eq!(
+            forced.materials(),
+            Materials::Glass {
+                in_app_acrylic: false
+            }
+        );
+    }
+
+    #[test]
+    fn a_window_composes_only_where_glass_can_show() {
+        let env = gui::env::Env {
+            build: GLASS_BUILD,
+            ..gui::env::Env::default()
+        };
+        assert_eq!(compose_for(&env, GlassPref::Auto), Compose::Hardware);
+        // Off may become Auto in Settings while the window is open.
+        assert_eq!(compose_for(&env, GlassPref::Off), Compose::Hardware);
+        assert_eq!(compose_for(&env, GlassPref::Force), Compose::Any);
+        let old = gui::env::Env {
+            build: GLASS_BUILD - 1,
+            ..env
+        };
+        let pe = gui::env::Env { winpe: true, ..env };
+        for env in [old, pe] {
+            for pref in [GlassPref::Auto, GlassPref::Force] {
+                assert_eq!(compose_for(&env, pref), Compose::Never);
+            }
+        }
     }
 }

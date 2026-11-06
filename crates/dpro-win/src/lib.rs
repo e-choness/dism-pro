@@ -15,6 +15,7 @@
 pub mod console;
 pub mod crash;
 pub mod dism;
+mod dll;
 pub mod elevate;
 pub mod error;
 pub mod event;

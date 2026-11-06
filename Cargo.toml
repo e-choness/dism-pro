@@ -46,11 +46,18 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
-# COM for dpro-win's GUI (TD-0009 §5.5): DirectWrite, and the UI Automation types that
+# COM for dpro-win's GUI (TD-0009 §5.5): DirectWrite, the composition presenter (Direct3D 11,
+# DXGI and DirectComposition, loaded at run time), and the UI Automation types that
 # accesskit_windows shares (this release) and HIGHCONTRASTW. windows-sys has no COM interfaces.
 # MIT OR Apache-2.0. Exact: the version S-01 built.
 windows = { version = "=0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_DirectComposition",
     "Win32_Graphics_DirectWrite",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
     "Win32_UI_Accessibility",
 ] }
 # Already in the tree through `windows`; named directly because `#[implement]` (our DirectWrite

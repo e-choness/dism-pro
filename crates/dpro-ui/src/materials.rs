@@ -33,8 +33,9 @@ pub enum GlassPref {
     Auto,
     /// Always solid.
     Off,
-    /// `--materials glass`, for G1: glass whenever the presenter can compose, on WARP too, whatever
-    /// Windows' transparency, remote and battery settings say. High contrast still wins.
+    /// `--materials glass`, for G1: glass whenever the presenter can compose, on WARP too, after a
+    /// device loss, and in a remote session or on battery saver, which a runner can't change.
+    /// High contrast and *Transparency effects* still win, so G1 can switch the latter live.
     Force,
 }
 
@@ -101,9 +102,11 @@ pub struct Environment {
     /// The Windows build number (`CurrentBuildNumber`).
     pub build: u32,
     pub presenter: PresenterKind,
-    /// The composition presenter runs on a hardware device (not WARP).
+    /// The composition presenter runs on a hardware device (not WARP), or did until it was lost
+    /// ([`device_lost`](Self::device_lost)).
     pub hardware_gpu: bool,
-    /// The presenter lost its device twice within a minute and went on with WARP (TD-0009 §5.2).
+    /// The presenter lost its hardware device and went on with WARP: a second loss within a
+    /// minute, or no hardware device to rebuild on (TD-0009 §5.2).
     pub device_lost: bool,
     /// Windows' *Transparency effects*.
     pub transparency: bool,
@@ -129,7 +132,7 @@ pub const fn materials(env: &Environment, pref: GlassPref) -> Materials {
         SolidReason::HighContrast
     } else if matches!(pref, GlassPref::Off) {
         SolidReason::UserChoice
-    } else if !env.transparency && !forced {
+    } else if !env.transparency {
         SolidReason::TransparencyOff
     } else if env.remote && !forced {
         SolidReason::RemoteSession
@@ -206,7 +209,7 @@ mod tests {
             (env.device_lost, SolidReason::DeviceLost, true),
             (env.high_contrast, SolidReason::HighContrast, false),
             (pref == GlassPref::Off, SolidReason::UserChoice, false),
-            (!env.transparency, SolidReason::TransparencyOff, true),
+            (!env.transparency, SolidReason::TransparencyOff, false),
             (env.remote, SolidReason::RemoteSession, true),
             (env.battery_saver, SolidReason::BatterySaver, true),
         ];
@@ -243,9 +246,9 @@ mod tests {
                 }
             }
         }
-        // Auto: only the glassy row's 2 builds. Force: any GPU state, loss, transparency,
-        // remote and battery saver (2 builds × 2^5).
-        assert_eq!(glass, 2 + 2 * 32);
+        // Auto: only the glassy row's 2 builds. Force: any GPU state, loss, remote and battery
+        // saver (2 builds × 2^4).
+        assert_eq!(glass, 2 + 2 * 16);
     }
 
     /// Turning on any blocker never brings glass back: the rule is monotonic.
@@ -359,6 +362,29 @@ mod tests {
             Materials::Solid(SolidReason::UserChoice)
         );
         assert_eq!(auto(plain), Materials::Solid(SolidReason::TransparencyOff));
+        // Force composes on WARP in a remote session, but transparency off still wins: G1 switches
+        // it live.
+        let runner = Environment {
+            hardware_gpu: false,
+            remote: true,
+            ..GLASSY
+        };
+        assert_eq!(
+            materials(&runner, GlassPref::Force),
+            Materials::Glass {
+                in_app_acrylic: false
+            }
+        );
+        assert_eq!(
+            materials(
+                &Environment {
+                    transparency: false,
+                    ..runner
+                },
+                GlassPref::Force
+            ),
+            Materials::Solid(SolidReason::TransparencyOff)
+        );
         assert_eq!(
             auto(Environment {
                 remote: true,
