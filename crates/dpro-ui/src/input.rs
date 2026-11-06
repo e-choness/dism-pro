@@ -1159,6 +1159,24 @@ mod tests {
     }
 
     #[test]
+    fn reduced_motion_leaves_a_hold_its_time() {
+        // A hold is a confirmation, not an animation: no shorter, and still drawn as it fills.
+        let hold = u64::from(crate::tokens::motion::HOLD_MS);
+        let mut ui = holding();
+        ui.set_motion(Motion::REDUCED);
+        let mut out = Vec::new();
+        ui.dispatch(Input::PointerDown(at(10.0)), &mut out);
+        ui.tick(0, &mut out);
+        assert!(ui.wants_frame());
+        ui.tick(hold / 2, &mut out);
+        assert_eq!(ui.hold_progress(), Some(0.5));
+        ui.tick(hold - 1, &mut out);
+        assert_eq!(out, [] as [u8; 0]);
+        ui.tick(hold, &mut out);
+        assert_eq!(out, [7]);
+    }
+
+    #[test]
     fn a_held_key_holds_and_its_repeats_change_nothing() {
         let mut ui = holding();
         let mut out = Vec::new();
