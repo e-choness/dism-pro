@@ -540,8 +540,6 @@ public static class TextGateWin32 {
     static extern IntPtr LoadCursorW(IntPtr instance, IntPtr id);
     [DllImport("user32.dll")]
     public static extern bool SetForegroundWindow(IntPtr hwnd);
-    [DllImport("user32.dll")]
-    public static extern bool SetCursorPos(int x, int y);
     const uint KEYBOARD = 1, KEYUP = 2, UNICODE = 4;
     static INPUT Key(ushort vk, ushort scan, uint flags) {
         var i = new INPUT { type = KEYBOARD };
@@ -569,11 +567,75 @@ public static class TextGateWin32 {
         for (int k = mods.Length - 1; k >= 0; k--) { inputs[n++] = Key(mods[k], 0, KEYUP); }
         return Send(inputs);
     }
-    // Whether the pointer shows the system's I-beam (IDC_IBEAM, a shared handle).
-    public static bool IsIBeam() {
+    [StructLayout(LayoutKind.Sequential)]
+    struct POINT { public int x; public int y; }
+    [DllImport("user32.dll")]
+    static extern bool GetCursorPos(out POINT p);
+    [DllImport("user32.dll")]
+    static extern IntPtr WindowFromPoint(POINT p);
+    [DllImport("user32.dll")]
+    static extern IntPtr GetAncestor(IntPtr hwnd, uint flags);
+    [DllImport("user32.dll")]
+    static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    static extern int GetClassNameW(IntPtr hwnd, System.Text.StringBuilder name, int size);
+    [DllImport("kernel32.dll")]
+    static extern uint GetCurrentThreadId();
+    [DllImport("user32.dll")]
+    static extern bool AttachThreadInput(uint from, uint to, bool attach);
+    [DllImport("user32.dll")]
+    static extern IntPtr GetCursor();
+    [DllImport("user32.dll")]
+    static extern int GetSystemMetrics(int index);
+    const uint MOUSE = 0, MOVE = 1, ABSOLUTE = 0x8000;
+    // The system cursors, shared handles: the same in every process of the session.
+    static readonly IntPtr IBeam = LoadCursorW(IntPtr.Zero, (IntPtr) 32513);
+    static readonly IntPtr Arrow = LoadCursorW(IntPtr.Zero, (IntPtr) 32512);
+    static string Name(IntPtr cursor) {
+        if (cursor == IntPtr.Zero) { return "none"; }
+        if (cursor == IBeam) { return "I-beam"; }
+        if (cursor == Arrow) { return "arrow"; }
+        return "0x" + cursor.ToString("X");
+    }
+    // The pointer moved to (x, y) on the primary monitor as mouse input, like a mouse would, not
+    // placed (SetCursorPos). Returns the events sent.
+    public static uint MoveTo(int x, int y) {
+        int w = Math.Max(2, GetSystemMetrics(0)), h = Math.Max(2, GetSystemMetrics(1)); // SM_CXSCREEN, SM_CYSCREEN
+        var i = new INPUT { type = MOUSE };
+        i.u.mi = new MOUSEINPUT { dx = (int) (x * 65535L / (w - 1)), dy = (int) (y * 65535L / (h - 1)), dwFlags = MOVE | ABSOLUTE };
+        return Send(new[] { i });
+    }
+    // Whether the pointer over `hwnd` is an I-beam, and what was read. A pointer Windows shows
+    // must be the I-beam. When it shows none (no mouse on the machine, or hidden while typing),
+    // the cursor the window's thread set is read instead, through its input queue
+    // (AttachThreadInput, then GetCursor): what the shell asked for is all there is to see.
+    public static string Pointer(IntPtr hwnd, out bool ibeam) {
         var info = new CURSORINFO();
         info.cbSize = Marshal.SizeOf(info);
-        return GetCursorInfo(ref info) && info.hCursor == LoadCursorW(IntPtr.Zero, (IntPtr) 32513);
+        bool got = GetCursorInfo(ref info);
+        bool shown = got && (info.flags & 1) != 0; // CURSOR_SHOWING
+        uint pid;
+        uint thread = GetWindowThreadProcessId(hwnd, out pid);
+        IntPtr set = IntPtr.Zero;
+        uint me = GetCurrentThreadId();
+        bool attached = thread != 0 && thread != me && AttachThreadInput(me, thread, true);
+        if (attached) {
+            set = GetCursor();
+            AttachThreadInput(me, thread, false);
+        }
+        ibeam = shown ? info.hCursor == IBeam : attached && set == IBeam;
+        POINT at;
+        GetCursorPos(out at);
+        IntPtr under = GetAncestor(WindowFromPoint(at), 2); // GA_ROOT
+        uint underPid;
+        GetWindowThreadProcessId(under, out underPid);
+        var cls = new System.Text.StringBuilder(64);
+        GetClassNameW(under, cls, cls.Capacity);
+        string owner = under == hwnd ? "the shell" : "another window (" + cls + ", pid " + underPid + ")";
+        return String.Format(
+            "shown: {0} (GetCursorInfo {1}, flags {2}); set by the shell: {3}; at ({4}, {5}) over {6}; mouse present: {7}",
+            shown ? Name(info.hCursor) : "no pointer", got ? "ok" : "failed", info.flags,
+            attached ? Name(set) : "unread", at.x, at.y, owner, GetSystemMetrics(19)); // SM_MOUSEPRESENT
     }
 }
 '@
@@ -639,9 +701,23 @@ try {
         $value.Current.Value -eq 'Fabrikam' -and $rows.Count -gt 0 -and $rows[0].Current.Name -like 'Fabrikam*'
     } 2000
 
+    # The pointer comes from the table into the field as mouse input, so the window sees the move
+    # into it; what it shows (or sets) there is the check, and both places are reported.
+    $win = $root.Current.BoundingRectangle
     $r = $edit.Current.BoundingRectangle
-    [void][TextGateWin32]::SetCursorPos([int] ($r.X + $r.Width / 2), [int] ($r.Y + $r.Height / 2))
-    $checks['an I-beam over it'] = Wait-Until { [TextGateWin32]::IsIBeam() } 2000
+    $hit = $false
+    $off = [TextGateWin32]::MoveTo([int] ($win.X + $win.Width / 2), [int] ($win.Y + $win.Height * 3 / 4))
+    $null = Wait-Until { $null = [TextGateWin32]::Pointer($hwnd, [ref] $script:hit); -not $script:hit } 1000
+    $lines += "pointer off the field ($off sent): $([TextGateWin32]::Pointer($hwnd, [ref] $hit))"
+    $fx = [int] ($r.X + $r.Width / 2)
+    $fy = [int] ($r.Y + $r.Height / 2)
+    $on = [TextGateWin32]::MoveTo($fx, $fy)
+    $pointer = ''
+    $checks['an I-beam over it'] = Wait-Until {
+        $script:pointer = [TextGateWin32]::Pointer($hwnd, [ref] $script:hit)
+        $script:hit
+    } 2000
+    $lines += "pointer on the field at ($fx, $fy) ($on sent): $pointer"
 } catch {
     $lines += "text input FAILED: $($_.Exception.Message)"
     $checks['client'] = $false
