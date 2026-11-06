@@ -46,6 +46,8 @@ pub struct TextMetrics {
 pub enum Icon {
     /// A check box's check.
     CheckMark,
+    /// A dropdown's chevron.
+    ChevronDown,
 }
 
 impl Icon {
@@ -54,6 +56,7 @@ impl Icon {
     pub const fn codepoint(self) -> u32 {
         match self {
             Self::CheckMark => 0xE73E,
+            Self::ChevronDown => 0xE70D,
         }
     }
 }

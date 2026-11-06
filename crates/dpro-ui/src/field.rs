@@ -448,15 +448,18 @@ impl<M> Ui<M> {
         }
     }
 
-    /// Whether the window is active (has keyboard focus): only then is a caret or selection shown.
-    /// A window that goes inactive lets go of its hold, whose key's release it may never see.
+    /// Whether the window is active (has keyboard focus): only then is a caret or selection shown,
+    /// or a tooltip. A window that goes inactive cancels its press and its hold, whose release it
+    /// may never see, and lets go of its tooltip; the pointer must move again to show one.
     pub fn set_active(&mut self, active: bool) {
         if self.active != active {
             self.active = active;
             self.reset_caret();
             self.damage_caret_field();
             if !active {
-                self.end_hold();
+                self.cancel_press();
+                self.tip_cancel(false);
+                self.tip.over = NIL;
             }
         }
     }

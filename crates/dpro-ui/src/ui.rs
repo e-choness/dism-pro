@@ -10,6 +10,7 @@ use crate::{
     field::{Caret, ClipboardRequest, Field},
     geom::{Point, Rect, RectPx, Size},
     pool::TextPool,
+    tooltip::Tip,
     tree::{Key, NIL, Node, NodeId, NodeInfo, Role},
 };
 
@@ -88,6 +89,31 @@ pub struct Ui<M> {
     pub(crate) holds: Vec<HoldSlot<M>>,
     /// The hold running or spent, or none (`input.rs`).
     pub(crate) hold: Hold,
+    /// What few nodes have (tooltips, a dropdown's name and step), by their `side` slot; freed
+    /// slots keep their buffers.
+    pub(crate) sides: Vec<Side<M>>,
+    pub(crate) free_sides: Vec<u32>,
+    /// The tooltip (`tooltip.rs`).
+    pub(crate) tip: Tip,
+    /// Where the last popup was asked for, in logical pixels: a context request's point (or its
+    /// node, from the keyboard), or the node that opens a popup, activated (`popup.rs`).
+    pub(crate) anchor: Option<Rect>,
+    /// The node [`anchor`](Self::anchor) is for: when it goes, so does the anchor, and the host
+    /// closes the popup that was anchored there (A1.8).
+    pub(crate) anchor_node: u32,
+    /// The node a context request found since [`take_context`](Self::take_context); [`NIL`] if
+    /// none did.
+    pub(crate) context: u32,
+}
+
+/// A node's tooltip, and a dropdown's accessible name and step: in a side table, so the nodes
+/// without them (nearly all) carry one index.
+#[derive(Debug)]
+pub(crate) struct Side<M> {
+    pub(crate) node: u32,
+    pub(crate) tip: String,
+    pub(crate) label: String,
+    pub(crate) step: Option<fn(bool) -> M>,
 }
 
 /// A hold button's Invoke message.
@@ -161,6 +187,12 @@ impl<M> Ui<M> {
             clipboard: None,
             holds: Vec::new(),
             hold: Hold::NONE,
+            sides: Vec::new(),
+            free_sides: Vec::new(),
+            tip: Tip::new(),
+            anchor: None,
+            anchor_node: NIL,
+            context: NIL,
         };
         ui.damage_all();
         ui
@@ -299,6 +331,7 @@ impl<M> Ui<M> {
             enabled: n.enabled,
             check: n.check,
             selected: n.selected,
+            expanded: n.expanded,
             hovered: n.hovered,
             pressed: n.pressed,
             focused: self.focus == i,
@@ -402,8 +435,32 @@ impl<M> Ui<M> {
         let parent = self.nodes[child as usize].parent;
         self.unlink(child);
         self.free_subtree(child);
+        self.forget_freed();
         self.mark_dirty(parent);
         self.a11y_touch(parent);
+    }
+
+    /// Drops what pointed into a subtree just freed (nothing has reused its slots yet). Once per
+    /// removal rather than per freed node: a filter that removes every row frees ~400 nodes.
+    fn forget_freed(&mut self) {
+        let nodes = &self.nodes;
+        let gone = |i: u32| i != NIL && !nodes[i as usize].live;
+        for slot in [
+            &mut self.focus,
+            &mut self.hover,
+            &mut self.pressed,
+            &mut self.key_pressed,
+            &mut self.context,
+        ] {
+            if gone(*slot) {
+                *slot = NIL;
+            }
+        }
+        if gone(self.anchor_node) {
+            self.anchor = None;
+            self.anchor_node = NIL;
+        }
+        self.tip_forget_freed();
     }
 
     fn free_subtree(&mut self, i: u32) {
@@ -412,16 +469,6 @@ impl<M> Ui<M> {
             let next = self.nodes[c as usize].next;
             self.free_subtree(c);
             c = next;
-        }
-        for slot in [
-            &mut self.focus,
-            &mut self.hover,
-            &mut self.pressed,
-            &mut self.key_pressed,
-        ] {
-            if *slot == i {
-                *slot = NIL;
-            }
         }
         if self.nodes[i as usize].animating
             && let Some(k) = self.anims.iter().position(|a| a.index == i)
@@ -434,6 +481,17 @@ impl<M> Ui<M> {
         }
         if std::mem::replace(&mut self.nodes[i as usize].hold, false) {
             self.forget_hold(i);
+        }
+        // Only a node with popup state (a tooltip, a dropdown) has a side slot: the rest skip it.
+        debug_assert!(
+            self.nodes[i as usize].rare != 0 || self.nodes[i as usize].side == NIL,
+            "node {i} has a side slot and no popup state"
+        );
+        if self.nodes[i as usize].rare != 0 {
+            let side = std::mem::replace(&mut self.nodes[i as usize].side, NIL);
+            if side != NIL {
+                self.release_side(side);
+            }
         }
         let n = &mut self.nodes[i as usize];
         n.live = false;

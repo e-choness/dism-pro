@@ -17,7 +17,7 @@ use windows_sys::Win32::{
     UI::WindowsAndMessaging::{PostMessageW, WM_APP},
 };
 
-use super::Handler;
+use super::{Handler, Surface};
 
 /// Posted to the window when requests are waiting; one per drain, however many arrive.
 pub(super) const WM_APP_A11Y: u32 = WM_APP + 1;
@@ -91,17 +91,19 @@ impl ActionHandler for ToUiThread {
     }
 }
 
-/// A client's first request: asks the handler for its tree if it's free, and remembers whether
-/// the adapter got one.
+/// A client's first request in a window (the main one or a popup): asks the handler for that
+/// surface's tree if it's free, and remembers whether the adapter got one.
 pub(super) struct Initial<'a> {
     pub(super) handler: Option<RefMut<'a, Box<dyn Handler>>>,
+    pub(super) surface: Surface,
     /// The adapter asked and got nothing: it serves a placeholder until it gets a whole tree.
     pub(super) placeholder: bool,
 }
 
 impl ActivationHandler for Initial<'_> {
     fn request_initial_tree(&mut self) -> Option<TreeUpdate> {
-        let tree = self.handler.as_mut().and_then(|h| h.a11y_tree());
+        let surface = self.surface;
+        let tree = self.handler.as_mut().and_then(|h| h.a11y_tree(surface));
         self.placeholder = tree.is_none();
         tree
     }

@@ -25,18 +25,24 @@
 //! one-shot wake, set again after every event for when it's next due, and cancelled once it rests
 //! (U6). It follows Windows' blink rate and width, and shows only while the window has keyboard
 //! focus. Over a field the pointer is an I-beam.
+//!
+//! **Popups** (TD-0009 A1, `popups.rs`). The model's menu or dropdown list, and the toolkit's
+//! tooltip, each show in a popup window of the main one, with a [`Ui`] of its own. Every
+//! surface's events reach this one handler, marked with the surface they're for.
+
+mod popups;
 
 use std::time::Instant;
 
 use dpro_win::gui::{
-    self, Backdrop, Compose, Event, Frame, Handler, PointPx, Presenter, SizePx, Window, WindowCx,
-    WindowOptions, text,
+    self, Backdrop, Compose, Event, Frame, Handler, PointPx, Presenter, SizePx, Surface, Window,
+    WindowCx, WindowOptions, text,
 };
 
 use crate::{
-    Canvas, Caret, CaretStop, ClipboardRequest, Color, Cursor, Cx, GlyphSink, Icon, Input, KeyCode,
-    KeyEvent, MAX_FIELD_LEN, Mods, Motion, Point, Rect, Scheme, Size, SysColors, TextMetrics,
-    TextStyle, TextSystem, Theme, Ui,
+    Canvas, Caret, CaretStop, ClipboardRequest, Color, Cursor, Cx, GlyphSink, Icon, Input, Key,
+    KeyCode, KeyEvent, MAX_FIELD_LEN, Mods, Motion, NodeId, Point, Popup, Rect, Scheme, Size,
+    SysColors, TextMetrics, TextStyle, TextSystem, Theme, Ui,
     materials::{
         Environment, GLASS_BUILD, GlassPref, Materials, PresenterKind, SolidReason, materials,
     },
@@ -131,6 +137,24 @@ pub trait Model {
 
     /// Handles a message from the view.
     fn update(&mut self, msg: Self::Msg);
+
+    /// The menu or dropdown list the model has open (TD-0009 A1.5), if any. After every event
+    /// the host opens, moves or hides its window to match.
+    fn popup(&self) -> Option<Popup<Self::Msg>> {
+        None
+    }
+
+    /// What the open [`popup`](Self::popup) shows: one [`Element::menu`](crate::Element::menu)
+    /// or [`Element::options`](crate::Element::options), with its items.
+    fn popup_view(&self, _cx: &mut Cx<'_, Self::Msg>) {}
+
+    /// The message that opens the context menu of the node keyed `key`, which a context request
+    /// (Shift+F10, the Menu key, a right-click) found: it's marked
+    /// [`context`](crate::Element::context), focused, and picked if it's selectable. `None` if
+    /// it has no menu.
+    fn context_menu(&self, _key: Key) -> Option<Self::Msg> {
+        None
+    }
 }
 
 /// A window's [`Handler`]: the [`Ui`] of a [`Model`], with its text system, theme and materials.
@@ -147,8 +171,17 @@ pub struct Host<P: Model> {
     msgs: Vec<P::Msg>,
     /// The animation clock's zero.
     start: Instant,
-    /// When the window's wake is set for, on that clock: the caret's next blink.
+    /// When the window's wake is set for, on that clock: the caret's next blink, or a tooltip's
+    /// next change.
     wake_due: Option<u64>,
+    /// The popup windows' UIs, in [`popups::KINDS`]' order: a menu, a dropdown's list and the
+    /// tooltip.
+    layers: [popups::Layer<P::Msg>; 3],
+    /// Which of the menu and the list shows the model's popup.
+    open: Option<gui::PopupKind>,
+    /// Whose tip the tooltip window shows, and its text.
+    tip_for: Option<(Surface, NodeId)>,
+    tip_text: String,
 }
 
 /// What new settings or a new presenter changed in how the window looks.
@@ -189,6 +222,10 @@ impl<P: Model> Host<P> {
             msgs: Vec::with_capacity(4),
             start: Instant::now(),
             wake_due: None,
+            layers: std::array::from_fn(|_| popups::Layer::new()),
+            open: None,
+            tip_for: None,
+            tip_text: String::new(),
         }
     }
 
@@ -219,7 +256,14 @@ impl<P: Model> Host<P> {
             blink_ms: env.caret_blink_ms,
         });
         // Percent to a factor; `Env`'s default, 0, is clamped to 1.
-        self.ui.set_text_scale(f32::from(env.text_scale) / 100.0);
+        let text_scale = f32::from(env.text_scale) / 100.0;
+        self.ui.set_text_scale(text_scale);
+        self.ui.set_tooltip_delay(env.tooltip_ms);
+        for layer in &mut self.layers {
+            layer.ui.set_motion(Motion::system(env.animations));
+            layer.ui.set_text_scale(text_scale);
+            layer.ui.set_tooltip_delay(env.tooltip_ms);
+        }
         self.restyle()
     }
 
@@ -247,6 +291,9 @@ impl<P: Model> Host<P> {
         if new_theme {
             self.theme = theme;
             self.ui.repaint_all();
+            for layer in &mut self.layers {
+                layer.ui.repaint_all();
+            }
         }
         Restyle {
             theme: new_theme,
@@ -304,23 +351,47 @@ impl<P: Model> Host<P> {
         }
     }
 
-    /// Rebuilds and lays out the view, and hands the damage to the window.
+    /// Rebuilds and lays out the view and the popups, and hands each surface's damage to its
+    /// window.
     fn frame(&mut self, cx: &mut WindowCx<'_>) {
-        let model = &self.model;
-        self.ui.build(|c| model.view(c));
-        self.ui.layout(self.text.as_mut());
+        // A context request asks the model for that node's menu.
+        if let Some(key) = self
+            .ui
+            .take_context()
+            .and_then(|id| self.ui.info(id))
+            .map(|n| n.key)
+            && let Some(msg) = self.model.context_menu(key)
+        {
+            self.model.update(msg);
+        }
+        self.build();
+        // A popup whose anchor went away closes (A1.8).
+        if self.ui.popup_anchor().is_none()
+            && let Some(popup) = self.model.popup()
+        {
+            self.model.update(popup.on_close);
+            self.build();
+        }
+        self.sync_popup(cx);
         // Before the damage goes out: a blink damages the caret.
         let now = self.now_ms();
-        let next = self.ui.caret_timer(now);
+        let next = [
+            self.ui.caret_timer(now),
+            self.ui.tooltip_timer(now),
+            self.layers[0].ui.tooltip_timer(now),
+            self.layers[1].ui.tooltip_timer(now),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
+        self.sync_tip(cx);
         for r in self.ui.damage() {
-            cx.invalidate(gui::RectPx {
-                x0: r.x0,
-                y0: r.y0,
-                x1: r.x1,
-                y1: r.y1,
-            });
+            cx.invalidate(popups::gui_px(*r));
         }
-        cx.want_frames(self.ui.wants_frame());
+        self.popup_damage(cx);
+        let frames =
+            self.ui.wants_frame() || self.layers.iter().any(|l| l.shown && l.ui.wants_frame());
+        cx.want_frames(frames);
         let due = next.map(|ms| now.saturating_add(ms));
         if due != self.wake_due {
             self.wake_due = due;
@@ -328,13 +399,22 @@ impl<P: Model> Host<P> {
         }
     }
 
+    /// Rebuilds and lays out the main view.
+    fn build(&mut self) {
+        let model = &self.model;
+        self.ui.build(|c| model.view(c));
+        self.ui.layout(self.text.as_mut());
+    }
+
     fn now_ms(&self) -> u64 {
         u64::try_from(self.start.elapsed().as_millis()).unwrap_or(u64::MAX)
     }
 }
 
-impl<P: Model> Handler for Host<P> {
-    fn event(&mut self, event: Event, cx: &mut WindowCx<'_>) -> bool {
+impl<P: Model> Host<P> {
+    /// An event for the main window. Returns whether it was used, or `None` once the window is
+    /// closing (no frame follows).
+    fn main_event(&mut self, event: Event, cx: &mut WindowCx<'_>) -> Option<bool> {
         let scale = self.ui.scale();
         let at = |p: PointPx| Point {
             x: logical(p.x, scale),
@@ -362,13 +442,11 @@ impl<P: Model> Handler for Host<P> {
             Event::Key { vk, down, mods } => self.input(Input::Key(KeyEvent {
                 key: key_code(vk),
                 down,
-                mods: Mods {
-                    shift: mods.shift,
-                    ctrl: mods.ctrl,
-                    alt: mods.alt,
-                    win: mods.win,
-                },
+                mods: mods_of(mods),
             })),
+            Event::ContextMenu(p) => self.input(Input::ContextMenu(p.map(at))),
+            // Only a popup is dismissed.
+            Event::Dismiss => false,
             Event::Presenter(presenter) => {
                 let restyle = self.set_presenter(presenter);
                 self.apply(restyle, cx);
@@ -390,8 +468,11 @@ impl<P: Model> Handler for Host<P> {
             }
             Event::Frame => {
                 let now = self.now_ms();
-                // A hold that comes to its end sends its message here.
+                // A hold that comes to its end sends its message here; a popup's hover eases.
                 self.ui.tick(now, &mut self.msgs);
+                for layer in self.layers.iter_mut().filter(|l| l.shown) {
+                    layer.ui.tick(now, &mut self.msgs);
+                }
                 for msg in self.msgs.drain(..) {
                     self.model.update(msg);
                 }
@@ -399,8 +480,21 @@ impl<P: Model> Handler for Host<P> {
             }
             Event::Close => {
                 cx.close();
-                return true;
+                return None;
             }
+        };
+        Some(used)
+    }
+}
+
+impl<P: Model> Handler for Host<P> {
+    fn event(&mut self, event: Event, cx: &mut WindowCx<'_>) -> bool {
+        let used = match cx.surface() {
+            Surface::Main => match self.main_event(event, cx) {
+                Some(used) => used,
+                None => return true,
+            },
+            Surface::Popup(kind) => self.popup_event(kind, event),
         };
         self.clipboard(cx);
         self.frame(cx);
@@ -408,10 +502,17 @@ impl<P: Model> Handler for Host<P> {
     }
 
     fn paint(&mut self, frame: &mut Frame<'_>) {
+        let (ui, theme) = match frame.surface {
+            Surface::Main => (&mut self.ui, self.theme),
+            Surface::Popup(kind) => {
+                let theme = self.popup_theme(kind);
+                (&mut self.layers[popups::slot(kind)].ui, theme)
+            }
+        };
         if let Some(mut canvas) = Canvas::new(frame.pixels, frame.size.w, frame.size.h) {
-            self.ui.paint(&mut canvas, self.text.as_mut(), &self.theme);
+            ui.paint(&mut canvas, self.text.as_mut(), &theme);
         }
-        self.ui.clear_damage();
+        ui.clear_damage();
     }
 
     fn cursor(&self) -> gui::Cursor {
@@ -421,21 +522,47 @@ impl<P: Model> Handler for Host<P> {
         }
     }
 
-    fn a11y_tree(&mut self) -> Option<accesskit::TreeUpdate> {
-        Some(self.ui.a11y_tree())
+    fn a11y_tree(&mut self, surface: Surface) -> Option<accesskit::TreeUpdate> {
+        Some(self.ui_of(surface).a11y_tree())
     }
 
-    fn a11y_update(&mut self) -> Option<accesskit::TreeUpdate> {
-        self.ui.a11y_update()
+    fn a11y_update(&mut self, surface: Surface) -> Option<accesskit::TreeUpdate> {
+        self.ui_of(surface).a11y_update()
     }
 
     /// Runs like a click (or a focus move), then the frame shows it and the window serves it.
+    /// Collapse closes the open popup (the dropdown's); an item's message in a popup closes it
+    /// first, as a click does.
     fn a11y_action(&mut self, request: &accesskit::ActionRequest, cx: &mut WindowCx<'_>) {
-        if self.ui.a11y_action(request, &mut self.msgs) {
-            for msg in self.msgs.drain(..) {
-                self.model.update(msg);
+        let surface = cx.surface();
+        if surface == Surface::Main && request.action == accesskit::Action::Collapse {
+            self.close_popup();
+            self.frame(cx);
+            return;
+        }
+        let ui = match surface {
+            Surface::Main => &mut self.ui,
+            Surface::Popup(kind) => &mut self.layers[popups::slot(kind)].ui,
+        };
+        if ui.a11y_action(request, &mut self.msgs) {
+            if surface == Surface::Main {
+                for msg in self.msgs.drain(..) {
+                    self.model.update(msg);
+                }
+            } else {
+                self.item_messages();
             }
             self.frame(cx);
+        }
+    }
+}
+
+impl<P: Model> Host<P> {
+    /// The UI that `surface` shows.
+    fn ui_of(&mut self, surface: Surface) -> &mut Ui<P::Msg> {
+        match surface {
+            Surface::Main => &mut self.ui,
+            Surface::Popup(kind) => &mut self.layers[popups::slot(kind)].ui,
         }
     }
 }
@@ -555,7 +682,18 @@ fn key_code(vk: u16) -> KeyCode {
         0x28 => KeyCode::Down,
         0x2D => KeyCode::Insert,
         0x2E => KeyCode::Delete,
+        0x73 => KeyCode::F4,
         other => KeyCode::Other(other),
+    }
+}
+
+/// The toolkit's modifiers for the window's.
+const fn mods_of(m: gui::Mods) -> Mods {
+    Mods {
+        shift: m.shift,
+        ctrl: m.ctrl,
+        alt: m.alt,
+        win: m.win,
     }
 }
 
@@ -587,6 +725,107 @@ mod tests {
                 Msg::Pressed => self.presses += 1,
             }
         }
+    }
+
+    #[derive(Clone, Debug, PartialEq)]
+    enum Pick {
+        OpenMenu,
+        OpenList,
+        Close,
+    }
+
+    /// A button with a tip that opens a menu, whose one item opens a list.
+    #[derive(Default)]
+    struct Picker {
+        open: Option<crate::PopupKind>,
+        closes: u32,
+    }
+
+    impl Model for Picker {
+        type Msg = Pick;
+
+        fn view(&self, cx: &mut Cx<'_, Pick>) {
+            cx.add(Element::button(Key::name("b"), "b", Pick::OpenMenu).tooltip("tip"));
+        }
+
+        fn update(&mut self, msg: Pick) {
+            match msg {
+                Pick::OpenMenu => self.open = Some(crate::PopupKind::Menu),
+                Pick::OpenList => self.open = Some(crate::PopupKind::List),
+                Pick::Close => {
+                    self.open = None;
+                    self.closes += 1;
+                }
+            }
+        }
+
+        fn popup(&self) -> Option<Popup<Pick>> {
+            self.open.map(|kind| Popup {
+                kind,
+                on_close: Pick::Close,
+            })
+        }
+
+        fn popup_view(&self, cx: &mut Cx<'_, Pick>) {
+            cx.add_with(Element::menu(Key::name("m")), |cx| {
+                cx.add(Element::menu_item(
+                    Key::name("list"),
+                    "list",
+                    Pick::OpenList,
+                ));
+            });
+        }
+    }
+
+    /// An item's message runs after its menu closes, as a Windows menu's command does: one that
+    /// opens another popup keeps it open (A1.4).
+    #[test]
+    fn an_item_s_message_comes_after_its_menu_closes() {
+        let mut host = Host::new(Picker::default(), Box::new(FakeText), GlassPref::Auto);
+        host.model.update(Pick::OpenMenu);
+        let layer = &mut host.layers[popups::slot(gui::PopupKind::Menu)];
+        layer.ui.set_viewport(Size { w: 200.0, h: 100.0 });
+        let model = &host.model;
+        layer.ui.build(|c| model.popup_view(c));
+        layer.ui.layout(host.text.as_mut());
+        layer.ui.focus_first(true);
+        let enter = Event::Key {
+            vk: 0x0D,
+            down: true,
+            mods: gui::Mods::default(),
+        };
+        assert!(host.popup_event(gui::PopupKind::Menu, enter));
+        assert_eq!(host.model.closes, 1, "the menu closed");
+        assert_eq!(
+            host.model.popup().map(|p| p.kind),
+            Some(crate::PopupKind::List),
+            "and the list its item opened stays open"
+        );
+    }
+
+    /// A dismissed tooltip window (the main window moved under it) takes the tip with it.
+    #[test]
+    fn a_dismissed_tooltip_hides_its_tip() {
+        let mut host = Host::new(Picker::default(), Box::new(FakeText), GlassPref::Auto);
+        host.ui.set_viewport(Size { w: 200.0, h: 100.0 });
+        host.ui.set_active(true);
+        let model = &host.model;
+        host.ui.build(|c| model.view(c));
+        host.ui.layout(host.text.as_mut());
+        let at = host
+            .ui
+            .find(&[Key::name("b")])
+            .and_then(|id| host.ui.info(id))
+            .map(|n| n.rect.center())
+            .expect("the button");
+        let mut out = Vec::new();
+        host.ui.dispatch(Input::PointerMove(at), &mut out);
+        host.ui.tooltip_timer(0);
+        host.ui
+            .tooltip_timer(u64::from(crate::tokens::popup::TIP_DELAY_MS));
+        assert_eq!(host.ui.tooltip().map(|(_, t)| t), Some("tip"));
+        assert!(host.popup_event(gui::PopupKind::Tooltip, Event::Dismiss));
+        assert_eq!(host.ui.tooltip(), None);
     }
 
     /// T2: a button's label set and inked by DirectWrite (Wine's fonts), inside the button.

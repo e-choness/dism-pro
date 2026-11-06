@@ -12,6 +12,17 @@
 //!   picked item, or the first (the last, going back). Inside, the arrow keys move focus (Home
 //!   and End to the ends). In tabs and radio groups they wrap and pick the item they reach, as
 //!   Windows does; in a list they move focus only, and Enter or Space opens.
+//! - **Menus and dropdown lists** (TD-0009 A1.4): Up and Down move focus through a menu's items,
+//!   wrapping, and through a list's options, not wrapping; Enter or Space invokes or picks.
+//!   Hovering an item focuses it, and a release on an item invokes it, even if the press was on
+//!   another. A disabled item can be focused, never invoked. In a popup with nothing focused yet
+//!   (a menu opened by the pointer), the first arrow focuses its first item.
+//! - **Dropdowns:** a click, Enter, Space, Alt+Down or F4 sends its message (the model opens the
+//!   list); Up and Down, while it's closed, send its step.
+//! - **Context requests** (a right-click, Shift+F10, the Menu key; `WM_CONTEXTMENU`): the nearest
+//!   node at or above the target with [`context`](crate::Element::context) set is focused and
+//!   picked if it's selectable, and the request is left for the host
+//!   ([`Ui::take_context`]), which asks the model for its menu.
 //! - **Holds** (TD-0009 §5.2, doc 05 §4): a hold button's message is sent once its press has
 //!   lasted [`HOLD_MS`] on the frame clock, counted from the first tick after the press. The
 //!   press is the pointer held on it, or Enter or Space held while it has focus. A pointer that
@@ -39,6 +50,9 @@ pub enum Input {
     PointerUp(Point),
     /// The pointer left the window (`WM_MOUSELEAVE`).
     PointerLeave,
+    /// A context menu was asked for (`WM_CONTEXTMENU`): by the pointer at a point (a right-click),
+    /// or by the keyboard (`None`: Shift+F10, the Menu key) for the focused node.
+    ContextMenu(Option<Point>),
     Key(KeyEvent),
     /// A typed character (`WM_CHAR`, surrogate pairs joined), after its key's
     /// [`Input::Key`]. Control characters come too (Ctrl+A is U+0001); fields ignore them.
@@ -71,6 +85,8 @@ pub enum KeyCode {
     End,
     PageUp,
     PageDown,
+    /// Opens or closes a dropdown's list.
+    F4,
     Other(u16),
 }
 
@@ -94,7 +110,7 @@ impl<M: Clone> Ui<M> {
         self.pointer = match input {
             Input::PointerMove(p) | Input::PointerDown(p) | Input::PointerUp(p) => Some(p),
             Input::PointerLeave => None,
-            Input::Key(_) | Input::Char(_) => self.pointer,
+            Input::Key(_) | Input::Char(_) | Input::ContextMenu(_) => self.pointer,
         };
         match input {
             Input::PointerMove(p) => {
@@ -104,12 +120,32 @@ impl<M: Clone> Ui<M> {
                     // The selection's end follows the pointer, even outside the field.
                     self.field_pointer(self.pressed, p, true);
                 }
-                self.pointer_over(hit) || selecting
+                let moved = self.pointer_over(hit);
+                // Hovering a menu item focuses it, as in Windows menus.
+                let item = self.pressed == NIL
+                    && hit != self.focus
+                    && self
+                        .nodes
+                        .get(hit as usize)
+                        .is_some_and(|n| n.role == Role::MenuItem);
+                if item {
+                    self.hide_focus_ring();
+                    self.move_focus(hit);
+                }
+                if !self.sides_empty() {
+                    self.tip_pointer(Some(p));
+                }
+                moved || selecting || item
             }
-            Input::PointerLeave => self.pointer_over(NIL),
+            Input::PointerLeave => {
+                self.tip_pointer(None);
+                self.pointer_over(NIL)
+            }
+            Input::ContextMenu(at) => self.context_request(at, out),
             Input::PointerDown(p) => {
                 let hit = self.hit(p);
                 self.pointer_over(hit);
+                self.tip_cancel(true);
                 self.hide_focus_ring();
                 if hit == NIL {
                     return false;
@@ -139,18 +175,40 @@ impl<M: Clone> Ui<M> {
                 }
                 let hit = self.hit(p);
                 self.pointer_over(hit);
-                if hit == target && !held && !self.is_field(target) {
-                    self.activate(target, out);
+                // A release on a menu item invokes it, even if the press began on another.
+                let item = |i: u32| {
+                    self.nodes
+                        .get(i as usize)
+                        .is_some_and(|n| n.role == Role::MenuItem)
+                };
+                let to = if item(target) && item(hit) {
+                    hit
+                } else {
+                    target
+                };
+                if hit == to && !held && !self.is_field(to) {
+                    self.activate(to, out);
                 }
                 true
             }
             Input::Key(k) => {
-                if let Some(i) = self.focused_field()
+                let before = self.focus;
+                if k.down {
+                    // Any key hides a tooltip.
+                    self.tip_cancel(true);
+                }
+                let used = if let Some(i) = self.focused_field()
                     && let Some(used) = self.field_key(i, k, out)
                 {
-                    return used;
+                    used
+                } else {
+                    self.key(k, out)
+                };
+                // Focus the keyboard moved shows its tip at once.
+                if self.focus != before && self.focus_visible {
+                    self.tip_focus(self.focus);
                 }
-                self.key(k, out)
+                used
             }
             Input::Char(c) => self.field_char(c, out),
         }
@@ -208,6 +266,42 @@ impl<M: Clone> Ui<M> {
                 }
                 true
             }
+            // A dropdown opens on Alt+Down and F4, as on a click.
+            (KeyCode::Down, true) if k.mods.alt && self.focused(Role::ComboBox) => {
+                self.show_focus_ring();
+                self.activate(self.focus, out);
+                true
+            }
+            // Plain F4 only: Alt+F4 goes on to the system and closes the window.
+            (KeyCode::F4, true)
+                if !(k.mods.alt || k.mods.ctrl || k.mods.win) && self.focused(Role::ComboBox) =>
+            {
+                self.show_focus_ring();
+                self.activate(self.focus, out);
+                true
+            }
+            // Up and Down change a closed dropdown's value, without opening it.
+            (KeyCode::Up | KeyCode::Down, true)
+                if !(k.mods.ctrl || k.mods.alt || k.mods.win) && self.focused(Role::ComboBox) =>
+            {
+                self.show_focus_ring();
+                let n = &self.nodes[self.focus as usize];
+                if n.interactive()
+                    && n.expanded != Some(true)
+                    && let Some(step) = self.sides.get(n.side as usize).and_then(|s| s.step)
+                {
+                    out.push(step(k.key == KeyCode::Down));
+                }
+                true
+            }
+            // A popup with nothing focused yet (opened by the pointer): an arrow focuses its
+            // first item.
+            (KeyCode::Up | KeyCode::Down | KeyCode::Home | KeyCode::End, true)
+                if self.focus == NIL && self.in_popup() =>
+            {
+                self.focus_first(true);
+                true
+            }
             (
                 KeyCode::Left
                 | KeyCode::Right
@@ -223,8 +317,15 @@ impl<M: Clone> Ui<M> {
         }
     }
 
+    /// Whether the focused node has `role`.
+    fn focused(&self, role: Role) -> bool {
+        self.nodes
+            .get(self.focus as usize)
+            .is_some_and(|n| n.role == role)
+    }
+
     /// Sends node `i`'s message, if it takes input and isn't a hold button, whose message only
-    /// a whole hold sends.
+    /// a whole hold sends. A node that opens a popup becomes the popup's anchor.
     pub(crate) fn activate(&mut self, i: u32, out: &mut Vec<M>) {
         let n = &self.nodes[i as usize];
         if n.interactive()
@@ -232,6 +333,10 @@ impl<M: Clone> Ui<M> {
             && let Some(msg) = &n.msg
         {
             out.push(msg.clone());
+            if n.expanded.is_some() {
+                self.anchor = Some(n.rect);
+                self.anchor_node = i;
+            }
         }
     }
 
@@ -271,11 +376,14 @@ impl<M: Clone> Ui<M> {
             KeyCode::Down if !row => Rove::Next,
             _ => return false,
         };
-        let to = self.rove_target(parent, self.focus, step, group != Group::List);
+        // Tabs, radio buttons and menus wrap; lists and a dropdown's options stop at their ends.
+        let wrap = matches!(group, Group::Tabs | Group::Radios | Group::Menu);
+        let to = self.rove_target(parent, self.focus, step, wrap);
         self.show_focus_ring();
         if to != NIL && to != self.focus {
             self.move_focus(to);
-            if group != Group::List {
+            // Only tabs and radio buttons pick the item they reach.
+            if matches!(group, Group::Tabs | Group::Radios) {
                 self.activate(to, out);
             }
         }
@@ -428,7 +536,8 @@ impl<M> Ui<M> {
     /// if `wrap`; [`NIL`] when there's nowhere to go.
     fn rove_target(&self, parent: u32, from: u32, step: Rove, wrap: bool) -> u32 {
         let p = &self.nodes[parent as usize];
-        let usable = |i: u32| i != NIL && self.nodes[i as usize].interactive();
+        // A disabled menu item can be reached, as in Windows menus.
+        let usable = |i: u32| i != NIL && self.nodes[i as usize].focusable();
         let walk = |mut at: u32, back: bool| {
             while at != NIL && !usable(at) {
                 let n = &self.nodes[at as usize];
@@ -578,6 +687,21 @@ impl<M> Ui<M> {
         self.damage_node(i);
     }
 
+    /// Cancels a press, by the pointer or by Space, so its release activates nothing: the window
+    /// lost the pointer, went inactive, or hid (a popup closed by Esc while its item is held).
+    pub fn cancel_press(&mut self) {
+        let held = [
+            std::mem::replace(&mut self.pressed, NIL),
+            std::mem::replace(&mut self.key_pressed, NIL),
+        ];
+        for i in held {
+            if i != NIL {
+                self.set_pressed(i, false);
+            }
+        }
+        self.end_hold();
+    }
+
     /// Shows node `i` pressed or not. A hold let go before its end (the pointer sliding off)
     /// goes back to its start, and counts again from the next tick it's pressed.
     fn set_pressed(&mut self, i: u32, on: bool) {
@@ -621,7 +745,7 @@ impl<M> Ui<M> {
         }
     }
 
-    fn hide_focus_ring(&mut self) {
+    pub(crate) fn hide_focus_ring(&mut self) {
         if self.focus_visible {
             self.focus_visible = false;
             self.damage_node(self.focus);
@@ -639,7 +763,7 @@ impl<M> Ui<M> {
         self.tab_from(from, false)
     }
 
-    fn tab_from(&self, from: u32, forward: bool) -> u32 {
+    pub(crate) fn tab_from(&self, from: u32, forward: bool) -> u32 {
         let start = if from == NIL { ROOT } else { from };
         let mut at = start;
         loop {

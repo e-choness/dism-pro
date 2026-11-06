@@ -183,7 +183,10 @@ fn adapter_summary() -> Option<String> {
     ))
 }
 
-/// A Direct3D 11 device with BGRA support, and a `DirectComposition` device over it.
+/// A Direct3D 11 device with BGRA support, and a `DirectComposition` device over it. A clone is
+/// another reference to the same devices: a window's popups present on its device (TD-0009 A1.5),
+/// on its thread, which the immediate context requires.
+#[derive(Clone)]
 pub(super) struct Gpu {
     device: ID3D11Device,
     context: ID3D11DeviceContext,
@@ -520,6 +523,11 @@ impl Composer {
     /// It runs on WARP.
     pub(super) fn warp(&self) -> bool {
         self.gpu.warp
+    }
+
+    /// Its devices, for another window of this thread to present on (a popup).
+    pub(super) fn gpu(&self) -> Gpu {
+        self.gpu.clone()
     }
 
     /// Whether its `DirectComposition` device is still valid: DWM restarting invalidates it.

@@ -17,6 +17,11 @@
 //! - check boxes: a box a line high, with the state layer, then the label half a line after it;
 //!   radio buttons the same with a circle, the accent with a dot in it when picked;
 //! - progress bars: a pill-shaped track, the accent along it as far as its value;
+//! - menu items and a dropdown list's options: their text from the start, and the state layer
+//!   while focused, hovered or pressed, which is all the keyboard focus shows in a menu, as in
+//!   Windows' menus; separators: a hairline across the middle;
+//! - dropdowns: as a button, their value from the start and a chevron at the end;
+//! - tooltips: their text, wrapped, from the start;
 //! - while focus is visible, Windows 11's focus visual over everything else: a ring in text color
 //!   with a one-pixel surface-colored ring inside it, so it shows on any fill, accent included.
 //!
@@ -112,20 +117,25 @@ impl<M> Ui<M> {
         }
         let under = fill.unwrap_or(under);
         let interactive = node.enabled && node.role.interactive();
-        let button = matches!(node.role, Role::Button | Role::Tab);
+        let button = matches!(
+            node.role,
+            Role::Button | Role::Tab | Role::MenuItem | Role::ComboBox
+        );
+        // A focused menu item is lit as if hovered, enabled or not: that's its focus.
+        let lit = node.role == Role::MenuItem && self.focus == i;
         // A hold pressed: the part still to go turns permanent, and its fill grows back from the
         // start as it's held (doc 05 §4). Where they meet, in physical pixels.
         let split = (node.hold && self.hold.node == i && (node.pressed || self.hold.done))
             .then(|| p.hold(rect, corner, self.hold.t, visible));
-        if interactive && button && split.is_none() {
-            p.state_layer(node, rect, corner);
+        if (interactive && button && split.is_none()) || lit {
+            p.state_layer(node, rect, corner, lit);
         }
         if let Some(border) = node.look.border {
             p.canvas
                 .ring(rect, corner, 1, p.theme.stroke(border, node.enabled));
         }
-        if interactive && button {
-            p.outline(node, rect, corner, under);
+        if (interactive && button) || lit {
+            p.outline(node, rect, corner, under, lit);
         }
         let ink = p.theme.ink(
             if node.enabled {
@@ -162,14 +172,25 @@ impl<M> Ui<M> {
                     p.text(node, content, button, ink);
                 }
             }
-            Role::Container | Role::Label | Role::Button | Role::Tab => {}
+            Role::MenuItem | Role::Tooltip if node.first == NIL && !node.text.is_empty() => {
+                p.text(node, node.rect.inset(node.style.padding), false, ink);
+            }
+            Role::ComboBox => p.combo(node, ink),
+            Role::Separator => p.separator(rect),
+            Role::Container
+            | Role::Label
+            | Role::Button
+            | Role::Tab
+            | Role::MenuItem
+            | Role::Tooltip => {}
         }
         let mut child = node.first;
         while child != NIL {
             self.paint_node(child, visible, under, p);
             child = self.nodes[child as usize].next;
         }
-        if self.focus == i && self.focus_visible {
+        // A menu item's focus is its light, not a ring.
+        if self.focus == i && self.focus_visible && node.role != Role::MenuItem {
             p.canvas.set_clip(visible);
             p.focus_ring(rect, corner);
         }
@@ -272,12 +293,15 @@ impl Painter<'_, '_> {
 
     /// The hover or pressed layer over a control's shape (none in high contrast: see
     /// [`outline`](Self::outline)).
-    fn state_layer<M>(&mut self, n: &Node<M>, r: RectPx, corner: f32) {
+    fn state_layer<M>(&mut self, n: &Node<M>, r: RectPx, corner: f32, lit: bool) {
         if self.theme.scheme() == Scheme::HighContrast {
             return;
         }
         let layer = if n.pressed {
             self.theme.color(Tone::Pressed)
+        } else if lit {
+            // Fully lit: a focused menu item.
+            self.theme.color(Tone::Hover)
         } else if n.hover_t > 0.0 {
             let c = self.theme.color(Tone::Hover);
             c.alpha(fraction(c.a, n.hover_t))
@@ -287,13 +311,13 @@ impl Painter<'_, '_> {
         self.canvas.rrect(r, corner, layer);
     }
 
-    /// High contrast's hover and press: a whole-pixel outline over the border, in the color that
-    /// shows on the fill `under` ([`Theme::hover_outline`]).
-    fn outline<M>(&mut self, n: &Node<M>, r: RectPx, corner: f32, under: Tone) {
+    /// High contrast's hover and press (and a focused menu item): a whole-pixel outline over the
+    /// border, in the color that shows on the fill `under` ([`Theme::hover_outline`]).
+    fn outline<M>(&mut self, n: &Node<M>, r: RectPx, corner: f32, under: Tone, lit: bool) {
         let Some(color) = self.theme.hover_outline(under) else {
             return;
         };
-        if n.pressed || n.hover_t > 0.0 {
+        if n.pressed || lit || n.hover_t > 0.0 {
             let width = px_width(self.scale.round().max(1.0));
             self.canvas.ring(r, corner, width, color);
         }
@@ -340,6 +364,44 @@ impl Painter<'_, '_> {
             self.canvas.set_clip(visible);
         }
         x
+    }
+
+    /// A dropdown's value from the start of its content box, trimmed before the chevron, and the
+    /// chevron in a line-high square at the end.
+    fn combo<M>(&mut self, n: &Node<M>, ink: Color) {
+        let content = n.rect.inset(n.style.padding);
+        let line = self.text.measure("", &n.text_style, f32::INFINITY).height;
+        let chevron = Rect::new(
+            (content.right() - line).max(content.x),
+            content.y + ((content.h - line) / 2.0).max(0.0),
+            line.min(content.w),
+            line,
+        );
+        if !n.text.is_empty() {
+            let value = Rect {
+                w: (chevron.x - content.x).max(0.0),
+                ..content
+            };
+            self.text(n, value, false, ink);
+        }
+        let mut sink = Ink {
+            canvas: &mut *self.canvas,
+            color: ink,
+        };
+        self.text
+            .icon(Icon::ChevronDown, chevron, self.scale, &mut sink);
+    }
+
+    /// A separator: a hairline in the border color across the middle of `r`.
+    fn separator(&mut self, r: RectPx) {
+        let y = r.y0 + (r.y1 - r.y0) / 2;
+        let line = RectPx {
+            y0: y,
+            y1: y + 1,
+            ..r
+        };
+        self.canvas
+            .fill(line, self.theme.stroke(Tone::Border, true));
     }
 
     /// A progress bar: a pill-shaped track (a ring in high contrast, which has no tints), and the
@@ -414,8 +476,8 @@ impl Painter<'_, '_> {
                 .ring(r, round, 1, self.theme.stroke(edge, n.enabled));
         }
         if interactive {
-            self.state_layer(n, r, round);
-            self.outline(n, r, round, fill);
+            self.state_layer(n, r, round, false);
+            self.outline(n, r, round, fill, false);
         }
         if on {
             let dot = Rect::new(b.x + line * 0.3, b.y + line * 0.3, line * 0.4, line * 0.4)
@@ -448,8 +510,8 @@ impl Painter<'_, '_> {
                 .ring(r, corner, 1, self.theme.stroke(edge, n.enabled));
         }
         if interactive {
-            self.state_layer(n, r, corner);
-            self.outline(n, r, corner, fill);
+            self.state_layer(n, r, corner, false);
+            self.outline(n, r, corner, fill, false);
         }
         let mark = self.theme.ink(Tone::OnAccent, fill);
         match n.check {

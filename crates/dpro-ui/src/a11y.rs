@@ -23,11 +23,21 @@
 //! - A field is a text input (UI Automation's Edit, with the Value pattern), named by its
 //!   [name](crate::Element::name). Its text is its value; its placeholder is help text while it's
 //!   empty; and it's read-only when it is.
+//! - Popups (TD-0009 A1.4): a [menu](crate::Element::menu) is a menu of menu items; a dropdown's
+//!   [options](crate::Element::options) are a list box of options (selection items); a separator
+//!   is a separator; a tooltip window's text is a tooltip.
+//! - A [dropdown](crate::Element::combo) is a combo box: named by its name, its value its text,
+//!   expanded or collapsed (`ExpandCollapse`). Any node that [opens a popup](
+//!   crate::Element::expanded) says whether it's open.
+//! - A node's [tooltip](crate::Element::tooltip) is its description (UI Automation's
+//!   `FullDescription`), so a screen reader reads it on focus whether or not it shows.
 //!
-//! Enabled buttons, check boxes, tabs and radio buttons take `Click` (Invoke, Toggle or Select)
-//! and `Focus`, except that a hold button's `Click` sends its Invoke message: a client can't hold
-//! (TD-0009 §8). Enabled fields take `Focus`, and editable ones `SetValue`, which replaces the
-//! text as a paste would. Disabled nodes are marked so.
+//! Enabled buttons, check boxes, tabs, radio buttons and menu items take `Click` (Invoke, Toggle or
+//! Select) and `Focus`, except that a hold button's `Click` sends its Invoke message: a client
+//! can't hold (TD-0009 §8). A dropdown takes `Expand` (its message) and `Focus`; `Collapse` is the
+//! host's, which owns the open list. Enabled fields take `Focus`, and editable ones `SetValue`,
+//! which replaces the text as a paste would. Disabled nodes are marked so; a disabled menu item
+//! still takes `Focus`.
 
 use accesskit::{
     Action, ActionData, ActionRequest, Node, NodeId as AkId, Rect as AkRect, Role as AkRole,
@@ -171,31 +181,43 @@ impl<M> Ui<M> {
         self.ak_id(if self.focus == NIL { ROOT } else { self.focus })
     }
 
+    /// Node `i`'s role, as the client sees it.
+    fn ak_role(&self, i: u32) -> AkRole {
+        if i == ROOT {
+            return AkRole::Window;
+        }
+        let n = &self.nodes[i as usize];
+        match n.role {
+            Role::Container => match n.group {
+                Some(Group::Tabs) => AkRole::TabList,
+                Some(Group::Radios) => AkRole::RadioGroup,
+                Some(Group::List) => AkRole::List,
+                Some(Group::Menu) => AkRole::Menu,
+                Some(Group::Options) => AkRole::ListBox,
+                None if n.text.is_empty() => AkRole::GenericContainer,
+                None => AkRole::Group,
+            },
+            Role::Label => AkRole::Label,
+            Role::Button if n.selected.is_some() => AkRole::ListItem,
+            Role::Button => AkRole::Button,
+            Role::CheckBox => AkRole::CheckBox,
+            Role::Field => AkRole::TextInput,
+            Role::Tab => AkRole::Tab,
+            Role::Radio => AkRole::RadioButton,
+            Role::Progress => AkRole::ProgressIndicator,
+            Role::MenuItem if n.selected.is_some() => AkRole::ListBoxOption,
+            Role::MenuItem => AkRole::MenuItem,
+            Role::ComboBox => AkRole::ComboBox,
+            Role::Separator => AkRole::Splitter,
+            Role::Tooltip => AkRole::Tooltip,
+        }
+    }
+
     /// Node `i` as the client sees it. Bounds are in physical pixels from the client area's
     /// top-left, snapped as painted.
     fn ak_node(&self, i: u32) -> Node {
         let n = &self.nodes[i as usize];
-        let role = if i == ROOT {
-            AkRole::Window
-        } else {
-            match n.role {
-                Role::Container => match n.group {
-                    Some(Group::Tabs) => AkRole::TabList,
-                    Some(Group::Radios) => AkRole::RadioGroup,
-                    Some(Group::List) => AkRole::List,
-                    None if n.text.is_empty() => AkRole::GenericContainer,
-                    None => AkRole::Group,
-                },
-                Role::Label => AkRole::Label,
-                Role::Button if n.selected.is_some() => AkRole::ListItem,
-                Role::Button => AkRole::Button,
-                Role::CheckBox => AkRole::CheckBox,
-                Role::Field => AkRole::TextInput,
-                Role::Tab => AkRole::Tab,
-                Role::Radio => AkRole::RadioButton,
-                Role::Progress => AkRole::ProgressIndicator,
-            }
-        };
+        let role = self.ak_role(i);
         let mut node = Node::new(role);
         let r = n.rect.snap(self.scale);
         node.set_bounds(AkRect {
@@ -231,17 +253,40 @@ impl<M> Ui<M> {
             // A label's text is its value, which clients read as its name.
             (AkRole::Label, false) => node.set_value(n.text.as_str()),
             (AkRole::Label, true) => node.set_hidden(),
+            // A dropdown's text is its value; its name is in its side slot.
+            (AkRole::ComboBox, _) => {
+                node.set_value(n.text.as_str());
+                if let Some(side) = self.sides.get(n.side as usize)
+                    && !side.label.is_empty()
+                {
+                    node.set_label(side.label.as_str());
+                }
+            }
             (_, false) => node.set_label(n.text.as_str()),
             (_, true) => {}
         }
+        if let Some(tip) = self.tip_text(i) {
+            node.set_description(tip);
+        }
+        if let Some(expanded) = n.expanded {
+            node.set_expanded(expanded);
+            if expanded && n.enabled {
+                node.add_action(Action::Collapse);
+            }
+        }
         if n.role.interactive() {
             if n.enabled {
-                if n.role != Role::Field {
-                    node.add_action(Action::Click);
+                match n.role {
+                    Role::Field => {}
+                    Role::ComboBox => node.add_action(Action::Expand),
+                    _ => node.add_action(Action::Click),
                 }
                 node.add_action(Action::Focus);
             } else {
                 node.set_disabled();
+                if n.role == Role::MenuItem {
+                    node.add_action(Action::Focus);
+                }
             }
         }
         if n.role == Role::CheckBox {
@@ -282,12 +327,20 @@ impl<M: Clone> Ui<M> {
         let Some(i) = self.ak_index(request.target_node) else {
             return false;
         };
-        if !self.nodes[i as usize].interactive() {
+        let n = &self.nodes[i as usize];
+        // A disabled menu item takes focus only.
+        if !(n.interactive() || n.focusable() && request.action == Action::Focus) {
             return false;
         }
-        let field = self.nodes[i as usize].role == Role::Field;
+        let field = n.role == Role::Field;
+        let closed = n.expanded == Some(false);
         match (request.action, &request.data) {
             (Action::Click, _) if !field => {
+                self.invoke(i, out);
+                true
+            }
+            // Opens what it opens, as a click does; closing is the host's (it owns the popup).
+            (Action::Expand, _) if closed => {
                 self.invoke(i, out);
                 true
             }

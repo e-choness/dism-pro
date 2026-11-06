@@ -5,10 +5,13 @@ use dpro_app::table::Tri;
 
 use crate::{
     field::TextEdit,
-    geom::{Rect, Size},
-    style::{Axis, Style},
+    geom::{Insets, Rect, Size},
+    style::{Axis, Dim, Style},
     text::TextStyle,
-    theme::{Tone, tokens::radius},
+    theme::{
+        Tone,
+        tokens::{font, popup, radius},
+    },
 };
 
 /// A node's identity among its siblings. Reconciling matches nodes by key, so a key must be
@@ -69,13 +72,28 @@ pub enum Role {
     Radio,
     /// How far a job has come, as a bar: a fraction from 0 to 1. Not interactive.
     Progress,
+    /// A [menu](Element::menu)'s item, or a dropdown list's [option](Element::option): its
+    /// message invokes or picks it. Hovering it focuses it.
+    MenuItem,
+    /// A [dropdown](Element::combo): shows its value, and its message opens its list.
+    ComboBox,
+    /// A [line](Element::separator) between a menu's groups of items. Not interactive.
+    Separator,
+    /// A tooltip window's [text](Element::tooltip_text). Not interactive.
+    Tooltip,
 }
 
 impl Role {
     pub(crate) fn interactive(self) -> bool {
         matches!(
             self,
-            Self::Button | Self::CheckBox | Self::Field | Self::Tab | Self::Radio
+            Self::Button
+                | Self::CheckBox
+                | Self::Field
+                | Self::Tab
+                | Self::Radio
+                | Self::MenuItem
+                | Self::ComboBox
         )
     }
 }
@@ -92,6 +110,12 @@ pub enum Group {
     /// Items the arrows move focus through along the container's axis, without picking or
     /// wrapping (a navigation rail): Enter or Space opens one.
     List,
+    /// A [menu](Element::menu)'s items: Up and Down move focus, wrapping, as Windows menus do;
+    /// Enter or Space invokes. A disabled item can be focused, not invoked.
+    Menu,
+    /// A dropdown list's [options](Element::options): Up and Down move focus without wrapping,
+    /// and Enter or Space picks.
+    Options,
 }
 
 /// How a node is painted, in theme tokens only (doc 05 §4). Changing it repaints the node; it never
@@ -221,8 +245,42 @@ pub struct Element<'s, M> {
     pub(crate) check: Tri,
     pub(crate) enabled: bool,
     pub(crate) selected: Option<bool>,
+    /// Its [tooltip](Self::tooltip), empty for none.
+    pub(crate) tip: &'s str,
+    /// Popup state few nodes have, as [`rare`] flags: a tooltip, a context menu, whether what it
+    /// opens is open. Building a node with none tests this one byte and skips the rest.
+    pub(crate) rare: u8,
     /// What only its role describes.
     pub(crate) extra: Extra<'s, M>,
+}
+
+/// [`Element::rare`]'s flags, which a node keeps as they were last built. (Measured on the shell
+/// fixture: as separate fields compared for every node, rebuilding a view in which nothing changed
+/// cost 9.5 % more.)
+pub(crate) mod rare {
+    /// A [context](super::Element::context) request on it, or inside it, asks for the model's menu.
+    pub(crate) const CONTEXT: u8 = 1;
+    /// It opens a popup (a dropdown, a menu button), so a client sees whether it's open.
+    pub(crate) const EXPANDABLE: u8 = 2;
+    /// What it opens is open.
+    pub(crate) const EXPANDED: u8 = 4;
+    /// It has a [tooltip](super::Element::tooltip).
+    pub(crate) const TIP: u8 = 8;
+
+    /// Whether what a node with flags `r` opens is open; `None` if it opens nothing.
+    pub(crate) const fn expanded(r: u8) -> Option<bool> {
+        if r & EXPANDABLE == 0 {
+            None
+        } else {
+            Some(r & EXPANDED != 0)
+        }
+    }
+
+    /// The flags of a node that opens a popup, open if `open`.
+    pub(crate) const fn expandable(r: u8, open: bool) -> u8 {
+        let r = r & !EXPANDED | EXPANDABLE;
+        if open { r | EXPANDED } else { r }
+    }
 }
 
 /// What only some roles describe. One at a time, so an [`Element`] carries one field for all of
@@ -244,6 +302,12 @@ pub(crate) enum Extra<'s, M> {
     /// What UI Automation's Invoke sends for a [hold](Element::hold) button, instead of its
     /// message.
     Hold(fn() -> M),
+    /// A dropdown's accessible name, and what Up and Down send while it's closed: the next
+    /// option (`true`) or the one before.
+    Combo {
+        label: &'s str,
+        step: Option<fn(bool) -> M>,
+    },
 }
 
 // Copy whatever `M` is: it holds no `M`, only functions that make one, so building a node drops
@@ -270,6 +334,8 @@ impl<'s, M> Element<'s, M> {
             check: Tri::Off,
             enabled: true,
             selected: None,
+            tip: "",
+            rare: 0,
             extra: Extra::None,
         }
     }
@@ -312,6 +378,121 @@ impl<'s, M> Element<'s, M> {
         Self {
             extra: Extra::Group(Group::List),
             ..Self::stack(key)
+        }
+    }
+
+    /// A menu (TD-0009 A1): the content of a menu popup, a column of
+    /// [items](Self::menu_item) and [separators](Self::separator). It's one Tab stop, and Up and
+    /// Down move through its items, wrapping ([`Group::Menu`]). The surface in a hairline,
+    /// padded; the window's corners are DWM's.
+    #[must_use]
+    pub fn menu(key: Key) -> Self {
+        Self {
+            extra: Extra::Group(Group::Menu),
+            style: Style {
+                padding: Insets::all(popup::PADDING),
+                ..Style::default()
+            },
+            look: POPUP,
+            ..Self::stack(key)
+        }
+    }
+
+    /// A menu item; `msg` invokes it, from a click, Enter, Space or UI Automation's Invoke, and
+    /// the host closes the menu after. Hovering it focuses it. Disabled, it can still be focused
+    /// from the keyboard, and [tooltip](Self::tooltip) text can say why it's disabled. With
+    /// children (its label and its accelerator), `label` is only its accessible name.
+    #[must_use]
+    pub fn menu_item(key: Key, label: &'s str, msg: M) -> Self {
+        Self {
+            style: item_style(),
+            look: Look {
+                radius: Radius::Small,
+                ..Look::PLAIN
+            },
+            ..Self::new(key, Role::MenuItem, label, Some(msg))
+        }
+    }
+
+    /// A hairline between a menu's groups of items, 4 px from each.
+    #[must_use]
+    pub fn separator(key: Key) -> Self {
+        Self {
+            style: Style {
+                height: Dim::Fixed(popup::SEPARATOR),
+                ..Style::default()
+            },
+            ..Self::new(key, Role::Separator, "", None)
+        }
+    }
+
+    /// A dropdown's list: the content of a list popup, a column of [options](Self::option).
+    /// It's one Tab stop, Up and Down move focus without wrapping, and Enter or Space picks
+    /// ([`Group::Options`]). Looks as a [menu](Self::menu) does.
+    #[must_use]
+    pub fn options(key: Key) -> Self {
+        Self {
+            extra: Extra::Group(Group::Options),
+            ..Self::menu(key)
+        }
+    }
+
+    /// One of a dropdown list's options, `selected` (the value now) or not; `msg` picks it, and
+    /// the host closes the list after. Give the selected one [`Tone::Selected`] if it should show.
+    #[must_use]
+    pub fn option(key: Key, label: &'s str, selected: bool, msg: M) -> Self {
+        Self {
+            selected: Some(selected),
+            ..Self::menu_item(key, label, msg)
+        }
+    }
+
+    /// A dropdown (UI Automation's combo box), showing `value` with a chevron at its end and
+    /// named `label`; `msg` asks the model to open its list, from a click, Enter, Space, Alt+Down,
+    /// F4 or UI Automation's Expand. `expanded` says whether the list is open. Up and Down change
+    /// the value without opening it once given a [step](Self::step).
+    #[must_use]
+    pub fn combo(key: Key, label: &'s str, value: &'s str, expanded: bool, msg: M) -> Self {
+        Self {
+            extra: Extra::Combo { label, step: None },
+            rare: rare::expandable(0, expanded),
+            style: item_style(),
+            look: Look::SECONDARY,
+            ..Self::new(key, Role::ComboBox, value, Some(msg))
+        }
+    }
+
+    /// What Up and Down send while a [dropdown](Self::combo) is closed and focused: `step(true)`
+    /// for the next option, `step(false)` for the one before. Other roles ignore it.
+    #[must_use]
+    pub fn step(mut self, on_step: fn(bool) -> M) -> Self {
+        if let Extra::Combo { step, .. } = &mut self.extra {
+            *step = Some(on_step);
+        }
+        self
+    }
+
+    /// A tooltip window's text, in caption type, wrapping at
+    /// [`TIP_MAX_W`](crate::tokens::popup::TIP_MAX_W): what the host shows for
+    /// [`Ui::tooltip`](crate::Ui::tooltip).
+    #[must_use]
+    pub fn tooltip_text(key: Key, text: &'s str) -> Self {
+        Self {
+            style: Style {
+                padding: Insets::xy(popup::TIP_PAD_X, popup::TIP_PAD_Y),
+                max: Size {
+                    w: popup::TIP_MAX_W,
+                    h: f32::INFINITY,
+                },
+                ..Style::default()
+            },
+            text_style: TextStyle {
+                size: font::CAPTION,
+                wrap: true,
+                ..TextStyle::default()
+            },
+            look: POPUP,
+            ..Self::new(key, Role::Tooltip, text, None)
         }
     }
 
@@ -435,54 +616,110 @@ impl<'s, M> Element<'s, M> {
 
     /// The message Enter sends while the field has focus (a palette runs its command).
     #[must_use]
-    pub fn submit(self, msg: M) -> Self {
-        Self {
-            msg: Some(msg),
-            ..self
-        }
+    pub fn submit(mut self, msg: M) -> Self {
+        self.msg = Some(msg);
+        self
+    }
+
+    // The setters assign a field of `self` rather than build `Self { field, ..self }`, which
+    // copied the whole element for every call (measured on the shell fixture: 20 Ir a `look`).
+
+    #[must_use]
+    pub fn style(mut self, style: Style) -> Self {
+        self.style = style;
+        self
     }
 
     #[must_use]
-    pub fn style(self, style: Style) -> Self {
-        Self { style, ..self }
+    pub fn text_style(mut self, text_style: TextStyle) -> Self {
+        self.text_style = text_style;
+        self
     }
 
     #[must_use]
-    pub fn text_style(self, text_style: TextStyle) -> Self {
-        Self { text_style, ..self }
-    }
-
-    #[must_use]
-    pub fn look(self, look: Look) -> Self {
-        Self { look, ..self }
+    pub fn look(mut self, look: Look) -> Self {
+        self.look = look;
+        self
     }
 
     /// A disabled node takes no input and no focus.
     #[must_use]
-    pub fn enabled(self, enabled: bool) -> Self {
-        Self { enabled, ..self }
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
     }
 
     /// Makes the node an item of a set the user picks from (a table row, a rail page), currently
     /// picked or not: UI Automation's selection item. The view still chooses its look.
     #[must_use]
-    pub fn selected(self, selected: bool) -> Self {
-        Self {
-            selected: Some(selected),
-            ..self
-        }
+    pub fn selected(mut self, selected: bool) -> Self {
+        self.selected = Some(selected);
+        self
     }
 
     /// The accessible name of a container, which draws no text ("Pages" for a rail, a table's
     /// title), or of a field, whose text is its value. Labels and buttons are named by their text.
     #[must_use]
     pub fn name(mut self, name: &'s str) -> Self {
-        if let Extra::Field { label, .. } = &mut self.extra {
-            *label = name;
-        } else {
-            self.text = name;
+        match &mut self.extra {
+            Extra::Field { label, .. } | Extra::Combo { label, .. } => *label = name,
+            _ => self.text = name,
         }
         self
+    }
+
+    /// Text the toolkit shows in a tooltip while the pointer rests on the node, or at once when
+    /// the keyboard focuses it ([`Ui::tooltip`](crate::Ui::tooltip)); assistive technology reads
+    /// it as the node's description, whether it shows or not. A command's label and its
+    /// accelerator, or why it's disabled. Disabled nodes show theirs too.
+    #[must_use]
+    pub fn tooltip(mut self, text: &'s str) -> Self {
+        self.tip = text;
+        self.rare = if text.is_empty() {
+            self.rare & !rare::TIP
+        } else {
+            self.rare | rare::TIP
+        };
+        self
+    }
+
+    /// A context request (a right-click, Shift+F10, the Menu key) on this node or inside it
+    /// focuses it, picks it if it's [selectable](Self::selected), and asks the model for its
+    /// context menu (`Model::context_menu`).
+    #[must_use]
+    pub fn context(mut self) -> Self {
+        self.rare |= rare::CONTEXT;
+        self
+    }
+
+    /// Says whether the popup this node opens is open (a menu button): UI Automation's
+    /// `ExpandCollapse`. A [dropdown](Self::combo) has it already.
+    #[must_use]
+    pub fn expanded(mut self, expanded: bool) -> Self {
+        self.rare = rare::expandable(self.rare, expanded);
+        self
+    }
+}
+
+/// A menu's and a list's look: the surface in a hairline. Under glass the surface is a
+/// translucent layer, so the window's acrylic shows through.
+const POPUP: Look = Look {
+    fill: Some(Tone::Surface),
+    border: Some(Tone::Border),
+    radius: Radius::None,
+    ink: Tone::Text,
+};
+
+/// A menu item's, an option's and a dropdown's style: at least an item high, text 12 px from
+/// its sides.
+fn item_style() -> Style {
+    Style {
+        min: Size {
+            w: 0.0,
+            h: popup::ITEM_HEIGHT,
+        },
+        padding: Insets::xy(popup::ITEM_PAD, 0.0),
+        ..Style::default()
     }
 }
 
@@ -517,8 +754,18 @@ pub(crate) struct Node<M> {
     pub(crate) value: f32,
     /// A hold button: its Invoke message is in the Ui's hold table.
     pub(crate) hold: bool,
-    /// It has a group, a progress value or a hold, which an element without them clears.
+    /// It has a group, a progress value, a hold or a dropdown's step, which an element without
+    /// them clears.
     pub(crate) special: bool,
+    /// Its slot in the Ui's side table (a tooltip, a dropdown's name and step); [`NIL`] if none.
+    pub(crate) side: u32,
+    /// Whether what it opens is open; `None` if it opens nothing.
+    pub(crate) expanded: Option<bool>,
+    /// Context requests on it or inside it ask for the model's menu.
+    pub(crate) context: bool,
+    /// Its element's [`rare`] flags as last built: with these and the new element's both 0, an
+    /// update skips the popup state.
+    pub(crate) rare: u8,
 
     pub(crate) parent: u32,
     pub(crate) first: u32,
@@ -570,6 +817,10 @@ impl<M> Node<M> {
             value: 0.0,
             hold: false,
             special: false,
+            side: NIL,
+            expanded: None,
+            context: false,
+            rare: 0,
             parent: NIL,
             first: NIL,
             last: NIL,
@@ -603,6 +854,12 @@ impl<M> Node<M> {
     pub(crate) fn interactive(&self) -> bool {
         self.enabled && self.role.interactive()
     }
+
+    /// The arrow keys can bring focus to it: an interactive node, or a disabled menu item, which
+    /// Windows menus let the keyboard reach (TD-0009 A1.4).
+    pub(crate) fn focusable(&self) -> bool {
+        self.interactive() || self.role == Role::MenuItem
+    }
 }
 
 /// A read-only view of a node, for tests, probes and the accessibility tree.
@@ -622,6 +879,8 @@ pub struct NodeInfo<'a> {
     pub check: Tri,
     /// Whether it's picked, for an item of a set the user picks from.
     pub selected: Option<bool>,
+    /// Whether what it opens is open, for a node that opens a popup.
+    pub expanded: Option<bool>,
     pub hovered: bool,
     pub pressed: bool,
     pub focused: bool,
@@ -650,12 +909,31 @@ mod tests {
         assert!(n.interactive());
         n.enabled = false;
         assert!(!n.interactive());
-        for role in [Role::Container, Role::Label, Role::Progress] {
+        for role in [
+            Role::Container,
+            Role::Label,
+            Role::Progress,
+            Role::Separator,
+            Role::Tooltip,
+        ] {
             assert!(!Node::<()>::new(Key(1), role).interactive(), "{role:?}");
         }
-        for role in [Role::CheckBox, Role::Field, Role::Tab, Role::Radio] {
+        for role in [
+            Role::CheckBox,
+            Role::Field,
+            Role::Tab,
+            Role::Radio,
+            Role::MenuItem,
+            Role::ComboBox,
+        ] {
             assert!(Node::<()>::new(Key(1), role).interactive(), "{role:?}");
         }
+        // A disabled menu item can still be reached from the keyboard; a disabled button can't.
+        let mut item: Node<()> = Node::new(Key(1), Role::MenuItem);
+        item.enabled = false;
+        assert!(item.focusable() && !item.interactive());
+        n.enabled = false;
+        assert!(!n.focusable());
     }
 
     #[test]

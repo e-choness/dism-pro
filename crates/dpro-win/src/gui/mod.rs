@@ -35,6 +35,15 @@
 //!   writes the clipboard's text through [`WindowCx`], asks for a one-shot [`Event::Wake`] to
 //!   blink a caret ([`WindowCx::wake_after`]), and picks the pointer's shape
 //!   ([`Handler::cursor`]).
+//! - **Popups** (TD-0009 amendment A1): menus, a dropdown's list and tooltips are windows of their
+//!   own, owned by the main window, on its thread, each with its own canvas, presenter and UI
+//!   Automation adapter. The one handler serves them all: events, paints and trees say which
+//!   [`Surface`] they're for. The handler opens and closes them through [`WindowCx::show_popup`]
+//!   and [`WindowCx::hide_popup`], which take effect once it returns. Menus and lists take
+//!   activation and keyboard focus, and the main window keeps its active frame meanwhile;
+//!   tooltips take neither, nor clicks. A popup that must close (a click outside it, another
+//!   window activated, the main window moving) sends [`Event::Dismiss`]. One hidden window per
+//!   kind is kept, so opening again creates nothing.
 
 mod a11y;
 mod clipboard;
@@ -69,6 +78,40 @@ pub enum Backdrop {
     None,
     /// Mica, the main window's glass.
     Mica,
+    /// Desktop acrylic for transient windows (`DWMSBT_TRANSIENTWINDOW`): a popup's glass.
+    Transient,
+}
+
+/// What kind of window a popup is (TD-0009 A1.5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PopupKind {
+    /// A menu: activates and takes keyboard focus.
+    Menu,
+    /// A dropdown's list: activates and takes keyboard focus.
+    List,
+    /// A tooltip: never activates, never takes focus, and clicks pass through it.
+    Tooltip,
+}
+
+impl PopupKind {
+    pub(crate) const ALL: [Self; 3] = [Self::Menu, Self::List, Self::Tooltip];
+
+    pub(crate) const fn index(self) -> usize {
+        match self {
+            Self::Menu => 0,
+            Self::List => 1,
+            Self::Tooltip => 2,
+        }
+    }
+}
+
+/// Which of a window's surfaces an event, a paint or a tree is for: the window itself, or one
+/// of its popups.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Surface {
+    #[default]
+    Main,
+    Popup(PopupKind),
 }
 
 /// A size in physical pixels.
@@ -144,7 +187,15 @@ pub enum Event {
     /// The time [`WindowCx::wake_after`] asked for came.
     Wake,
     /// The user asked to close the window. It closes when the handler calls [`WindowCx::close`].
+    /// From a popup (Alt+F4 in a menu), the popup should close.
     Close,
+    /// A context menu was asked for (`WM_CONTEXTMENU`): a right-click at a point in the client
+    /// area, or the keyboard (`None`: Shift+F10, the Menu key).
+    ContextMenu(Option<PointPx>),
+    /// The popup this event is for must close: a click outside it, another window activated, the
+    /// main window moving, resizing, minimizing or changing DPI, or its presenter lost. The
+    /// handler hides it ([`WindowCx::hide_popup`]).
+    Dismiss,
 }
 
 /// The canvas for one paint: the window's pixels, premultiplied BGRA (`0xAARRGGBB`), row after row
@@ -152,12 +203,15 @@ pub enum Event {
 pub struct Frame<'a> {
     pub pixels: &'a mut [u32],
     pub size: SizePx,
+    /// The window or popup it's the canvas of.
+    pub surface: Surface,
 }
 
 impl std::fmt::Debug for Frame<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Frame")
             .field("size", &self.size)
+            .field("surface", &self.surface)
             .finish_non_exhaustive()
     }
 }
@@ -188,20 +242,24 @@ pub trait Handler {
         Cursor::Arrow
     }
 
-    /// The whole accessibility tree, for a UI Automation client's first request. From then on
-    /// the window asks [`a11y_update`](Self::a11y_update) after every event. `None` serves an
-    /// empty window until the next event, which then asks for the tree again.
-    fn a11y_tree(&mut self) -> Option<accesskit::TreeUpdate> {
+    /// The whole accessibility tree of `surface`, for a UI Automation client's first request
+    /// there. From then on the window asks [`a11y_update`](Self::a11y_update) after every event.
+    /// `None` serves an empty window until the next event, which then asks for the tree again.
+    fn a11y_tree(&mut self, surface: Surface) -> Option<accesskit::TreeUpdate> {
+        let _ = surface;
         None
     }
 
-    /// What changed since the tree or the last update; `None` if nothing a client sees did.
-    fn a11y_update(&mut self) -> Option<accesskit::TreeUpdate> {
+    /// What changed in `surface`'s tree since its tree or its last update; `None` if nothing a
+    /// client sees did.
+    fn a11y_update(&mut self, surface: Surface) -> Option<accesskit::TreeUpdate> {
+        let _ = surface;
         None
     }
 
-    /// A client's request (Invoke, Toggle, Select, Focus), on the UI thread. Requests for nodes
-    /// gone since are the handler's to ignore.
+    /// A client's request (Invoke, Toggle, Select, Focus, Expand, Collapse), on the UI thread,
+    /// for the surface [`WindowCx::surface`] names. Requests for nodes gone since are the
+    /// handler's to ignore.
     fn a11y_action(&mut self, request: &accesskit::ActionRequest, cx: &mut WindowCx<'_>) {
         let _ = (request, cx);
     }

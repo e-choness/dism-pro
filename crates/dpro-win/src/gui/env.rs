@@ -17,6 +17,9 @@
 //! - **caret:** `GetCaretBlinkTime` and `SPI_GETCARETWIDTH`, the text cursor's blink rate and
 //!   thickness (Settings › Accessibility › Text cursor). *(verify that changing the blink rate
 //!   sends `WM_SETTINGCHANGE`; the thickness does.)*
+//! - **tooltip delay:** `GetDoubleClickTime`, which the common controls' tooltips use for their
+//!   delays; changing it (Settings › Bluetooth & devices › Mouse) broadcasts `WM_SETTINGCHANGE`.
+//!   *(verify the broadcast.)*
 //! - **battery saver:** `GetSystemPowerStatus`'s `SystemStatusFlag`; the window subscribes to
 //!   `GUID_POWER_SAVING_STATUS`. *(verify on Windows 11 24H2+, whose Energy saver replaced it.)*
 //! - **text size:** `TextScaleFactor` under `HKCU\Software\Microsoft\Accessibility`, a percent
@@ -40,6 +43,7 @@ use windows_sys::{
             COLOR_HOTLIGHT, COLOR_WINDOW, COLOR_WINDOWTEXT, GetSysColor, SYS_COLOR_INDEX,
         },
         System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS},
+        UI::Input::KeyboardAndMouse::GetDoubleClickTime,
         UI::WindowsAndMessaging::{
             GetCaretBlinkTime, GetSystemMetrics, PostMessageW, SM_REMOTESESSION, SPI_GETCARETWIDTH,
             SPI_GETCLIENTAREAANIMATION, SPI_GETHIGHCONTRAST, SystemParametersInfoW, WM_APP,
@@ -111,6 +115,10 @@ pub struct Env {
     pub caret_blink_ms: u32,
     /// The caret's width in pixels at 100 %; at least 1.
     pub caret_width: u32,
+    /// Windows' tooltip delay in milliseconds: its double-click time, as the common controls'
+    /// tooltips take it. A tip shows after it, hides after ten, and a neighbor's reshows within a
+    /// fifth of it.
+    pub tooltip_ms: u32,
     /// Windows' text size in percent, 100 to 225 (Settings › Accessibility › Text size). `Env`'s
     /// default, 0, is taken as 100.
     pub text_scale: u16,
@@ -141,6 +149,7 @@ impl Env {
             battery_saver: battery_saver(),
             caret_blink_ms: caret_blink_ms(),
             caret_width: caret_width(),
+            tooltip_ms: tooltip_ms(),
             text_scale: text_scale(),
         }
     }
@@ -245,6 +254,12 @@ fn caret_blink_ms() -> u32 {
         0 => 530,
         ms => ms,
     }
+}
+
+/// `GetDoubleClickTime`, which never fails; 500 ms is its default.
+fn tooltip_ms() -> u32 {
+    // SAFETY: no preconditions.
+    unsafe { GetDoubleClickTime() }
 }
 
 /// `SPI_GETCARETWIDTH`; 1, Windows' default, if it can't be read.

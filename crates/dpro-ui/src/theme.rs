@@ -406,6 +406,35 @@ pub mod tokens {
         pub const FOCUS: f32 = 2.0;
     }
 
+    /// Menus, dropdown lists and tooltips (TD-0009 A1.10 item 1: the metrics of `WinUI`, until the
+    /// canvas draws them).
+    pub mod popup {
+        /// Inside a menu's or a list's edge.
+        pub const PADDING: f32 = 4.0;
+        /// An item's least height, and a dropdown's.
+        pub const ITEM_HEIGHT: f32 = 32.0;
+        /// An item's text from its sides.
+        pub const ITEM_PAD: f32 = 12.0;
+        /// A separator: a hairline with 4 px above and below.
+        pub const SEPARATOR: f32 = 9.0;
+        /// Between a popup and its anchor.
+        pub const GAP: f32 = 4.0;
+        /// A tooltip's text from its sides, and from its top and bottom.
+        pub const TIP_PAD_X: f32 = 8.0;
+        pub const TIP_PAD_Y: f32 = 5.0;
+        /// A tooltip's widest; longer text wraps.
+        pub const TIP_MAX_W: f32 = 320.0;
+        /// A menu's tallest, as a share of the work area's height.
+        pub const MAX_HEIGHT: f32 = 0.5;
+        /// Autopop: a tooltip hides after this many of its delays (Windows' `TTDT_AUTOPOP`).
+        pub const TIP_SHOWS_FOR: u32 = 10;
+        /// Reshow: moving to a neighbor within this share of the delay shows its tip at once
+        /// (Windows' `TTDT_RESHOW`, a fifth).
+        pub const TIP_RESHOW_DIV: u32 = 5;
+        /// The delay when Windows hasn't said: its default double-click time.
+        pub const TIP_DELAY_MS: u32 = 500;
+    }
+
     /// Durations; "Show animations" off makes them all 0.
     pub mod motion {
         /// Hover and press.

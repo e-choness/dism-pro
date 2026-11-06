@@ -40,7 +40,7 @@ impl<M> Ui<M> {
     }
 
     /// The natural outer size of `i` when `avail` logical pixels of width are available.
-    fn measure(&mut self, i: u32, avail: f32, text: &mut dyn TextSystem) -> Size {
+    pub(crate) fn measure(&mut self, i: u32, avail: f32, text: &mut dyn TextSystem) -> Size {
         {
             let n = &self.nodes[i as usize];
             if n.cache_valid && n.measured_for.to_bits() == avail.to_bits() {
@@ -56,13 +56,22 @@ impl<M> Ui<M> {
             Size::ZERO
         } else if n.first == NIL {
             match n.role {
-                // A progress bar is as big as its style makes it.
-                Role::Container | Role::Progress => Size::ZERO,
-                Role::Label | Role::Button | Role::Tab => {
+                // A progress bar and a separator are as big as their styles make them.
+                Role::Container | Role::Progress | Role::Separator => Size::ZERO,
+                Role::Label | Role::Button | Role::Tab | Role::MenuItem | Role::Tooltip => {
                     let m = text.measure(&n.text, &n.text_style, inner_w);
                     Size {
                         w: m.width,
                         h: m.height,
+                    }
+                }
+                // Its value, then a chevron a line square.
+                Role::ComboBox => {
+                    let line = text.measure("", &n.text_style, f32::INFINITY).height;
+                    let m = text.measure(&n.text, &n.text_style, (inner_w - line).max(0.0));
+                    Size {
+                        w: m.width + line,
+                        h: m.height.max(line),
                     }
                 }
                 // As wide as the view makes it, a line high: its text never changes its size.

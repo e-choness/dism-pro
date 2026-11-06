@@ -38,31 +38,19 @@ impl Damage {
             return;
         }
         let growth = |d: &RectPx| d.union(r).area() - d.area();
-        if let Some(best) = self.rects.iter_mut().min_by_key(|d| growth(d)) {
-            *best = best.union(r);
-        }
-        // The merged rectangle may now cover others.
-        self.normalize();
-    }
-
-    fn normalize(&mut self) {
-        let mut i = 0;
-        while i < self.rects.len() {
-            let r = self.rects[i];
-            let before = self.rects.len();
-            let mut k = 0;
-            self.rects.retain(|d| {
-                let keep = k == i || !r.contains(*d);
-                k += 1;
-                keep
-            });
-            if self.rects.len() == before {
-                i += 1;
-            } else {
-                // Rectangles before `i` may have gone; start over (at most MAX_RECTS passes).
-                i = 0;
-            }
-        }
+        let Some((best, _)) = self.rects.iter().enumerate().min_by_key(|(_, d)| growth(d)) else {
+            return;
+        };
+        let merged = self.rects[best].union(r);
+        self.rects[best] = merged;
+        // No rectangle here covers another, so none covers the merged one (it covers the one it
+        // grew from), and one pass drops those it now covers.
+        let mut k = 0;
+        self.rects.retain(|d| {
+            let keep = k == best || !merged.contains(*d);
+            k += 1;
+            keep
+        });
     }
 }
 
@@ -117,5 +105,43 @@ mod tests {
         assert!(!d.rects().contains(&b));
         d.clear();
         assert_eq!(d.rects(), [] as [RectPx; 0]);
+    }
+
+    /// What `add`'s single pass after a merge relies on, and what callers rely on: no rectangle
+    /// covers another, each added one stays inside one of them, and there are at most `MAX_RECTS`.
+    #[test]
+    fn many_adds_keep_the_region_whole_and_minimal() {
+        let mut seed = 0x2545_f491_u32;
+        let mut next = |m: u32| {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            i32::try_from(seed % m).unwrap_or(0)
+        };
+        let mut d = Damage::new();
+        let mut added = Vec::new();
+        for _ in 0..2000 {
+            let (x, y) = (next(800), next(600));
+            let r = px(x, y, x + 1 + next(120), y + 1 + next(90));
+            d.add(r);
+            added.push(r);
+            let rects = d.rects();
+            assert!(rects.len() <= MAX_RECTS);
+            for (i, a) in rects.iter().enumerate() {
+                for (k, b) in rects.iter().enumerate() {
+                    assert!(i == k || !a.contains(*b), "{a:?} covers {b:?} in {rects:?}");
+                }
+            }
+            for r in &added {
+                assert!(
+                    rects.iter().any(|d| d.contains(*r)),
+                    "{r:?} lost in {rects:?}"
+                );
+            }
+            if added.len() == 40 {
+                d.clear();
+                added.clear();
+            }
+        }
     }
 }

@@ -13,8 +13,8 @@ use crate::{
     field::TextEdit,
     pool::capacity_for,
     text::TextStyle,
-    tree::{Element, Extra, NIL, NodeId, Role},
-    ui::{HoldSlot, ROOT, Ui},
+    tree::{Element, Extra, NIL, NodeId, Role, rare},
+    ui::{HoldSlot, ROOT, Side, Ui},
 };
 
 /// Builds one parent's children for this frame.
@@ -184,11 +184,16 @@ impl<M> Ui<M> {
         n.selected = el.selected;
         n.msg = el.msg;
         let special = n.special;
+        // Popup state, now or last frame: few nodes have any, so the rest skip it here.
+        let rare = n.rare | el.rare;
         if n.enabled != el.enabled {
             n.enabled = el.enabled;
             if !el.enabled {
                 self.lose_input(i);
             }
+        }
+        if rare != 0 {
+            seen |= self.update_rare(i, el.rare, el.tip, el.extra);
         }
         match el.extra {
             // Most nodes: nothing more.
@@ -263,7 +268,7 @@ impl<M> Ui<M> {
             Extra::Group(g) => (Some(g), 0.0, None),
             Extra::Progress(v) => (None, v, None),
             Extra::Hold(m) => (None, 0.0, Some(m)),
-            Extra::None | Extra::Field { .. } => (None, 0.0, None),
+            Extra::None | Extra::Field { .. } | Extra::Combo { .. } => (None, 0.0, None),
         };
         let n = &mut self.nodes[i as usize];
         // The group sets a client's role (a tab list, a radio group, a list).
@@ -277,6 +282,93 @@ impl<M> Ui<M> {
             self.update_hold(i, invoke);
         }
         (regrouped || revalued, revalued)
+    }
+
+    /// Node `i`'s popup state from its element's [`rare`] flags `r`, tooltip `tip` and `extra`:
+    /// whether it takes context requests, whether what it opens is open, and its side slot.
+    /// Returns whether a client sees a change.
+    #[inline(never)]
+    fn update_rare(&mut self, i: u32, r: u8, tip: &str, extra: Extra<'_, M>) -> bool {
+        let n = &mut self.nodes[i as usize];
+        n.rare = r;
+        n.context = r & rare::CONTEXT != 0;
+        // Whether its popup is open: a client sees it (ExpandCollapse).
+        let expanded = rare::expanded(r);
+        let mut seen = n.expanded != expanded;
+        n.expanded = expanded;
+        let (label, step) = match extra {
+            Extra::Combo { label, step } => (label, step),
+            _ => ("", None),
+        };
+        if n.side != NIL || !tip.is_empty() || !label.is_empty() || step.is_some() {
+            seen |= self.update_side(i, tip, label, step);
+        }
+        seen
+    }
+
+    /// Keeps node `i`'s tooltip, and a dropdown's name and step, in its side slot: a node that
+    /// gained one gets a slot, and one left with none gives it back (and its tooltip goes).
+    /// Returns whether a client sees a change: the tip is its description, the name its name.
+    fn update_side(&mut self, i: u32, tip: &str, label: &str, step: Option<fn(bool) -> M>) -> bool {
+        let mut s = self.nodes[i as usize].side;
+        if tip.is_empty() && label.is_empty() && step.is_none() {
+            if s == NIL {
+                return false;
+            }
+            self.nodes[i as usize].side = NIL;
+            self.release_side(s);
+            self.tip_forget(i);
+            return true;
+        }
+        let mut seen = false;
+        if s == NIL {
+            s = self.alloc_side(i);
+            self.nodes[i as usize].side = s;
+            seen = true;
+        }
+        let side = &mut self.sides[s as usize];
+        side.step = step;
+        if side.tip != tip {
+            side.tip.clear();
+            side.tip.push_str(tip);
+            seen = true;
+        }
+        if side.label != label {
+            side.label.clear();
+            side.label.push_str(label);
+            seen = true;
+        }
+        if tip.is_empty() {
+            self.tip_forget(i);
+        }
+        seen
+    }
+
+    /// A side slot for node `i`, a freed one if there is one.
+    fn alloc_side(&mut self, i: u32) -> u32 {
+        if let Some(s) = self.free_sides.pop() {
+            self.sides[s as usize].node = i;
+            s
+        } else {
+            self.sides.push(Side {
+                node: i,
+                tip: String::new(),
+                label: String::new(),
+                step: None,
+            });
+            u32::try_from(self.sides.len() - 1).unwrap_or(NIL)
+        }
+    }
+
+    /// Frees side slot `s`, keeping its buffers for the next.
+    pub(crate) fn release_side(&mut self, s: u32) {
+        if let Some(side) = self.sides.get_mut(s as usize) {
+            side.node = NIL;
+            side.tip.clear();
+            side.label.clear();
+            side.step = None;
+            self.free_sides.push(s);
+        }
     }
 
     /// Keeps hold button `i`'s Invoke message in the hold table: a button that became a hold

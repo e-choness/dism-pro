@@ -63,9 +63,11 @@ mod paint;
 #[cfg(windows)]
 pub mod platform;
 mod pool;
+mod popup;
 mod style;
 mod text;
 mod theme;
+mod tooltip;
 mod tree;
 mod ui;
 
@@ -76,6 +78,7 @@ pub use dpro_app::table::Tri;
 pub use field::{Caret, ClipboardRequest, Cursor, FieldInfo, Insert, MAX_FIELD_LEN, TextEdit};
 pub use geom::{Insets, Point, Rect, RectPx, Size};
 pub use input::{Input, KeyCode, KeyEvent, Mods};
+pub use popup::{Placement, Popup, PopupKind, place};
 pub use style::{Align, Axis, Dim, Justify, Style};
 pub use text::{CaretStop, FakeText, GlyphSink, Icon, TextMetrics, TextStyle, TextSystem};
 pub use theme::{Color, Scheme, SysColors, Theme, Tone, tokens};

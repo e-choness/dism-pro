@@ -43,7 +43,7 @@ use windows_sys::{
         },
         Graphics::{
             Dwm::{
-                DWMSBT_MAINWINDOW, DWMSBT_NONE, DWMWA_SYSTEMBACKDROP_TYPE,
+                DWMSBT_MAINWINDOW, DWMSBT_NONE, DWMSBT_TRANSIENTWINDOW, DWMWA_SYSTEMBACKDROP_TYPE,
                 DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute,
             },
             Gdi::{
@@ -80,8 +80,8 @@ use windows_sys::{
                 WM_GETOBJECT, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP,
                 WM_MOUSEMOVE, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_POWERBROADCAST, WM_SETCURSOR,
                 WM_SETFOCUS, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_SYSKEYDOWN,
-                WM_SYSKEYUP, WM_THEMECHANGED, WM_TIMER, WM_WTSSESSION_CHANGE, WNDCLASSEXW,
-                WS_EX_NOREDIRECTIONBITMAP, WS_OVERLAPPEDWINDOW,
+                WM_SYSKEYUP, WM_THEMECHANGED, WM_TIMER, WM_WTSSESSION_CHANGE, WNDCLASS_STYLES,
+                WNDCLASSEXW, WS_EX_NOREDIRECTIONBITMAP, WS_OVERLAPPEDWINDOW,
             },
         },
     },
@@ -89,8 +89,8 @@ use windows_sys::{
 };
 
 use super::{
-    Backdrop, Cursor, Event, Frame, Handler, Mods, PointPx, Presenter, RectPx, SizePx,
-    WindowOptions,
+    Backdrop, Cursor, Event, Frame, Handler, Mods, PointPx, PopupKind, Presenter, RectPx, SizePx,
+    Surface, WindowOptions,
     a11y::{Initial, Requests, ToUiThread, WM_APP_A11Y},
     clipboard,
     compose::{Composer, Device, Gpu, Rects, after_loss},
@@ -101,6 +101,10 @@ use crate::{
     error::{Result, last_os_error},
     wide::WideCString,
 };
+
+mod popup;
+
+use popup::Popups;
 
 const CLASS: *const u16 = w!("dismpro.window");
 const FRAME_TIMER: usize = 1;
@@ -187,7 +191,7 @@ impl Window {
         let title = WideCString::new(options.title)?;
         // SAFETY: no preconditions; a null name means this executable.
         let instance = unsafe { GetModuleHandleW(null()) };
-        register_class(instance)?;
+        register_class(instance, CLASS, 0)?;
         // SAFETY: no preconditions.
         let system_dpi = unsafe { GetDpiForSystem() };
         let life = Rc::new(Cell::new(Life::Unborn));
@@ -322,8 +326,16 @@ impl Window {
 impl Drop for Window {
     fn drop(&mut self) {
         if self.life.get() == Life::Alive {
-            // SAFETY: hwnd is live and belongs to this thread; WM_NCDESTROY frees the state.
-            unsafe { DestroyWindow(self.hwnd) };
+            // SAFETY: hwnd is live and belongs to this thread; a main window's popups go first.
+            // WM_NCDESTROY frees the state.
+            unsafe {
+                with_state(self.hwnd, |s| {
+                    if s.kind == Kind::Main {
+                        s.destroy_popups();
+                    }
+                });
+                DestroyWindow(self.hwnd);
+            }
         }
     }
 }
@@ -346,19 +358,20 @@ impl Handler for Inert {
     fn paint(&mut self, _: &mut Frame<'_>) {}
 }
 
-/// Registers the window class, once per process.
-fn register_class(instance: HINSTANCE) -> Result<()> {
+/// Registers a window class of this module (`dismpro.window`, or a popup's), once per process.
+fn register_class(instance: HINSTANCE, name: *const u16, style: WNDCLASS_STYLES) -> Result<()> {
     let class = WNDCLASSEXW {
         cbSize: u32::try_from(size_of::<WNDCLASSEXW>()).unwrap_or(0),
+        style,
         lpfnWndProc: Some(proc),
         hInstance: instance,
         // SAFETY: a system cursor, loaded by id.
         hCursor: unsafe { LoadCursorW(null_mut(), IDC_ARROW) },
-        lpszClassName: CLASS,
+        lpszClassName: name,
         // SAFETY: plain data; all-zero is a valid value for the remaining fields.
         ..unsafe { std::mem::zeroed() }
     };
-    // SAFETY: the class's name is static and its procedure lives for the process.
+    // SAFETY: the class's name is a static and its procedure lives for the process.
     if unsafe { RegisterClassExW(&raw const class) } == 0 {
         // SAFETY: no preconditions; read right after the failed call.
         if unsafe { GetLastError() } != ERROR_CLASS_ALREADY_EXISTS {
@@ -368,40 +381,30 @@ fn register_class(instance: HINSTANCE) -> Result<()> {
     Ok(())
 }
 
-/// What the handler may ask of its window while it handles an event.
+/// What the handler may ask of its window while it handles an event. An event for a popup gets
+/// its owner's: the window's size, DPI and timers are the main window's, and the popup is reached
+/// through [`surface`](Self::surface) and [`invalidate_in`](Self::invalidate_in).
 pub struct WindowCx<'a> {
+    /// The main window.
     hwnd: HWND,
     state: &'a State,
+    surface: Surface,
 }
 
 impl fmt::Debug for WindowCx<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("WindowCx")
             .field("hwnd", &self.hwnd)
+            .field("surface", &self.surface)
             .finish_non_exhaustive()
     }
 }
 
 impl WindowCx<'_> {
-    /// The handler changed `r`: the next `WM_PAINT` asks it to paint, then presents `r`.
+    /// The handler changed `r` of the main window: the next `WM_PAINT` asks it to paint, then
+    /// presents `r`. A popup's are [`invalidate_in`](Self::invalidate_in)'s.
     pub fn invalidate(&mut self, r: RectPx) {
-        if r.x1 <= r.x0 || r.y1 <= r.y0 {
-            return;
-        }
-        let rect = RECT {
-            left: r.x0,
-            top: r.y0,
-            right: r.x1,
-            bottom: r.y1,
-        };
-        // SAFETY: hwnd is live, and rect a live local. Sends no message.
-        unsafe { InvalidateRect(self.hwnd, &raw const rect, 0) };
-        self.state.dirty.set(true);
-        if self.state.composed
-            && let Ok(mut damage) = self.state.damage.try_borrow_mut()
-        {
-            damage.push(r);
-        }
+        self.state.invalidate_rect(self.hwnd, r);
     }
 
     /// Whether the handler wants [`Event::Frame`]s, every 16 ms, until it says otherwise.
@@ -451,18 +454,18 @@ impl WindowCx<'_> {
         clipboard::write(self.hwnd, text)
     }
 
-    /// Destroys the window once the handler returns, ending [`Window::run`].
+    /// Destroys the window, and its popups, once the handler returns, ending [`Window::run`].
     pub fn close(&mut self) {
         self.state.close.set(true);
     }
 
-    /// The window's DPI; 96 is 100 %.
+    /// The main window's DPI; 96 is 100 %.
     #[must_use]
     pub fn dpi(&self) -> u32 {
         self.state.dpi.get()
     }
 
-    /// The client area, in physical pixels.
+    /// The main window's client area, in physical pixels.
     #[must_use]
     pub fn size(&self) -> SizePx {
         self.state.size.get()
@@ -567,9 +570,39 @@ struct State {
     power: Cell<HPOWERNOTIFY>,
     /// Subscribed to session changes.
     sessions: Cell<bool>,
+    /// The main window, or which popup of which window.
+    kind: Kind,
+    /// A main window's popups (`popup.rs`); empty for a popup.
+    popups: Popups,
+    /// A popup is being hidden: losing the activation then is no dismiss.
+    hiding: Cell<bool>,
+    /// A popup is losing the activation: hiding it then gives nothing back.
+    deactivating: Cell<bool>,
+    /// A popup's presenter was lost for good: its next show makes a new window.
+    broken: Cell<bool>,
     /// Calls into the state that haven't returned.
     depth: Cell<u32>,
     life: Rc<Cell<Life>>,
+}
+
+/// What a window of this module is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+    Main,
+    /// A popup, owned by `owner`, whose handler serves it.
+    Popup {
+        owner: HWND,
+        kind: PopupKind,
+    },
+}
+
+impl Kind {
+    fn surface(self) -> Surface {
+        match self {
+            Self::Main => Surface::Main,
+            Self::Popup { kind, .. } => Surface::Popup(kind),
+        }
+    }
 }
 
 /// Runs `f` on `hwnd`'s state, if it still has one. The state outlives `f` even if `f` destroys
@@ -671,6 +704,11 @@ impl State {
             watch: Cell::new(None),
             power: Cell::new(0),
             sessions: Cell::new(false),
+            kind: Kind::Main,
+            popups: Popups::default(),
+            hiding: Cell::new(false),
+            deactivating: Cell::new(false),
+            broken: Cell::new(false),
             depth: Cell::new(0),
             life,
         }
@@ -678,6 +716,13 @@ impl State {
 
     /// The message's result, or `None` for default handling.
     fn handle(&self, hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
+        let own = match self.kind {
+            Kind::Main => self.owner_message(hwnd, msg, wp, lp),
+            Kind::Popup { owner, kind } => self.popup_message(hwnd, owner, kind, msg, wp, lp),
+        };
+        if let Some(result) = own {
+            return result;
+        }
         match msg {
             WM_CREATE => {
                 self.subscribe(hwnd);
@@ -702,12 +747,17 @@ impl State {
                 return Some(1);
             }
             WM_SIZE => {
+                // Resized or minimized: its popups no longer stand by their anchors.
+                if self.kind == Kind::Main {
+                    self.dismiss_popups(hwnd);
+                }
                 // Minimized, the canvas is kept for the restore.
                 if u32::try_from(wp).ok() != Some(SIZE_MINIMIZED) {
                     self.resize(hwnd, low(lp), high(lp));
                 }
             }
             WM_DPICHANGED => {
+                self.dismiss_popups(hwnd);
                 let dpi = u32::try_from((wp >> 16) & 0xFFFF).unwrap_or(BASE_DPI);
                 self.dpi.set(dpi);
                 self.send(hwnd, Event::Dpi(dpi));
@@ -777,8 +827,12 @@ impl State {
         Some(0)
     }
 
-    /// `WM_DESTROY`: unsubscribes, lets UI Automation go, and ends the loop.
+    /// `WM_DESTROY`: unsubscribes, lets UI Automation go, and ends the loop. Windows has destroyed
+    /// a main window's popups already, as it does owned windows.
     fn destroyed(&self, hwnd: HWND) {
+        if self.kind == Kind::Main {
+            self.destroy_popups();
+        }
         self.unsubscribe(hwnd);
         self.requests.detach();
         if self.a11y_served.get() {
@@ -985,79 +1039,161 @@ impl State {
         }
     }
 
-    /// Runs `f` on the handler, then serves what changed to UI Automation and destroys the window
-    /// if the handler asked. `None` if the handler is busy.
+    /// Runs `f` on the handler for this window: its own, or a popup's owner's, as
+    /// [`dispatch_as`](Self::dispatch_as) does. `None` if the handler is busy, or a popup's owner
+    /// is going.
     fn dispatch<R>(
         &self,
         hwnd: HWND,
         f: impl FnOnce(&mut dyn Handler, &mut WindowCx<'_>) -> R,
     ) -> Option<R> {
+        match self.kind {
+            Kind::Main => self.dispatch_as(hwnd, Surface::Main, f),
+            Kind::Popup { owner, kind } => {
+                // SAFETY: a popup's owner is a window of this module's class on this thread,
+                // alive while its popups are (it destroys them first).
+                unsafe { with_state(owner, |o| o.dispatch_as(owner, Surface::Popup(kind), f)) }
+                    .flatten()
+            }
+        }
+    }
+
+    /// On a main window's state: runs `f` on the handler for `surface`, then does what it asked
+    /// of the popups, serves what changed to UI Automation (the window's tree and each popup's),
+    /// and destroys the window if the handler asked. `None` if the handler is busy, or (for a
+    /// popup) the window is being destroyed.
+    fn dispatch_as<R>(
+        &self,
+        hwnd: HWND,
+        surface: Surface,
+        f: impl FnOnce(&mut dyn Handler, &mut WindowCx<'_>) -> R,
+    ) -> Option<R> {
+        if surface != Surface::Main && self.popups.closing.get() {
+            return None;
+        }
         let r = {
             let mut handler = self.handler.try_borrow_mut().ok()?;
-            let mut cx = WindowCx { hwnd, state: self };
+            let mut cx = WindowCx {
+                hwnd,
+                state: self,
+                surface,
+            };
             f(&mut **handler, &mut cx)
         };
+        self.apply_popups(hwnd);
         self.a11y_sync();
+        self.a11y_sync_popups();
         if self.close.take() {
+            self.destroy_popups();
             // SAFETY: hwnd is live. The state outlives this call (with_state's depth count).
             unsafe { DestroyWindow(hwnd) };
         }
         Some(r)
     }
 
-    /// `WM_GETOBJECT`: the adapter answers, asking the handler for its tree on the first request.
-    fn get_object(&self, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
-        let answer = {
-            let mut adapter = self.a11y.try_borrow_mut().ok()?;
-            let adapter = adapter.as_mut()?;
-            let mut initial = Initial {
-                handler: self.handler.try_borrow_mut().ok(),
-                placeholder: false,
-            };
-            let answer = adapter.handle_wm_getobject(
-                accesskit_windows::WPARAM(wp),
-                accesskit_windows::LPARAM(lp),
-                &mut initial,
-            )?;
-            if initial.placeholder {
-                self.a11y_whole.set(true);
-            }
-            answer
-        };
-        self.a11y_served.set(true);
-        // With nothing borrowed: handing UI Automation the provider may bring WM_GETOBJECT again.
-        let result: accesskit_windows::LRESULT = answer.into();
-        Some(result.0)
+    /// Runs `f` on the state whose handler serves this window: its own, or a popup's owner's.
+    /// `None` once a popup's owner is gone.
+    fn with_owner<R>(&self, f: impl FnOnce(&Self) -> R) -> Option<R> {
+        match self.kind {
+            Kind::Main => Some(f(self)),
+            // SAFETY: as in `dispatch`; after the owner's WM_NCDESTROY its user data is 0, and
+            // this is None.
+            Kind::Popup { owner, .. } => unsafe { with_state(owner, f) },
+        }
     }
 
-    /// Gives the adapter what changed in the handler's tree, then raises the events that makes.
-    /// Until a client has asked for the tree, nothing is asked of the handler.
+    /// The handler changed `r`: the next `WM_PAINT` asks it to paint, then presents `r`.
+    fn invalidate_rect(&self, hwnd: HWND, r: RectPx) {
+        if r.x1 <= r.x0 || r.y1 <= r.y0 {
+            return;
+        }
+        let rect = RECT {
+            left: r.x0,
+            top: r.y0,
+            right: r.x1,
+            bottom: r.y1,
+        };
+        // SAFETY: hwnd is live, and rect a live local. Sends no message.
+        unsafe { InvalidateRect(hwnd, &raw const rect, 0) };
+        self.dirty.set(true);
+        if self.composed
+            && let Ok(mut damage) = self.damage.try_borrow_mut()
+        {
+            damage.push(r);
+        }
+    }
+
+    /// Asks the handler (this window's, or a popup's owner's) to paint this window's canvas.
+    /// False if it's busy.
+    fn paint_canvas(&self, pixels: &mut [u32], size: SizePx) -> bool {
+        let surface = self.kind.surface();
+        self.with_owner(|o| {
+            let Ok(mut handler) = o.handler.try_borrow_mut() else {
+                return false;
+            };
+            handler.paint(&mut Frame {
+                pixels,
+                size,
+                surface,
+            });
+            true
+        }) == Some(true)
+    }
+
+    /// `WM_GETOBJECT`: the adapter answers, asking the handler (a popup's owner's) for this
+    /// surface's tree on the first request.
+    fn get_object(&self, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
+        self.with_owner(|o| {
+            let answer = {
+                let mut adapter = self.a11y.try_borrow_mut().ok()?;
+                let adapter = adapter.as_mut()?;
+                let mut initial = Initial {
+                    handler: o.handler.try_borrow_mut().ok(),
+                    surface: self.kind.surface(),
+                    placeholder: false,
+                };
+                let answer = adapter.handle_wm_getobject(
+                    accesskit_windows::WPARAM(wp),
+                    accesskit_windows::LPARAM(lp),
+                    &mut initial,
+                )?;
+                if initial.placeholder {
+                    self.a11y_whole.set(true);
+                }
+                answer
+            };
+            self.a11y_served.set(true);
+            // With nothing borrowed: handing UI Automation the provider may bring WM_GETOBJECT
+            // again.
+            let result: accesskit_windows::LRESULT = answer.into();
+            Some(result.0)
+        })
+        .flatten()
+    }
+
+    /// Gives the adapter what changed in this surface's tree (the handler's, or a popup's
+    /// owner's), then raises the events that makes. Until a client has asked for the tree,
+    /// nothing is asked of the handler.
     fn a11y_sync(&self) {
         if !self.a11y_served.get() {
             return;
         }
-        let events = {
-            let Ok(mut adapter) = self.a11y.try_borrow_mut() else {
-                return;
-            };
-            let Some(adapter) = adapter.as_mut() else {
-                return;
-            };
-            let Ok(mut handler) = self.handler.try_borrow_mut() else {
-                return;
-            };
-            let update = if self.a11y_whole.get() {
-                let tree = handler.a11y_tree();
-                self.a11y_whole.set(tree.is_none());
-                tree
-            } else {
-                handler.a11y_update()
-            };
-            let Some(update) = update else {
-                return;
-            };
-            adapter.update_if_active(|| update)
-        };
+        let surface = self.kind.surface();
+        let events = self
+            .with_owner(|o| {
+                let mut adapter = self.a11y.try_borrow_mut().ok()?;
+                let adapter = adapter.as_mut()?;
+                let mut handler = o.handler.try_borrow_mut().ok()?;
+                let update = if self.a11y_whole.get() {
+                    let tree = handler.a11y_tree(surface);
+                    self.a11y_whole.set(tree.is_none());
+                    tree
+                } else {
+                    handler.a11y_update(surface)
+                }?;
+                adapter.update_if_active(|| update)
+            })
+            .flatten();
         // With nothing borrowed: raising events may bring WM_GETOBJECT.
         if let Some(events) = events {
             events.raise();
@@ -1137,18 +1273,14 @@ impl State {
             && let Ok(mut canvas) = self.canvas.try_borrow_mut()
             && let Some(Canvas::Dib(dib)) = canvas.as_mut()
         {
-            if self.dirty.get()
-                && let Ok(mut handler) = self.handler.try_borrow_mut()
-            {
-                self.dirty.set(false);
+            if self.dirty.get() {
                 // SAFETY: no preconditions. GDI may still be reading the bitmap for an earlier
                 // copy; this waits for it before the handler writes the pixels.
                 unsafe { GdiFlush() };
                 let size = dib.size;
-                handler.paint(&mut Frame {
-                    pixels: dib.pixels(),
-                    size,
-                });
+                if self.paint_canvas(dib.pixels(), size) {
+                    self.dirty.set(false);
+                }
             }
             let r = ps.rcPaint;
             // SAFETY: both DCs are live, and BeginPaint clipped dc to the update region.
@@ -1199,16 +1331,12 @@ impl State {
                 return;
             };
             let mut painted = Rects::default();
-            if self.dirty.get()
-                && let Ok(mut handler) = self.handler.try_borrow_mut()
-            {
-                self.dirty.set(false);
-                painted = std::mem::take(&mut *damage);
+            if self.dirty.get() {
                 let size = canvas.size();
-                handler.paint(&mut Frame {
-                    pixels: canvas.pixels(),
-                    size,
-                });
+                if self.paint_canvas(canvas.pixels(), size) {
+                    self.dirty.set(false);
+                    painted = std::mem::take(&mut *damage);
+                }
             }
             let Ok(mut composer) = self.composer.try_borrow_mut() else {
                 return;
@@ -1259,6 +1387,10 @@ impl State {
     /// The device was lost (TD-0009 §5.2): rebuilt on hardware, or on WARP after a second loss
     /// within a minute.
     fn lost(&self, hwnd: HWND) {
+        if let Kind::Popup { owner, .. } = self.kind {
+            self.popup_lost(hwnd, owner);
+            return;
+        }
         let now = Instant::now();
         let device = after_loss(self.lost_at.replace(Some(now)), now);
         self.rebuild(hwnd, device);
@@ -1269,6 +1401,11 @@ impl State {
     /// paint tries again. Within [`REBUILD_GAP`] of the last rebuild, the old one goes now and
     /// the new one waits on [`REBUILD_TIMER`].
     fn rebuild(&self, hwnd: HWND, device: Device) {
+        // A popup presents on its owner's devices, whatever kind they are.
+        if let Kind::Popup { owner, .. } = self.kind {
+            self.popup_lost(hwnd, owner);
+            return;
+        }
         let now = Instant::now();
         let soon = self
             .rebuilt_at
@@ -1341,6 +1478,7 @@ fn apply_backdrop(hwnd: HWND, backdrop: Backdrop) {
     let kind = match backdrop {
         Backdrop::None => DWMSBT_NONE,
         Backdrop::Mica => DWMSBT_MAINWINDOW,
+        Backdrop::Transient => DWMSBT_TRANSIENTWINDOW,
     };
     // SAFETY: hwnd is live; the attribute's value is one DWM_SYSTEMBACKDROP_TYPE, read during the
     // call.
@@ -1819,7 +1957,16 @@ mod tests {
             [Event::Char('a'), Event::Char('\u{1F600}'), Event::Char('b')]
         );
         // SAFETY: this test's window, on its thread.
-        unsafe { with_state(hwnd, |state| WindowCx { hwnd, state }.wake_after(Some(10))) };
+        unsafe {
+            with_state(hwnd, |state| {
+                WindowCx {
+                    hwnd,
+                    state,
+                    surface: Surface::Main,
+                }
+                .wake_after(Some(10));
+            })
+        };
         let pump = || {
             // SAFETY: plain data; all-zero is a valid value.
             let mut msg: MSG = unsafe { std::mem::zeroed() };
@@ -1897,12 +2044,12 @@ mod tests {
 
         fn paint(&mut self, _: &mut Frame<'_>) {}
 
-        fn a11y_tree(&mut self) -> Option<accesskit::TreeUpdate> {
+        fn a11y_tree(&mut self, _: Surface) -> Option<accesskit::TreeUpdate> {
             self.log.borrow_mut().push("tree".into());
             Some(self.tree())
         }
 
-        fn a11y_update(&mut self) -> Option<accesskit::TreeUpdate> {
+        fn a11y_update(&mut self, _: Surface) -> Option<accesskit::TreeUpdate> {
             self.log.borrow_mut().push("update".into());
             Some(self.tree())
         }
