@@ -13,10 +13,12 @@
     reason = "each file that includes the fixture uses a part of it"
 )]
 
+use std::sync::OnceLock;
+
 use dpro_ui::{
-    Align, Axis, Canvas, Cx, Dim, Element, FakeText, Input, Insets, Justify, Key, KeyCode,
-    KeyEvent, Look, Mods, Motion, Point, Radius, Size, Style, TextStyle, Theme, Tone, Tri, Ui,
-    accesskit::TreeUpdate, tokens,
+    Align, Axis, Canvas, ClipboardRequest, Cx, Dim, Element, FakeText, Input, Insets, Justify, Key,
+    KeyCode, KeyEvent, Look, Mods, Motion, Point, Radius, Size, Style, TextEdit, TextStyle, Theme,
+    Tone, Tri, Ui, accesskit::TreeUpdate, tokens,
 };
 
 const RAIL: u8 = 12;
@@ -37,12 +39,28 @@ pub(crate) const START: Size = Size {
     h: 700.0,
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// A path as long as `MAX_PATH`, as pasted into the filter.
+pub(crate) const PATH: &str = "C:\\Program Files\\Contoso\\Updater Pro\\Components\\Shared\\\
+Plugins\\Telemetry\\Collectors\\Network\\Diagnostics\\Adapters\\Wireless\\Profiles\\Enterprise\\\
+Certificates\\Intermediate\\Revocation\\Cache\\Entries\\2026\\November\\Week45\\Session0001\\\
+Snapshot\\contoso-updater-telemetry-network-adapter-profile.json";
+
+/// The longest text a field holds (64 KiB), as pasted into the filter: the worst case of a paste.
+pub(crate) fn long_text() -> &'static str {
+    static TEXT: OnceLock<String> = OnceLock::new();
+    TEXT.get_or_init(|| "contoso updater ".repeat(dpro_ui::MAX_FIELD_LEN / 16))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Msg {
     Page(u8),
     Category(u8),
     Drawer,
     Row(u32),
+    /// The filter field changed.
+    Filter(TextEdit),
+    /// Clears the filter, as Esc in the field would (the app's accelerator, not the field's).
+    ClearFilter,
 }
 
 /// The page's view-model.
@@ -100,6 +118,15 @@ impl Shell {
             }
             Msg::Drawer => self.drawer = !self.drawer,
             Msg::Row(r) => self.selected = Some(r),
+            Msg::Filter(edit) => {
+                if edit.apply(&mut self.filter) {
+                    self.refilter();
+                }
+            }
+            Msg::ClearFilter => {
+                self.filter.clear();
+                self.refilter();
+            }
         }
     }
 
@@ -268,22 +295,16 @@ fn content(s: &Shell, cx: &mut Cx<'_, Msg>) {
         }),
         |cx| {
             cx.add_with(Element::stack(Key::name("toolbar")).style(row(8.0)), |cx| {
-                let (shown, tone) = if s.filter.is_empty() {
-                    ("Filter", Tone::TextSecondary)
-                } else {
-                    (s.filter.as_str(), Tone::Text)
-                };
                 cx.add(
-                    Element::text(Key::name("filter"), shown)
+                    Element::field(Key::name("filter"), &s.filter, Msg::Filter)
+                        .name("Filter rows")
+                        .placeholder("Filter")
                         .style(Style {
                             width: Dim::Fixed(240.0),
                             padding: Insets::xy(8.0, 4.0),
                             ..Style::default()
                         })
-                        .look(Look {
-                            ink: tone,
-                            ..card(Radius::Control)
-                        }),
+                        .look(card(Radius::Control)),
                 );
                 let selection = if s.selected.is_some() {
                     "1 selected"
@@ -439,18 +460,34 @@ fn summary(s: &Shell, cx: &mut Cx<'_, Msg>) {
 }
 
 /// One step of the scripted session.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) enum Step {
     Input(Input),
+    /// A typed character (`WM_CHAR`), to whatever has focus.
     Type(char),
-    ClearFilter,
+    /// Text from the clipboard, pasted into the focused field.
+    Paste(&'static str),
     Resize(Size),
-    /// The animation clock moves on by this many milliseconds.
+    /// The clock moves on by this many milliseconds: animations advance and the caret blinks, as
+    /// on the platform's frame and caret timers.
     Tick(u64),
     /// A message straight to the view-model, as from a keyboard accelerator or assistive
     /// technology.
     Update(Msg),
 }
+
+/// A key pressed with `mods`, as a step.
+pub(crate) fn key(key: KeyCode, down: bool, mods: Mods) -> Step {
+    Step::Input(Input::Key(KeyEvent { key, down, mods }))
+}
+
+/// Ctrl held.
+pub(crate) const CTRL: Mods = Mods {
+    shift: false,
+    ctrl: true,
+    alt: false,
+    win: false,
+};
 
 /// A shell, its Ui and text system, laid out at [`START`] when created; painted too, when made by
 /// [`Run::painted`].
@@ -463,11 +500,13 @@ pub(crate) struct Run {
     theme: Option<Theme>,
     /// The canvas's pixels, window-sized, kept between frames like a DIB section.
     pixels: Vec<u32>,
-    /// The animation clock, in milliseconds.
+    /// The clock, in milliseconds.
     now: u64,
     /// Each frame takes the accessibility update, as the platform does while a client listens.
     /// Off for the frame a U12 bench measures the update of.
     pub(crate) take_a11y: bool,
+    /// The clipboard, as the platform's copy, cut and paste would use it.
+    pub(crate) clipboard: String,
 }
 
 impl Run {
@@ -506,37 +545,68 @@ impl Run {
             pixels: Vec::new(),
             now: 0,
             take_a11y: false,
+            clipboard: String::with_capacity(64),
         };
+        // The window has keyboard focus, as a window the user works in does.
+        run.ui.set_active(true);
         run.frame();
         run
     }
 
-    /// One event through the whole UI-thread pipeline (TD-0009 §5.2): dispatch, update, view,
-    /// reconcile, layout, damage, and raster when painted.
+    /// One event through the whole UI-thread pipeline (TD-0009 §5.2): dispatch, the clipboard
+    /// request it made if any, update, view, reconcile, layout, damage, and raster when painted.
     pub(crate) fn step(&mut self, step: Step) {
         match step {
             Step::Input(input) => {
                 self.ui.dispatch(input, &mut self.msgs);
-                for m in self.msgs.drain(..) {
-                    self.shell.update(m);
-                }
+                self.clipboard();
             }
             Step::Type(c) => {
-                self.shell.filter.push(c);
-                self.shell.refilter();
+                self.ui.dispatch(Input::Char(c), &mut self.msgs);
             }
-            Step::ClearFilter => {
-                self.shell.filter.clear();
-                self.shell.refilter();
+            Step::Paste(text) => {
+                self.ui.paste(text, &mut self.msgs);
             }
             Step::Resize(size) => self.ui.set_viewport(size),
             Step::Tick(ms) => {
                 self.now += ms;
                 self.ui.tick(self.now);
             }
-            Step::Update(msg) => self.shell.update(msg),
+            Step::Update(msg) => self.msgs.push(msg),
         }
+        for m in self.msgs.drain(..) {
+            self.shell.update(m);
+        }
+        // The caret timer, as the platform runs it after every event and on its wake: the caret
+        // blinks if it's due, before the frame paints.
+        let _ = self.ui.caret_timer(self.now);
         self.frame();
+    }
+
+    /// What the platform does for a copy, cut or paste the Ui asked for, with `self.clipboard` as
+    /// the clipboard.
+    fn clipboard(&mut self) {
+        match self.ui.take_clipboard() {
+            Some(ClipboardRequest::Copy) => {
+                self.clipboard.clear();
+                self.clipboard.push_str(self.ui.selected_text());
+            }
+            Some(ClipboardRequest::Cut) => {
+                self.clipboard.clear();
+                self.clipboard.push_str(self.ui.selected_text());
+                self.ui.cut_selection(&mut self.msgs);
+            }
+            Some(ClipboardRequest::Paste) => {
+                self.ui.paste(&self.clipboard, &mut self.msgs);
+            }
+            None => {}
+        }
+    }
+
+    /// How long until the caret timer wants to run again, if it does: the platform's one-shot
+    /// timer.
+    pub(crate) fn caret_wake(&mut self) -> Option<u64> {
+        self.ui.caret_timer(self.now)
     }
 
     /// The window's damage repainted, as after a theme switch.
@@ -595,23 +665,25 @@ impl Run {
             .map_or(Point::default(), |n| n.rect.center())
     }
 
-    /// TD-0009 §7's session: a hover sweep over the rail, Tab through the shell, typing 10
-    /// characters into the filter, opening and closing the drawer, toggling a category on and off,
-    /// and a resize from 1000 to 1400 px and back. It ends where it started, so it can repeat.
+    /// The filter field's path from the root.
+    pub(crate) const FILTER: [Key; 4] = [
+        Key::name("body"),
+        Key::name("content"),
+        Key::name("toolbar"),
+        Key::name("filter"),
+    ];
+
+    /// A click at the filter field's center: focus, and the caret where the click was.
+    pub(crate) fn focus_filter(&self) -> [Step; 2] {
+        click(self.center(&Self::FILTER))
+    }
+
+    /// TD-0009 §7's session: a hover sweep over the rail, Tab through the shell, a click into the
+    /// filter, typing 10 characters into it and clearing it with Ctrl+A and Backspace, opening and
+    /// closing the drawer, toggling a category on and off, and a resize from 1000 to 1400 px and
+    /// back. It ends where it started, so it can repeat.
     pub(crate) fn session(&self) -> Vec<Step> {
-        let click = |p: Point| {
-            [
-                Step::Input(Input::PointerDown(p)),
-                Step::Input(Input::PointerUp(p)),
-            ]
-        };
-        let key = |code, down| {
-            Step::Input(Input::Key(KeyEvent {
-                key: code,
-                down,
-                mods: Mods::default(),
-            }))
-        };
+        let plain = |code, down| key(code, down, Mods::default());
         let body = [Key::name("body")];
         let mut steps = Vec::new();
         for p in 0..u64::from(RAIL) {
@@ -620,11 +692,13 @@ impl Run {
         }
         steps.push(Step::Input(Input::PointerLeave));
         for _ in 0..20 {
-            steps.push(key(KeyCode::Tab, true));
-            steps.push(key(KeyCode::Tab, false));
+            steps.push(plain(KeyCode::Tab, true));
+            steps.push(plain(KeyCode::Tab, false));
         }
+        steps.extend(self.focus_filter());
         steps.extend(TYPED.chars().map(Step::Type));
-        steps.push(Step::ClearFilter);
+        steps.push(key(KeyCode::Other(u16::from(b'A')), true, CTRL));
+        steps.push(key(KeyCode::Backspace, true, Mods::default()));
         let drawer = self.center(&[Key::name("header"), Key::name("drawer")]);
         steps.extend(click(drawer));
         steps.extend(click(drawer));
@@ -641,6 +715,14 @@ impl Run {
         }
         steps
     }
+}
+
+/// A press and release at `p`.
+pub(crate) fn click(p: Point) -> [Step; 2] {
+    [
+        Step::Input(Input::PointerDown(p)),
+        Step::Input(Input::PointerUp(p)),
+    ]
 }
 
 /// Pixels in a `w × h` canvas.

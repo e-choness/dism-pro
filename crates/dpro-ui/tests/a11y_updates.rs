@@ -121,14 +121,20 @@ fn incremental_updates_keep_a_copy_equal_to_the_whole_tree() {
         tab(false),
         Step::Update(Msg::Drawer),
         Step::Update(Msg::Page(0)),
+    ]);
+    // The field's value and focus, with the drawer opening between edits, then cleared by the
+    // app, not the field.
+    steps.extend(run.focus_filter());
+    steps.extend([
         Step::Type('x'),
         Step::Update(Msg::Drawer),
-        Step::ClearFilter,
+        Step::Paste("yz"),
+        Step::Update(Msg::ClearFilter),
         Step::Tick(500),
     ]);
     let mut updates = 0;
-    for (n, &s) in steps.iter().enumerate() {
-        run.step(s);
+    for (n, s) in steps.iter().enumerate() {
+        run.step(s.clone());
         let step = format!("step {n} ({s:?})");
         if let Some(update) = run.a11y_update() {
             updates += 1;

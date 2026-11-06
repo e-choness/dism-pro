@@ -36,11 +36,11 @@ fn warm() -> Run {
 fn after(before: Option<Step>, step: Step) -> impl Fn() -> Run {
     move || {
         let mut run = warm();
-        if let Some(s) = before {
-            run.step(s);
+        if let Some(s) = &before {
+            run.step(s.clone());
         }
         run.take_a11y = false;
-        run.step(step);
+        run.step(step.clone());
         run
     }
 }
@@ -67,7 +67,7 @@ fn a11y(c: &mut Criterion) {
             "update_row_selection",
             after(None, Step::Update(Msg::Row(3))),
         ),
-        ("update_page_away", after(None, away)),
+        ("update_page_away", after(None, away.clone())),
         (
             "update_page_back",
             after(Some(away), Step::Update(Msg::Page(0))),

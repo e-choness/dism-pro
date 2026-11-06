@@ -3,9 +3,12 @@
 //! The same shell and session as `interact.rs`. Setups warm the Ui with one full session first, so
 //! the counts are the steady state an open window lives in, and keep everything alive until the
 //! benchmark returns (see `dpro-app/benches/ir.rs` on `malloc_consolidate`).
-//! - `interact`: U2, frames end at layout and damage.
+//! - `interact`: U2, frames end at layout and damage. Text input (§11 step 3) in the filter field:
+//!   a keystroke, the caret one character left and one word left, a word deleted, and pastes of a
+//!   `MAX_PATH`-long path and of 64 KiB (the most a field holds, the worst case).
 //! - `paint`: U3 without presenting, frames painted at 1000 × 700, scale 1, light theme; and the
-//!   whole window repainted, as after a theme switch, at scales 1 and 1.5.
+//!   whole window repainted, as after a theme switch, at scales 1 and 1.5. With a keystroke and a
+//!   caret blink in the field.
 //! - `a11y`: U12 with a client listening, as in `a11y.rs`: the whole tree, and one frame's update
 //!   for an unchanged event, another row selected, and a page switch each way.
 //!
@@ -18,17 +21,17 @@ mod shell;
 
 use std::hint::black_box;
 
-use dpro_ui::{Input, Point, Size, Theme, accesskit::TreeUpdate};
+use dpro_ui::{Input, KeyCode, Mods, Point, Size, Theme, accesskit::TreeUpdate};
 use gungraun::{
     Callgrind, LibraryBenchmarkConfig, library_benchmark, library_benchmark_group, main,
 };
-use shell::{Msg, Run, START, Shell, Step};
+use shell::{CTRL, Msg, PATH, Run, START, Shell, Step, key, long_text};
 
 /// `run` after one full session, and the session.
 fn warmed(mut run: Run) -> (Run, Vec<Step>) {
     let steps = run.session();
-    for &s in &steps {
-        run.step(s);
+    for s in &steps {
+        run.step(s.clone());
     }
     (run, steps)
 }
@@ -41,12 +44,48 @@ fn warm_with(step: Step) -> (Run, Step) {
     (warm().0, step)
 }
 
+/// `run`, then a click into the filter and `typed` typed into it, the caret at its end. Frames
+/// tick at 60 Hz until the hover fades the click started have ended, as they have by the time
+/// anyone types, so a measured step pays only for itself; the caret's blink restarted at the last
+/// keystroke.
+fn in_filter(mut run: Run, typed: &str) -> Run {
+    for s in run.focus_filter() {
+        run.step(s);
+    }
+    while run.ui.wants_frame() {
+        run.step(Step::Tick(16));
+    }
+    for c in typed.chars() {
+        run.step(Step::Type(c));
+    }
+    run
+}
+
+/// Warm, with "contoso up" in the focused filter, then `step`.
+fn typed_with(step: Step) -> (Run, Step) {
+    (in_filter(warm().0, "contoso up"), step)
+}
+
+/// Warm, the empty filter focused, then `step`.
+fn focused_with(step: Step) -> (Run, Step) {
+    (in_filter(warm().0, ""), step)
+}
+
 fn warm_painted() -> (Run, Vec<Step>) {
     warmed(Run::painted(Shell::new(), 1.0, Theme::LIGHT))
 }
 
 fn warm_painted_with(step: Step) -> (Run, Step) {
     (warm_painted().0, step)
+}
+
+fn focused_painted_with(step: Step) -> (Run, Step) {
+    (in_filter(warm_painted().0, ""), step)
+}
+
+/// Warm and painted, "contoso" in the focused filter: the caret's next blink is one period away.
+fn blinking_painted_with(step: Step) -> (Run, Step) {
+    (in_filter(warm_painted().0, "contoso"), step)
 }
 
 fn warm_painted_150() -> (Run, Vec<Step>) {
@@ -56,16 +95,21 @@ fn warm_painted_150() -> (Run, Vec<Step>) {
 #[library_benchmark]
 #[bench::scripted(setup = warm)]
 fn session((mut run, steps): (Run, Vec<Step>)) -> (Run, Vec<Step>) {
-    for &s in &steps {
-        run.step(black_box(s));
+    for s in &steps {
+        run.step(black_box(s.clone()));
     }
     (run, steps)
 }
 
 #[library_benchmark]
 #[bench::unchanged(args = (Step::Input(Input::PointerMove(Point { x: -1.0, y: -1.0 }))), setup = warm_with)]
-#[bench::keystroke(args = (Step::Type('c')), setup = warm_with)]
+#[bench::keystroke(args = (Step::Type('c')), setup = focused_with)]
 #[bench::resize(args = (Step::Resize(Size { w: 1400.0, ..START })), setup = warm_with)]
+#[bench::caret_left(args = (key(KeyCode::Left, true, Mods::default())), setup = typed_with)]
+#[bench::word_left(args = (key(KeyCode::Left, true, CTRL)), setup = typed_with)]
+#[bench::word_delete(args = (key(KeyCode::Backspace, true, CTRL)), setup = typed_with)]
+#[bench::paste_path(args = (Step::Paste(PATH)), setup = focused_with)]
+#[bench::paste_64k(args = (Step::Paste(long_text())), setup = focused_with)]
 fn event((mut run, step): (Run, Step)) -> Run {
     run.step(black_box(step));
     run
@@ -82,16 +126,17 @@ library_benchmark_group!(name = interact, benchmarks = [session, event, first_fr
 #[library_benchmark]
 #[bench::scripted(setup = warm_painted)]
 fn painted_session((mut run, steps): (Run, Vec<Step>)) -> (Run, Vec<Step>) {
-    for &s in &steps {
-        run.step(black_box(s));
+    for s in &steps {
+        run.step(black_box(s.clone()));
     }
     (run, steps)
 }
 
 #[library_benchmark]
 #[bench::unchanged(args = (Step::Input(Input::PointerMove(Point { x: -1.0, y: -1.0 }))), setup = warm_painted_with)]
-#[bench::keystroke(args = (Step::Type('c')), setup = warm_painted_with)]
+#[bench::keystroke(args = (Step::Type('c')), setup = focused_painted_with)]
 #[bench::resize(args = (Step::Resize(Size { w: 1400.0, ..START })), setup = warm_painted_with)]
+#[bench::caret_blink(args = (Step::Tick(u64::from(dpro_ui::Caret::WINDOWS.blink_ms))), setup = blinking_painted_with)]
 fn painted_event((mut run, step): (Run, Step)) -> Run {
     run.step(black_box(step));
     run

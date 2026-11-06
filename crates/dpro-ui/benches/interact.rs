@@ -19,8 +19,8 @@ use criterion::{
     BatchSize, BenchmarkGroup, Criterion, Throughput, criterion_group, criterion_main,
     measurement::WallTime,
 };
-use dpro_ui::{Input, Point, Size, Theme};
-use shell::{Run, START, Shell, Step};
+use dpro_ui::{Input, KeyCode, Mods, Point, Size, Theme};
+use shell::{Run, START, Shell, Step, key};
 
 /// The session, an unchanged event, a filter keystroke and a resize, on `run`.
 fn events(g: &mut BenchmarkGroup<'_, WallTime>, run: &mut Run) {
@@ -32,8 +32,8 @@ fn events(g: &mut BenchmarkGroup<'_, WallTime>, run: &mut Run) {
     ));
     g.bench_function("session_per_event", |b| {
         b.iter(|| {
-            for &s in &steps {
-                run.step(black_box(s));
+            for s in &steps {
+                run.step(black_box(s.clone()));
             }
         });
     });
@@ -42,23 +42,27 @@ fn events(g: &mut BenchmarkGroup<'_, WallTime>, run: &mut Run) {
     // Nothing changes: the floor every event pays (view + reconcile compares).
     let outside = Step::Input(Input::PointerMove(Point { x: -1.0, y: -1.0 }));
     g.bench_function("event_unchanged", |b| {
-        b.iter(|| run.step(black_box(outside)));
+        b.iter(|| run.step(black_box(outside.clone())));
     });
 
-    // A keystroke refilters the table: rows move, appear and disappear. Typed, then cleared.
+    // A keystroke in the filter field refilters the table: rows move, appear and disappear.
+    // Typed, then deleted with Backspace.
+    for s in run.focus_filter() {
+        run.step(s);
+    }
     g.throughput(Throughput::Elements(2));
     g.bench_function("filter_keystroke", |b| {
         b.iter(|| {
             run.step(Step::Type('c'));
-            run.step(Step::ClearFilter);
+            run.step(key(KeyCode::Backspace, true, Mods::default()));
         });
     });
     let wide = Step::Resize(Size { w: 1400.0, ..START });
     let narrow = Step::Resize(START);
     g.bench_function("resize", |b| {
         b.iter(|| {
-            run.step(wide);
-            run.step(narrow);
+            run.step(wide.clone());
+            run.step(narrow.clone());
         });
     });
 }

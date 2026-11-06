@@ -24,6 +24,11 @@ raw-API baseline, measured in this job, so it holds on whatever machine the runn
   Glass (ADR-0007, TD-0009 §5.2): the glass shell's window base, read off the screen, is DWM's
       backdrop and not the solid token. Switching transparency off shows the solid token, and on
       again brings the backdrop back, live, each within 2 s (advisory: 100 ms).
+  Text input (TD-0009 §11 step 3): the shell's filter field through real input. Typed with
+      SendInput (WM_CHAR, a surrogate pair included), Ctrl+A and Ctrl+C, Backspace, a two-line
+      clipboard pasted with Ctrl+V as one line, Shift+Home and Ctrl+X; then UIA's SetValue, which
+      filters the table, and the pointer's I-beam over the field. Each is read back through UIA or
+      the clipboard within 2 s; the time from typing to UIA's value is advisory (U3: 50 ms).
 
 The probe target is dpro-ui's `shell` example until roadmap 3.2 gives dismpro.exe its shell.
 Results go to annotations and the job summary; the raw reports go to -Out.
@@ -502,6 +507,146 @@ try {
 foreach ($k in $checks.Keys) { $lines += '{0,-44} {1}' -f $k, (Format-Verdict $checks[$k]) }
 $ok = $checks.Count -gt 0 -and -not ($checks.Values -contains $false)
 Publish 'Glass' $lines $ok
+if (-not $ok) { $failed++ }
+
+# Text input (TD-0009 §11 step 3) ------------------------------------------------------------------
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class TextGateWin32 {
+    [StructLayout(LayoutKind.Sequential)]
+    struct KEYBDINPUT { public ushort wVk; public ushort wScan; public uint dwFlags; public uint time; public IntPtr dwExtraInfo; }
+    [StructLayout(LayoutKind.Sequential)]
+    struct MOUSEINPUT { public int dx; public int dy; public uint mouseData; public uint dwFlags; public uint time; public IntPtr dwExtraInfo; }
+    [StructLayout(LayoutKind.Explicit)]
+    struct InputUnion { [FieldOffset(0)] public MOUSEINPUT mi; [FieldOffset(0)] public KEYBDINPUT ki; }
+    [StructLayout(LayoutKind.Sequential)]
+    struct INPUT { public uint type; public InputUnion u; }
+    [StructLayout(LayoutKind.Sequential)]
+    struct CURSORINFO { public int cbSize; public int flags; public IntPtr hCursor; public int x; public int y; }
+    [DllImport("user32.dll", SetLastError = true)]
+    static extern uint SendInput(uint n, INPUT[] inputs, int size);
+    [DllImport("user32.dll")]
+    static extern bool GetCursorInfo(ref CURSORINFO info);
+    [DllImport("user32.dll")]
+    static extern IntPtr LoadCursorW(IntPtr instance, IntPtr id);
+    [DllImport("user32.dll")]
+    public static extern bool SetForegroundWindow(IntPtr hwnd);
+    [DllImport("user32.dll")]
+    public static extern bool SetCursorPos(int x, int y);
+    const uint KEYBOARD = 1, KEYUP = 2, UNICODE = 4;
+    static INPUT Key(ushort vk, ushort scan, uint flags) {
+        var i = new INPUT { type = KEYBOARD };
+        i.u.ki = new KEYBDINPUT { wVk = vk, wScan = scan, dwFlags = flags };
+        return i;
+    }
+    static uint Send(INPUT[] inputs) { return SendInput((uint) inputs.Length, inputs, Marshal.SizeOf(typeof(INPUT))); }
+    // `text` as Unicode key events, a down and an up per UTF-16 unit: a character outside the BMP
+    // arrives as its two surrogates, in two WM_CHARs. Returns the events sent.
+    public static uint Type(string text) {
+        var inputs = new INPUT[text.Length * 2];
+        for (int k = 0; k < text.Length; k++) {
+            inputs[2 * k] = Key(0, text[k], UNICODE);
+            inputs[2 * k + 1] = Key(0, text[k], UNICODE | KEYUP);
+        }
+        return Send(inputs);
+    }
+    // `vk` pressed and released with `mods` held. Returns the events sent.
+    public static uint Chord(ushort[] mods, ushort vk) {
+        var inputs = new INPUT[mods.Length * 2 + 2];
+        int n = 0;
+        foreach (var m in mods) { inputs[n++] = Key(m, 0, 0); }
+        inputs[n++] = Key(vk, 0, 0);
+        inputs[n++] = Key(vk, 0, KEYUP);
+        for (int k = mods.Length - 1; k >= 0; k--) { inputs[n++] = Key(mods[k], 0, KEYUP); }
+        return Send(inputs);
+    }
+    // Whether the pointer shows the system's I-beam (IDC_IBEAM, a shared handle).
+    public static bool IsIBeam() {
+        var info = new CURSORINFO();
+        info.cbSize = Marshal.SizeOf(info);
+        return GetCursorInfo(ref info) && info.hCursor == LoadCursorW(IntPtr.Zero, (IntPtr) 32513);
+    }
+}
+'@
+$ctrl = [uint16[]] @(0x11)
+$shift = [uint16[]] @(0x10)
+$none = [uint16[]] @()
+
+$lines = @("Text input in the shell's filter field at $Size (advisory: typing reaches UIA's value <= 50 ms a key; the checks are gates)")
+$checks = [ordered]@{}
+$hwnd = [IntPtr]::Zero
+$savedClip = Get-Clipboard -Raw -ErrorAction SilentlyContinue
+$p = Start-Process -FilePath $exe.shell -ArgumentList @('--size', $Size) -PassThru
+$null = $p.Handle
+try {
+    $shown = Wait-Until {
+        $script:hwnd = [UiaGateWin32]::FindWindowW('dismpro.window', 'DISM Pro shell probe')
+        $script:hwnd -ne [IntPtr]::Zero -and [UiaGateWin32]::IsWindowVisible($script:hwnd)
+    } 30000
+    if (-not $shown) { throw "the shell showed no window in 30 s (exited: $($p.HasExited))" }
+    $root = $ae::FromHandle($hwnd)
+    $edit = $null
+    $found = Wait-Until {
+        $script:edit = Find-Elements $root $types::Edit 'Filter rows' | Select-Object -First 1
+        $null -ne $script:edit
+    } 10000
+    $checks['an Edit named "Filter rows"'] = $found
+    if (-not $found) { throw 'no Edit named "Filter rows" in 10 s' }
+    $value = Get-Pattern $edit ([Windows.Automation.ValuePattern]::Pattern)
+    $checks['empty, its placeholder as help text'] = $value.Current.Value -eq '' -and $edit.Current.HelpText -eq 'Filter'
+    [void][TextGateWin32]::SetForegroundWindow($hwnd)
+    $edit.SetFocus()
+    $checks['SetFocus gives it keyboard focus'] = Wait-Until { $edit.Current.HasKeyboardFocus }
+
+    # Typed, with a character outside the BMP (two WM_CHARs).
+    $typed = 'contoso ' + [char]::ConvertFromUtf32(0x1F600)
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    $sent = [TextGateWin32]::Type($typed)
+    $got = Wait-Until { $value.Current.Value -eq $typed } 2000
+    $ms = $sw.Elapsed.TotalMilliseconds
+    $lines += if ($got) {
+        '{0} UTF-16 units typed ({1} events), in UIA''s value after {2:N1} ms{3}' -f $typed.Length, $sent, $ms, $(if ($ms / $typed.Length -gt 50) { ' (advisory: over 50 ms a key)' } else { '' })
+    } else { "typed '$typed', UIA's value is '$($value.Current.Value)'" }
+    $checks['typing, a surrogate pair included'] = $got
+
+    Set-Clipboard -Value 'before'
+    [void][TextGateWin32]::Chord($ctrl, 0x41) # Ctrl+A
+    [void][TextGateWin32]::Chord($ctrl, 0x43) # Ctrl+C
+    $checks['Ctrl+A, Ctrl+C copy it'] = Wait-Until { (Get-Clipboard -Raw) -eq $typed } 2000
+    [void][TextGateWin32]::Chord($none, 0x08) # Backspace
+    $checks['Backspace deletes the selection'] = Wait-Until { $value.Current.Value -eq '' } 2000
+
+    Set-Clipboard -Value "C:\Program Files`r`nsecond line"
+    [void][TextGateWin32]::Chord($ctrl, 0x56) # Ctrl+V
+    $pasted = 'C:\Program Filessecond line'
+    $checks['Ctrl+V pastes two lines as one'] = Wait-Until { $value.Current.Value -eq $pasted } 2000
+    [void][TextGateWin32]::Chord($shift, 0x24) # Shift+Home
+    [void][TextGateWin32]::Chord($ctrl, 0x58) # Ctrl+X
+    $checks['Shift+Home, Ctrl+X cut it'] = Wait-Until { $value.Current.Value -eq '' -and (Get-Clipboard -Raw) -eq $pasted } 2000
+
+    $value.SetValue('Fabrikam')
+    $checks['SetValue("Fabrikam") filters the table'] = Wait-Until {
+        $rows = @(Find-Elements $root $types::Group 'Programs' | ForEach-Object { Find-Elements $_ $types::ListItem })
+        $value.Current.Value -eq 'Fabrikam' -and $rows.Count -gt 0 -and $rows[0].Current.Name -like 'Fabrikam*'
+    } 2000
+
+    $r = $edit.Current.BoundingRectangle
+    [void][TextGateWin32]::SetCursorPos([int] ($r.X + $r.Width / 2), [int] ($r.Y + $r.Height / 2))
+    $checks['an I-beam over it'] = Wait-Until { [TextGateWin32]::IsIBeam() } 2000
+} catch {
+    $lines += "text input FAILED: $($_.Exception.Message)"
+    $checks['client'] = $false
+} finally {
+    if ($null -ne $savedClip) { Set-Clipboard -Value $savedClip }
+    if (-not $p.HasExited) {
+        if ($hwnd -ne [IntPtr]::Zero) { [void][UiaGateWin32]::PostMessageW($hwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) } # WM_CLOSE
+        if (-not $p.WaitForExit(5000)) { $p.Kill(); $lines += 'the shell did not close on WM_CLOSE'; $checks['closes'] = $false }
+    }
+}
+foreach ($k in $checks.Keys) { $lines += '{0,-44} {1}' -f $k, (Format-Verdict $checks[$k]) }
+$ok = $checks.Count -gt 0 -and -not ($checks.Values -contains $false)
+Publish 'Text input' $lines $ok
 if (-not $ok) { $failed++ }
 
 exit $failed
