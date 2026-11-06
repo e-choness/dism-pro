@@ -201,11 +201,17 @@ impl<M> Ui<M> {
         if self.drag.is_some_and(|d| d.slot == s) {
             self.drag = None;
         }
+        // The next viewport given this slot starts with its bars at rest, and the pointer on one
+        // of them makes it hot again.
+        if self.bar_hot.is_some_and(|(hot, _)| hot == s) {
+            self.bar_hot = None;
+        }
         self.free_scrolls.push(s);
     }
 
     /// Node `i`'s scroll flags are `r`: it gets a slot, gives its slot back, or keeps it with
-    /// its axes updated. Returns whether a client sees a change.
+    /// its axes updated. Content that showed scrolled is repainted where it shows now. Returns
+    /// whether a client sees a change.
     pub(crate) fn update_scroll(&mut self, i: u32, r: u8) -> bool {
         let axes = [r & rare::SCROLL_X != 0, r & rare::SCROLL_Y != 0];
         let s = self.nodes[i as usize].scroll;
@@ -216,13 +222,19 @@ impl<M> Ui<M> {
                 self.nodes[i as usize].scroll = s;
                 self.mark_dirty(i);
                 self.mark_viewports_below(i);
+                // A viewport is a stop for the one holding it.
+                self.stop_changed(i);
                 true
             }
             (false, true) => {
+                // Its content and bars showed moved by the offset going with the slot; layout
+                // may not move anything, so they're damaged here.
+                self.damage_view(i);
                 self.nodes[i as usize].scroll = NIL;
                 self.release_scroll(s);
                 self.mark_dirty(i);
                 self.mark_viewports_below(i);
+                self.stop_changed(i);
                 true
             }
             (false, false) => {
@@ -236,6 +248,8 @@ impl<M> Ui<M> {
                         sc.offset[k] = 0;
                     }
                 }
+                // An offset dropped and a bar gone, under children whose rectangles stay.
+                self.damage_view(i);
                 self.mark_dirty(i);
                 true
             }
@@ -244,13 +258,17 @@ impl<M> Ui<M> {
 
     /// Node `i` became a viewport or stopped being one: its subtree's
     /// `in_viewport` follows. Each node's is set from its
-    /// parent's, so a viewport further down keeps its own subtree's.
+    /// parent's, so a viewport further down keeps its own subtree's. A node whose flag changes
+    /// gains or loses `ScrollIntoView`, which a client sees.
     fn mark_viewports_below(&mut self, i: u32) {
         let n = &self.nodes[i as usize];
         let held = n.in_viewport || n.scroll != NIL;
         let mut c = n.first;
         while c != NIL {
-            self.nodes[c as usize].in_viewport = held;
+            let was = std::mem::replace(&mut self.nodes[c as usize].in_viewport, held);
+            if was != held {
+                self.a11y_touch(c);
+            }
             self.mark_viewports_below(c);
             c = self.nodes[c as usize].next;
         }
@@ -498,13 +516,20 @@ impl<M> Ui<M> {
         self.damage_rect(bottom.intersect(shows));
     }
 
-    /// The window's scale changed: offsets keep their place in the content.
-    pub(crate) fn rescale_scrolls(&mut self, from: f32, to: f32) {
-        for sc in &mut self.scrolls {
-            for o in &mut sc.offset {
-                *o = to_px(to_logical(*o, from), to);
-            }
+    /// The window's scale changed from `from` to the one it has now: offsets keep their place in
+    /// the content, within the new most each can scroll. The view and the content round to other
+    /// pixels, and layout, which clamps too, needn't run when no logical size changed.
+    pub(crate) fn rescale_scrolls(&mut self, from: f32) {
+        let to = self.scale;
+        for s in 0..self.scrolls.len() {
+            let sc = &mut self.scrolls[s];
             sc.rest = [0; 2];
+            if sc.node == NIL {
+                continue;
+            }
+            let o = sc.offset.map(|o| to_px(to_logical(o, from), to));
+            let max = self.max_px(slot(s));
+            self.scrolls[s].offset = [0, 1].map(|k| o[k].clamp(0, max[k]));
         }
     }
 
@@ -687,10 +712,16 @@ impl<M> Ui<M> {
     }
 
     /// Scrolls every viewport holding node `i` so it's wholly in view, or its start is if it's
-    /// bigger than the view. Returns whether it's in a viewport.
+    /// bigger than the view. Returns whether it's in a viewport. While layout is pending (the
+    /// node was just built, or the window resized), its rectangle isn't where it'll be: it's
+    /// revealed once layout has placed it.
     pub(crate) fn reveal(&mut self, i: u32) -> bool {
         if i == NIL || !self.nodes[i as usize].in_viewport {
             return false;
+        }
+        if self.nodes[ROOT as usize].dirty {
+            self.reveal_after = i;
+            return true;
         }
         // The node where it shows in each viewport's content, viewport by viewport outward.
         let mut target = self.nodes[i as usize].rect.snap(self.scale);

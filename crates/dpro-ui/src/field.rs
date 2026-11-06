@@ -459,7 +459,6 @@ impl<M> Ui<M> {
             self.damage_caret_field();
             if !active {
                 self.cancel_press();
-                self.scroll_release();
                 self.tip_cancel(false);
                 self.tip.over = NIL;
             }
@@ -721,7 +720,8 @@ impl<M: Clone> Ui<M> {
     }
 
     /// A key for the focused field `i`. `Some(used)` if the field decides; `None` leaves it to the
-    /// rest of dispatch (Tab).
+    /// rest of dispatch: Tab, and Page Up and Page Down, which a one-line field has no use for and
+    /// which scroll the viewport holding it (A2.4).
     pub(crate) fn field_key(
         &mut self,
         i: u32,
@@ -815,7 +815,7 @@ impl<M: Clone> Ui<M> {
             _ if letter(b'C') => self.request(ClipboardRequest::Copy, i),
             _ if letter(b'X') => self.request(ClipboardRequest::Cut, i),
             _ if letter(b'V') => self.request(ClipboardRequest::Paste, i),
-            KeyCode::Tab => return None,
+            KeyCode::Tab | KeyCode::PageUp | KeyCode::PageDown => return None,
             _ => return Some(false),
         }
         Some(true)

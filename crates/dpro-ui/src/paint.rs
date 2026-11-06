@@ -198,11 +198,23 @@ impl<M> Ui<M> {
     }
 
     /// Node `i`'s children within `visible`, over the fill `under`. A viewport's show moved by
-    /// its offset, and its bars go over them.
+    /// its offset, and its bars go over them, inside its hairline if it has one.
     fn paint_children(&self, i: u32, visible: RectPx, under: Tone, p: &mut Painter<'_, '_>) {
         let node = &self.nodes[i as usize];
         let origin = p.canvas.origin();
+        let mut visible = visible;
         if node.scroll != NIL {
+            if node.look.border.is_some() {
+                // Content scrolls under the hairline (a pixel wide), not over it, as CSS clips
+                // to the padding box. No viewport is rounded, so the corners need no clip.
+                let r = p.canvas.placed(node.rect.snap(p.scale));
+                visible = visible.intersect(RectPx {
+                    x0: r.x0 + 1,
+                    y0: r.y0 + 1,
+                    x1: r.x1 - 1,
+                    y1: r.y1 - 1,
+                });
+            }
             let o = self.scrolls[node.scroll as usize].offset;
             p.canvas.set_origin([
                 origin[0].saturating_sub(px_offset(o[0])),
@@ -321,25 +333,20 @@ impl Painter<'_, '_> {
     }
 
     /// A scroll bar over its viewport, on the fill `under`: the track while `expanded`, then the
-    /// thumb.
+    /// thumb. In high contrast they're `COLOR_BTNFACE` and `COLOR_BTNTEXT` (A2.5), a pair whose
+    /// contrast the theme guarantees whatever is under them.
     fn scroll_bar(&mut self, track: RectPx, thumb: RectPx, expanded: bool, under: Tone) {
         let high_contrast = self.theme.scheme() == Scheme::HighContrast;
-        if expanded {
-            if high_contrast {
-                let width = px_width(self.scale.round().max(1.0));
-                self.canvas
-                    .ring(track, 0.0, width, self.theme.ink(Tone::Text, under));
-            } else {
-                self.canvas.fill(track, self.theme.color(Tone::Hover));
-            }
-        }
-        let ink = if high_contrast {
-            Tone::Text
+        let (fill, ink) = if high_contrast {
+            // `Subtle` is ButtonFace in high contrast, and text on it ButtonText.
+            (Tone::Subtle, self.theme.ink(Tone::Text, Tone::Subtle))
         } else {
-            Tone::TextSecondary
+            (Tone::Hover, self.theme.ink(Tone::TextSecondary, under))
         };
-        self.canvas
-            .rrect(thumb, half(thumb), self.theme.ink(ink, under));
+        if expanded {
+            self.canvas.fill(track, self.theme.color(fill));
+        }
+        self.canvas.rrect(thumb, half(thumb), ink);
     }
 
     /// The hover or pressed layer over a control's shape (none in high contrast: see

@@ -107,6 +107,9 @@ impl<M> Cx<'_, M> {
                 ui.mark_dirty(self.parent);
                 ui.a11y_touch(i);
                 ui.a11y_touch(self.parent);
+                if el.role.interactive() {
+                    ui.stop_changed(i);
+                }
                 i
             } else {
                 // Moved: its old place is damaged, and layout finds its new one.
@@ -189,6 +192,9 @@ impl<M> Ui<M> {
             n.enabled = el.enabled;
             if !el.enabled {
                 self.lose_input(i);
+            }
+            if self.nodes[i as usize].role.interactive() {
+                self.stop_changed(i);
             }
         }
         if rare != 0 {

@@ -48,7 +48,9 @@ pub enum Input {
     PointerMove(Point),
     PointerDown(Point),
     PointerUp(Point),
-    /// The pointer left the window (`WM_MOUSELEAVE`).
+    /// The pointer left the window (`WM_MOUSELEAVE`), or the window lost it mid-press
+    /// (`WM_CAPTURECHANGED`: Windows sends no leave while a press holds the capture). A pointer
+    /// press still held is cancelled, so no release or hold activates it, and a thumb drag ends.
     PointerLeave,
     /// The wheel turned at a point (`WM_MOUSEWHEEL`, `WM_MOUSEHWHEEL`): `delta` in 120ths of a
     /// notch, positive away from the user (up the content), or with `horizontal` to the right.
@@ -151,6 +153,8 @@ impl<M: Clone> Ui<M> {
                 moved || selecting || item
             }
             Input::PointerLeave => {
+                // Mid-press, the window lost the pointer: nothing will release the press.
+                self.cancel_pointer_press();
                 self.scroll_pointer(None);
                 self.tip_pointer(None);
                 self.pointer_over(NIL)
@@ -185,8 +189,9 @@ impl<M: Clone> Ui<M> {
             } => {
                 self.tip_cancel(true);
                 let scrolled = self.wheel(at, delta, horizontal);
-                // The content moved under the pointer: the hover follows it.
-                if scrolled && self.pressed == NIL {
+                // The content moved under the pointer: the hover follows it, but for a press's
+                // or a drag's.
+                if scrolled && self.pressed == NIL && self.drag.is_none() {
                     let hit = self.hit(at);
                     self.pointer_over(hit);
                 }
@@ -264,6 +269,12 @@ impl<M: Clone> Ui<M> {
         self.control_key(k, out) || self.scroll_key(k)
     }
 
+    /// Enter and Space press the focused node: anything focused but a viewport (one with no
+    /// tab stop inside, A2.4), which has nothing to press.
+    fn focus_presses(&self) -> bool {
+        self.focus != NIL && self.nodes[self.focus as usize].scroll == NIL
+    }
+
     fn control_key(&mut self, k: KeyEvent, out: &mut Vec<M>) -> bool {
         let holds = self.focus != NIL && self.nodes[self.focus as usize].hold;
         match (k.key, k.down) {
@@ -296,12 +307,13 @@ impl<M: Clone> Ui<M> {
                 self.end_hold();
                 true
             }
-            (KeyCode::Enter, true) if self.focus != NIL => {
+            // A focused viewport has nothing to press: the keys go on, unused.
+            (KeyCode::Enter, true) if self.focus_presses() => {
                 self.show_focus_ring();
                 self.activate(self.focus, out);
                 true
             }
-            (KeyCode::Space, true) if self.focus != NIL => {
+            (KeyCode::Space, true) if self.focus_presses() => {
                 self.show_focus_ring();
                 self.key_pressed = self.focus;
                 self.set_pressed(self.focus, true);
@@ -737,8 +749,9 @@ impl<M> Ui<M> {
         self.damage_node(i);
     }
 
-    /// Cancels a press, by the pointer or by Space, so its release activates nothing: the window
-    /// lost the pointer, went inactive, or hid (a popup closed by Esc while its item is held).
+    /// Cancels a press, by the pointer or by Space, so its release activates nothing, and ends a
+    /// thumb drag: the window lost the pointer, went inactive, or hid (a popup closed by Esc
+    /// while its item is held).
     pub fn cancel_press(&mut self) {
         let held = [
             std::mem::replace(&mut self.pressed, NIL),
@@ -750,6 +763,22 @@ impl<M> Ui<M> {
             }
         }
         self.end_hold();
+        self.scroll_release();
+    }
+
+    /// The pointer's press only, the window having lost the pointer: a press held on a node (and
+    /// its hold, which would otherwise count again as the bare pointer came back over it) or a
+    /// thumb being dragged. A press by Space stays.
+    fn cancel_pointer_press(&mut self) {
+        self.scroll_release();
+        let i = std::mem::replace(&mut self.pressed, NIL);
+        if i == NIL {
+            return;
+        }
+        self.set_pressed(i, false);
+        if self.hold.node == i && self.hold.key.is_none() {
+            self.end_hold();
+        }
     }
 
     /// Shows node `i` pressed or not. A hold let go before its end (the pointer sliding off)
@@ -1338,6 +1367,33 @@ mod tests {
         assert_eq!(out, [7]);
         ui.tick(31_500, &mut out);
         assert_eq!(out, [7, 7]);
+    }
+
+    /// Windows sends no leave while a press holds the capture: a leave mid-press means another
+    /// window took the pointer, and the press is over. The bare pointer coming back over the
+    /// button must not count the hold again, or a hold-to-confirm would confirm unheld.
+    #[test]
+    fn a_press_the_window_lost_is_cancelled_and_its_hold_never_completes() {
+        let mut ui = holding();
+        let mut out = Vec::new();
+        ui.dispatch(Input::PointerDown(at(10.0)), &mut out);
+        ui.tick(1_000, &mut out);
+        ui.dispatch(Input::PointerLeave, &mut out);
+        assert_eq!((ui.hold_progress(), ui.wants_frame()), (None, false));
+        ui.dispatch(Input::PointerMove(at(10.0)), &mut out);
+        assert_eq!(ui.hold_progress(), None);
+        ui.tick(2_000, &mut out);
+        ui.tick(10_000, &mut out);
+        assert_eq!(out, [] as [u8; 0]);
+        // The release of a press it never saw invokes nothing either.
+        ui.dispatch(Input::PointerUp(at(10.0)), &mut out);
+        assert_eq!(out, [] as [u8; 0]);
+        // A press by Space, on the plain button, survives the pointer leaving.
+        ui.set_focus(ui.find(&[Key(2)]));
+        ui.dispatch(key(KeyCode::Space, true, false), &mut out);
+        ui.dispatch(Input::PointerLeave, &mut out);
+        ui.dispatch(key(KeyCode::Space, false, false), &mut out);
+        assert_eq!(out, [9]);
     }
 
     #[test]

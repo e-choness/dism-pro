@@ -38,8 +38,17 @@ impl<M> Ui<M> {
         };
         self.arrange(ROOT, window, text, false);
         self.layout_fields(text);
-        // Nodes may have moved, appeared or been enabled under a pointer that stayed still.
-        if let Some(p) = self.pointer {
+        // A node revealed before it was placed: where it is now.
+        let pending = std::mem::replace(&mut self.reveal_after, NIL);
+        if pending != NIL {
+            self.reveal(pending);
+        }
+        // Nodes may have moved, appeared or been enabled under a pointer that stayed still. While
+        // a thumb is dragged the hover stays where it was: the content moving past the pointer
+        // lights nothing (A2.4).
+        if let Some(p) = self.pointer
+            && self.drag.is_none()
+        {
             let hit = self.hit(p);
             self.pointer_over(hit);
         }
@@ -266,8 +275,8 @@ impl<M> Ui<M> {
             let cross = self.child_cross(c, s.axis, s.align, main, inner_cross, across, text);
             let offset = match s.align {
                 Align::Start | Align::Stretch => 0.0,
-                Align::Center => (inner_cross - cross) / 2.0,
-                Align::End => inner_cross - cross,
+                Align::Center => room(inner_cross - cross, across) / 2.0,
+                Align::End => room(inner_cross - cross, across),
             };
             let rect = match s.axis {
                 Axis::Row => Rect::new(inner.x + at, inner.y + offset, main, cross),
@@ -425,6 +434,13 @@ fn fixed(d: Dim) -> Option<f32> {
         Dim::Auto => None,
         Dim::Fixed(v) => Some(v),
     }
+}
+
+/// The room a child centered or put at the end has across its parent, `free`. Across an axis
+/// its viewport scrolls, a child wider than the view starts at the view's start: no offset
+/// reaches content before it (CSS's `safe` alignment).
+fn room(free: f32, across: bool) -> f32 {
+    if across { free.max(0.0) } else { free }
 }
 
 /// Where a subtree shows: moved by the viewports above it, and inside them.

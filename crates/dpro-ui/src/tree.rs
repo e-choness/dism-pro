@@ -403,17 +403,20 @@ impl<'s, M> Element<'s, M> {
     /// A menu (TD-0009 A1): the content of a menu popup, a column of
     /// [items](Self::menu_item) and [separators](Self::separator). It's one Tab stop, and Up and
     /// Down move through its items, wrapping ([`Group::Menu`]). The surface in a hairline,
-    /// padded; the window's corners are DWM's.
+    /// padded; the window's corners are DWM's. It fills its window's height, and scrolls when
+    /// its items are taller.
     #[must_use]
     pub fn menu(key: Key) -> Self {
         Self {
             extra: Extra::Group(Group::Menu),
             style: Style {
                 padding: Insets::all(popup::PADDING),
+                // The window is the items' height, or at most `popup::MAX_HEIGHT` of the work
+                // area: growing to it, the menu is its viewport, and taller items scroll (A2.4).
+                grow: 1.0,
                 ..Style::default()
             },
             look: POPUP,
-            // A menu taller than its popup (`popup::MAX_HEIGHT`) scrolls (A2.4).
             rare: rare::SCROLL_Y,
             ..Self::stack(key)
         }

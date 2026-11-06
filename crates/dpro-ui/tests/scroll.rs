@@ -14,6 +14,18 @@
 //!   scrolls in proportion; a press on the track moves a page toward it.
 //! - A scroll damages the viewport and nothing else, and asks for no frames or wakes after it.
 //! - Menus and lists scroll when they're taller than their popup.
+//!
+//! Then what a review of the slice found, each fixed and kept fixed here:
+//! - A menu fills a window shorter than its items, so it scrolls in a real popup; a focus moved
+//!   before the layout that places it is scrolled into view after that layout.
+//! - A node that stops scrolling is repainted; Page Up and Page Down reach the viewport from a
+//!   focused field; a lost pointer ends a drag; a drag holds the hover; a reused slot's bar
+//!   lights from the pointer; an offset stays in range across a DPI change; content wider than
+//!   the view it scrolls across starts at its start.
+//! - Paint: content stays inside a viewport's hairline; high contrast's bar is `COLOR_BTNFACE`
+//!   and `COLOR_BTNTEXT`.
+//! - Accessibility: `ScrollIntoView` and a lone viewport's `Focus` follow their changes at once;
+//!   Enter and Space on a focused viewport go on unused.
 
 #![expect(
     clippy::expect_used,
@@ -21,9 +33,10 @@
 )]
 
 use dpro_ui::{
-    Axes, Dim, Element, FakeText, Input, Insets, Key, KeyCode, KeyEvent, Mods, Motion, NodeId,
-    Point, Rect, ScrollInfo, Size, Style, Ui,
-    accesskit::{Action, ActionData, ActionRequest, NodeId as AkId, ScrollUnit, TreeId},
+    Align, Axes, Canvas, Color, Dim, Element, FakeText, Input, Insets, Key, KeyCode, KeyEvent,
+    Look, Mods, Motion, NodeId, Point, Radius, Rect, RectPx, ScrollInfo, Size, Style, SysColors,
+    TextEdit, Theme, Tone, Ui,
+    accesskit::{self, Action, ActionData, ActionRequest, NodeId as AkId, ScrollUnit, TreeId},
     tokens,
 };
 
@@ -652,4 +665,619 @@ fn a_menu_taller_than_its_popup_scrolls_and_keeps_the_focused_item_in_view() {
     );
     // The wheel scrolls it too.
     assert!(wheel(&mut ui, Point { x: 50.0, y: 100.0 }, 120));
+}
+
+// ---- the review of slice 5a ---------------------------------------------------------------------
+
+fn offset_of(ui: &Ui<Msg>, id: NodeId) -> Point {
+    ui.info(id)
+        .and_then(|n| n.scroll)
+        .expect("a viewport's scroll state")
+        .offset
+}
+
+/// Whether `damage` covers every pixel of `r`.
+fn covers(damage: &[RectPx], r: RectPx) -> bool {
+    (r.y0..r.y1).all(|y| {
+        (r.x0..r.x1).all(|x| {
+            damage
+                .iter()
+                .any(|d| d.x0 <= x && x < d.x1 && d.y0 <= y && y < d.y1)
+        })
+    })
+}
+
+/// The whole window painted from scratch, and its width.
+fn painted(ui: &Ui<Msg>, theme: &Theme) -> (Vec<u32>, usize) {
+    let (w, h) = ui.pixel_size();
+    let len = usize::try_from(u64::from(w) * u64::from(h)).expect("the window's pixels");
+    let mut px = vec![0; len];
+    {
+        let mut canvas = Canvas::new(&mut px, w, h).expect("a canvas");
+        let all = canvas.bounds();
+        ui.paint_region(&mut canvas, &mut FakeText, theme, all);
+    }
+    (px, usize::try_from(w).expect("a width"))
+}
+
+/// The pixel `color` is on a canvas.
+fn pixel(color: Color) -> u32 {
+    let mut px = [0; 1];
+    {
+        let mut canvas = Canvas::new(&mut px, 1, 1).expect("a canvas");
+        let all = canvas.bounds();
+        canvas.fill(all, color);
+    }
+    px[0]
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "a point inside the window, at scale 1"
+)]
+fn index(p: Point, width: usize) -> usize {
+    p.y.floor() as usize * width + p.x.floor() as usize
+}
+
+/// The platform sizes a popup's window to its content, at most `popup::MAX_HEIGHT` of the work
+/// area, and lays the menu out in it: the menu grows to the window, so one taller scrolls.
+#[test]
+fn a_menu_in_a_window_shorter_than_its_items_fills_it_and_scrolls() {
+    let mut ui = new_ui(1.0);
+    ui.build(|cx| {
+        cx.add_with(Element::menu(Key::name("menu")), |cx| {
+            for r in 0..40 {
+                cx.add(Element::menu_item(Key::index(r), "item", Msg::Row(r)));
+            }
+        });
+    });
+    let natural = ui.natural_size(&mut FakeText, 200.0);
+    assert!(natural.h > 300.0, "{natural:?}");
+    // As `fit` does: the window is the items' width, its height capped.
+    ui.set_viewport(Size {
+        w: natural.w,
+        h: 300.0,
+    });
+    ui.layout(&mut FakeText);
+    let menu = ui.find(&[Key::name("menu")]).expect("the menu");
+    let info = ui.info(menu).expect("the menu");
+    assert!((info.rect.h - 300.0).abs() < 0.01, "{:?}", info.rect);
+    let s = info.scroll.expect("a viewport");
+    assert!(s.content.h > 300.0);
+    assert!(s.bar_y.is_some(), "its bar shows that it scrolls");
+    assert!(wheel(&mut ui, Point { x: 50.0, y: 100.0 }, -120));
+    assert!(offset_of(&ui, menu).y > 0.0);
+    // The keyboard reaches the last item, in view.
+    key(&mut ui, KeyCode::Down, Mods::default());
+    key(&mut ui, KeyCode::End, Mods::default());
+    let last = ui
+        .find(&[Key::name("menu"), Key::index(39)])
+        .expect("the last item");
+    assert_eq!(ui.focus(), Some(last));
+    let rect = ui.info(last).expect("the last item").rect;
+    assert!(rect.bottom() <= 300.0 + 0.01, "{rect:?}");
+}
+
+/// A popup focuses its first item, or a list its picked option, right after it's built: before
+/// the layout that places them. The focus is scrolled into view once it's placed.
+#[test]
+fn a_list_focused_before_its_first_layout_shows_the_picked_option() {
+    let mut ui = new_ui(1.0);
+    ui.set_viewport(Size { w: 200.0, h: 300.0 });
+    ui.build(|cx| {
+        cx.add_with(Element::options(Key::name("list")), |cx| {
+            for r in 0..40 {
+                cx.add(Element::option(
+                    Key::index(r),
+                    "option",
+                    r == 30,
+                    Msg::Row(r),
+                ));
+            }
+        });
+    });
+    ui.focus_first(true);
+    let picked = ui
+        .find(&[Key::name("list"), Key::index(30)])
+        .expect("the picked option");
+    assert_eq!(ui.focus(), Some(picked));
+    ui.layout(&mut FakeText);
+    let rect = ui.info(picked).expect("the picked option").rect;
+    assert!(rect.y >= -0.01 && rect.bottom() <= 300.0 + 0.01, "{rect:?}");
+}
+
+/// A node that stops being a viewport, or stops scrolling along an axis, drops its offset: its
+/// content shows somewhere else although no rectangle changed.
+#[test]
+fn content_that_stops_scrolling_is_repainted_where_it_shows_now() {
+    let rows = |ui: &mut Ui<Msg>, el: Element<'static, Msg>| {
+        ui.build(|cx| {
+            cx.add_with(el.style(rows_style()), |cx| {
+                for r in 0..ROWS {
+                    cx.add(Element::button(Key::index(r), "row", Msg::Row(r)).style(row_style()));
+                }
+            });
+        });
+        ui.layout(&mut FakeText);
+    };
+    for then in [
+        Element::stack(Key::name("rows")),
+        Element::scroll(Key::name("rows"), Axes::X),
+    ] {
+        let mut ui = new_ui(1.0);
+        list(&mut ui);
+        for _ in 0..3 {
+            wheel(&mut ui, INSIDE, -120);
+        }
+        assert!(offset_y(&ui) > 0.0);
+        ui.clear_damage();
+        rows(&mut ui, then);
+        let view = ui.info(viewport(&ui)).expect("the rows").rect.to_px(1.0);
+        assert!(
+            covers(ui.damage(), view),
+            "{:?} doesn't cover {view:?}",
+            ui.damage()
+        );
+        // The pointer finds what shows: row 0 at the top.
+        let mut out = Vec::new();
+        let top = Point { x: 100.0, y: 10.0 };
+        ui.dispatch(Input::PointerDown(top), &mut out);
+        ui.dispatch(Input::PointerUp(top), &mut out);
+        assert_eq!(out, [Msg::Row(0)]);
+    }
+}
+
+fn edit(_: TextEdit) -> Msg {
+    Msg::Row(u64::MAX)
+}
+
+/// A field has no use for Page Up and Page Down: they scroll the viewport holding it.
+#[test]
+fn page_keys_scroll_the_viewport_from_a_focused_field() {
+    let mut ui = new_ui(1.0);
+    ui.build(|cx| {
+        cx.add_with(
+            Element::scroll(Key::name("rows"), Axes::Y).style(rows_style()),
+            |cx| {
+                cx.add(Element::field(Key::name("filter"), "", edit).style(row_style()));
+                for r in 0..ROWS {
+                    cx.add(Element::button(Key::index(r), "row", Msg::Row(r)).style(row_style()));
+                }
+            },
+        );
+    });
+    ui.layout(&mut FakeText);
+    key(&mut ui, KeyCode::Tab, Mods::default());
+    assert_eq!(
+        ui.focus(),
+        ui.find(&[Key::name("rows"), Key::name("filter")])
+    );
+    let line = scroll(&ui).line.h;
+    assert!(key(&mut ui, KeyCode::PageDown, Mods::default()));
+    assert_eq!(offset_y(&ui), 200.0 - line);
+    assert!(key(&mut ui, KeyCode::PageUp, Mods::default()));
+    assert_eq!(offset_y(&ui), 0.0);
+    // The keys it uses stay its own: Ctrl+End moves its caret and scrolls nothing.
+    assert!(key(&mut ui, KeyCode::End, CTRL));
+    assert_eq!(offset_y(&ui), 0.0);
+}
+
+/// Windows sends no leave while a press holds the capture: a leave mid-drag means another window
+/// took the pointer. The drag ends, so the bare pointer moving scrolls nothing, and the next
+/// click is a click. `cancel_press` (the window going inactive or hiding) ends one too.
+#[test]
+fn a_drag_the_window_lost_ends_and_the_next_click_works() {
+    fn leave(ui: &mut Ui<Msg>) {
+        ui.dispatch(Input::PointerLeave, &mut Vec::new());
+    }
+    fn cancel(ui: &mut Ui<Msg>) {
+        ui.cancel_press();
+    }
+    let mut ui = new_ui(1.0);
+    list(&mut ui);
+    ui.set_auto_hide_scroll_bars(false);
+    ui.layout(&mut FakeText);
+    let mut out = Vec::new();
+    for lose in [leave as fn(&mut Ui<Msg>), cancel] {
+        let grab = scroll(&ui).bar_y.expect("a bar").thumb.center();
+        ui.dispatch(Input::PointerDown(grab), &mut out);
+        ui.dispatch(
+            Input::PointerMove(Point {
+                y: grab.y + 20.0,
+                ..grab
+            }),
+            &mut out,
+        );
+        ui.layout(&mut FakeText);
+        let held = offset_y(&ui);
+        lose(&mut ui);
+        ui.dispatch(
+            Input::PointerMove(Point {
+                y: grab.y + 80.0,
+                ..grab
+            }),
+            &mut out,
+        );
+        ui.layout(&mut FakeText);
+        assert_eq!(offset_y(&ui), held, "the bare pointer drags nothing");
+        // A click on a row in view invokes it, and leaves it unpressed.
+        let row = (0..ROWS)
+            .find(|&r| {
+                let rect = row_rect(&ui, r);
+                rect.y >= 0.0 && rect.bottom() <= 200.0
+            })
+            .expect("a row in view");
+        let at = row_rect(&ui, row).center();
+        ui.dispatch(Input::PointerMove(at), &mut out);
+        ui.dispatch(Input::PointerDown(at), &mut out);
+        ui.dispatch(Input::PointerUp(at), &mut out);
+        assert_eq!(out, [Msg::Row(row)]);
+        out.clear();
+        let id = ui
+            .find(&[Key::name("rows"), Key::index(row)])
+            .expect("the row");
+        assert!(!ui.info(id).expect("the row").pressed);
+    }
+}
+
+/// While the thumb is dragged, the content moving past the pointer lights no row.
+#[test]
+fn a_drag_holds_the_hover_where_it_was() {
+    let mut ui = new_ui(1.0);
+    list(&mut ui);
+    ui.set_auto_hide_scroll_bars(false);
+    ui.layout(&mut FakeText);
+    let grab = scroll(&ui).bar_y.expect("a bar").thumb.center();
+    let mut out = Vec::new();
+    ui.dispatch(Input::PointerMove(grab), &mut out);
+    ui.dispatch(Input::PointerDown(grab), &mut out);
+    // Off the strip, over the rows, as a hand drifts.
+    let drifted = Point {
+        x: INSIDE.x,
+        y: grab.y + 60.0,
+    };
+    ui.dispatch(Input::PointerMove(drifted), &mut out);
+    ui.layout(&mut FakeText);
+    assert!(offset_y(&ui) > 0.0);
+    let hovered = |ui: &Ui<Msg>| {
+        (0..ROWS).find(|&r| {
+            ui.find(&[Key::name("rows"), Key::index(r)])
+                .and_then(|id| ui.info(id))
+                .is_some_and(|n| n.hovered)
+        })
+    };
+    assert_eq!(hovered(&ui), None);
+    // Let go: the row under the pointer is hovered.
+    ui.dispatch(Input::PointerUp(drifted), &mut out);
+    ui.layout(&mut FakeText);
+    assert!(hovered(&ui).is_some());
+    assert_eq!(out, []);
+}
+
+/// The bar the pointer was on goes with its viewport; the next one given its slot starts at rest
+/// and lights from the pointer.
+#[test]
+fn a_viewport_built_again_lights_its_bar_from_the_pointer() {
+    let mut ui = new_ui(1.0);
+    list(&mut ui);
+    let view = ui.info(viewport(&ui)).expect("the rows").rect;
+    let strip = |y: f32| Point {
+        x: view.right() - tokens::scroll::STRIP / 2.0,
+        y,
+    };
+    let mut out = Vec::new();
+    ui.dispatch(Input::PointerMove(strip(50.0)), &mut out);
+    ui.layout(&mut FakeText);
+    assert!(scroll(&ui).bar_y.expect("a bar").expanded);
+    // Another page, and back.
+    ui.build(|_| {});
+    ui.layout(&mut FakeText);
+    list(&mut ui);
+    assert!(!scroll(&ui).bar_y.expect("a bar").expanded);
+    ui.dispatch(Input::PointerMove(strip(60.0)), &mut out);
+    ui.layout(&mut FakeText);
+    assert!(scroll(&ui).bar_y.expect("a bar").expanded);
+}
+
+/// A DPI change rounds the view and the content to other pixels: an offset at the end stays at
+/// most the new end, though no logical size changed and layout clamps nothing.
+#[test]
+fn an_offset_at_the_end_stays_in_range_across_a_dpi_change() {
+    for row in [32.015, 31.99, 33.333] {
+        for (from, to) in [(1.25, 1.0), (1.5, 1.25), (1.75, 1.0), (1.0, 1.5)] {
+            let mut ui = new_ui(from);
+            ui.build(|cx| {
+                cx.add_with(
+                    Element::scroll(Key::name("rows"), Axes::Y).style(rows_style()),
+                    |cx| {
+                        for r in 0..ROWS {
+                            cx.add(Element::button(Key::index(r), "row", Msg::Row(r)).style(
+                                Style {
+                                    height: Dim::Fixed(row),
+                                    ..Style::default()
+                                },
+                            ));
+                        }
+                    },
+                );
+            });
+            ui.layout(&mut FakeText);
+            wheel(&mut ui, INSIDE, -120 * 100);
+            ui.set_scale(to);
+            ui.layout(&mut FakeText);
+            // A client reads the offset and the end, both in the toolkit's pixels.
+            let tree = ui.a11y_tree();
+            let node = ak_of(&tree.nodes, &ui, viewport(&ui)).expect("the rows");
+            let (at, end) = (
+                node.scroll_y().expect("an offset"),
+                node.scroll_y_max().expect("an end"),
+            );
+            assert!(at <= end, "rows {row}, {from} to {to}: {at} past {end}");
+            // And it kept its place: at the end, within the rounding.
+            assert!(end - at <= 1.0, "rows {row}, {from} to {to}: {at} of {end}");
+        }
+    }
+}
+
+/// Across an axis its viewport scrolls, a child wider than the view starts at the view's start,
+/// centered or at the end: no offset could reach content before it.
+#[test]
+fn content_wider_than_a_view_it_scrolls_across_starts_at_its_start() {
+    for align in [Align::Center, Align::End] {
+        let mut ui = new_ui(1.0);
+        ui.build(|cx| {
+            cx.add_with(
+                Element::scroll(Key::name("wide"), Axes::X).style(Style {
+                    height: Dim::Fixed(100.0),
+                    align,
+                    ..Style::default()
+                }),
+                |cx| {
+                    cx.add(Element::stack(Key::name("child")).style(Style {
+                        width: Dim::Fixed(2.0 * WINDOW.w),
+                        height: Dim::Fixed(50.0),
+                        ..Style::default()
+                    }));
+                },
+            );
+        });
+        ui.layout(&mut FakeText);
+        let view = ui
+            .find(&[Key::name("wide")])
+            .and_then(|id| ui.info(id))
+            .expect("the viewport")
+            .rect;
+        let child = |ui: &Ui<Msg>| {
+            ui.find(&[Key::name("wide"), Key::name("child")])
+                .and_then(|id| ui.info(id))
+                .expect("the child")
+                .rect
+        };
+        assert!(
+            (child(&ui).x - view.x).abs() < 0.01,
+            "{align:?}: {:?}",
+            child(&ui)
+        );
+        // Scrolled to the end, its end shows at the view's.
+        let mut out = Vec::new();
+        ui.dispatch(
+            Input::Wheel {
+                at: Point { x: 100.0, y: 25.0 },
+                delta: 120 * 100,
+                horizontal: true,
+            },
+            &mut out,
+        );
+        ui.layout(&mut FakeText);
+        assert!(
+            (child(&ui).right() - view.right()).abs() < 0.01,
+            "{align:?}: {:?}",
+            child(&ui)
+        );
+    }
+}
+
+/// Content scrolls under a viewport's hairline, not over it: the hairline's pixels are the ones
+/// an empty viewport has, at every offset.
+#[test]
+fn scrolled_content_stays_inside_its_viewport_s_hairline() {
+    let theme = Theme::LIGHT;
+    let framed = Look {
+        fill: Some(Tone::Surface),
+        border: Some(Tone::Border),
+        radius: Radius::None,
+        ink: Tone::Text,
+    };
+    let build = |ui: &mut Ui<Msg>, rows: u64| {
+        ui.build(|cx| {
+            cx.add_with(
+                Element::scroll(Key::name("rows"), Axes::Y)
+                    .style(rows_style())
+                    .look(framed),
+                |cx| {
+                    // Filled edge to edge, so any that strays onto the hairline shows.
+                    for r in 0..rows {
+                        cx.add(Element::stack(Key::index(r)).style(row_style()).look(Look {
+                            fill: Some(Tone::Accent),
+                            ..Look::PLAIN
+                        }));
+                    }
+                },
+            );
+        });
+        ui.layout(&mut FakeText);
+    };
+    let mut ui = new_ui(1.0);
+    build(&mut ui, 0);
+    let (empty, width) = painted(&ui, &theme);
+    build(&mut ui, ROWS);
+    let v = ui.info(viewport(&ui)).expect("the rows").rect.to_px(1.0);
+    let at = |x: i32, y: i32| {
+        usize::try_from(y).expect("a row") * width + usize::try_from(x).expect("a column")
+    };
+    let mut ring: Vec<usize> = (v.x0..v.x1)
+        .flat_map(|x| [at(x, v.y0), at(x, v.y1 - 1)])
+        .collect();
+    ring.extend((v.y0..v.y1).flat_map(|y| [at(v.x0, y), at(v.x1 - 1, y)]));
+    for step in 0..4 {
+        if step > 0 {
+            // Partway down, at offsets that aren't a row's multiple.
+            wheel(&mut ui, INSIDE, -100);
+        }
+        let (px, _) = painted(&ui, &theme);
+        for &i in &ring {
+            assert_eq!(
+                px[i],
+                empty[i],
+                "step {step}: pixel ({}, {})",
+                i % width,
+                i / width
+            );
+        }
+    }
+}
+
+/// High contrast paints the bar in `COLOR_BTNFACE` and `COLOR_BTNTEXT` (A2.5).
+#[test]
+fn in_high_contrast_the_bar_is_button_face_and_button_text() {
+    let sys = SysColors {
+        window: Color::hex(0x00_0000),
+        window_text: Color::hex(0xFF_FFFF),
+        highlight: Color::hex(0x1A_EBFF),
+        highlight_text: Color::hex(0x00_0000),
+        hot_light: Color::hex(0xFF_FF00),
+        gray_text: Color::hex(0x3F_F23F),
+        btn_face: Color::hex(0x20_2040),
+        btn_text: Color::hex(0xFF_E000),
+    };
+    let theme = Theme::high_contrast(sys);
+    let mut ui = new_ui(1.0);
+    list(&mut ui);
+    // The host turns auto-hide off in high contrast.
+    ui.set_auto_hide_scroll_bars(false);
+    ui.layout(&mut FakeText);
+    let bar = scroll(&ui).bar_y.expect("a bar");
+    assert!(bar.expanded);
+    let (px, width) = painted(&ui, &theme);
+    // The track beside the thumb, and the thumb's middle.
+    let track = Point {
+        x: bar.track.x,
+        y: bar.thumb.center().y,
+    };
+    assert!(track.x < bar.thumb.x);
+    assert_eq!(px[index(track, width)], pixel(sys.btn_face));
+    assert_eq!(px[index(bar.thumb.center(), width)], pixel(sys.btn_text));
+}
+
+fn ak_of(nodes: &[(AkId, accesskit::Node)], ui: &Ui<Msg>, id: NodeId) -> Option<accesskit::Node> {
+    nodes
+        .iter()
+        .find(|(k, _)| ui.a11y_node(*k) == Some(id))
+        .map(|(_, n)| n.clone())
+}
+
+/// A node gains `ScrollIntoView` when a viewport comes to hold it, and loses it when none does,
+/// though neither moves it.
+#[test]
+fn nodes_a_viewport_comes_to_hold_can_be_scrolled_into_view_at_once() {
+    let rows = |ui: &mut Ui<Msg>, scrolls: bool| {
+        ui.build(|cx| {
+            let el = if scrolls {
+                Element::scroll(Key::name("rows"), Axes::Y)
+            } else {
+                Element::stack(Key::name("rows"))
+            };
+            cx.add_with(el.style(rows_style()), |cx| {
+                for r in 0..ROWS {
+                    cx.add(Element::button(Key::index(r), "row", Msg::Row(r)).style(row_style()));
+                }
+            });
+        });
+        ui.layout(&mut FakeText);
+    };
+    let mut ui = new_ui(1.0);
+    rows(&mut ui, false);
+    drop(ui.a11y_tree());
+    for scrolls in [true, false] {
+        rows(&mut ui, scrolls);
+        let update = ui.a11y_update().expect("an update");
+        let last = ui
+            .find(&[Key::name("rows"), Key::index(ROWS - 1)])
+            .expect("the last row");
+        let node = ak_of(&update.nodes, &ui, last).expect("the last row is sent again");
+        assert_eq!(node.supports_action(Action::ScrollIntoView), scrolls);
+    }
+}
+
+/// A viewport with no tab stop inside is one (A2.4), and a client sees it at once when its last
+/// stop deeper down is disabled or goes, or comes back, though its content's size stays.
+#[test]
+fn a_viewport_whose_stops_come_and_go_tells_a_client_whether_it_takes_focus() {
+    let log = |ui: &mut Ui<Msg>, copy: Option<bool>| {
+        ui.build(|cx| {
+            cx.add_with(
+                Element::scroll(Key::name("rows"), Axes::Y)
+                    .style(rows_style())
+                    .name("Log"),
+                |cx| {
+                    cx.add_with(
+                        Element::stack(Key::name("tools")).style(row_style()),
+                        |cx| {
+                            if let Some(enabled) = copy {
+                                cx.add(
+                                    Element::button(Key::name("copy"), "Copy", Msg::Row(0))
+                                        .enabled(enabled),
+                                );
+                            }
+                        },
+                    );
+                    for r in 0..ROWS {
+                        cx.add(Element::text(Key::index(r), "line").style(row_style()));
+                    }
+                },
+            );
+        });
+        ui.layout(&mut FakeText);
+    };
+    let focusable = |nodes: &[(AkId, accesskit::Node)], ui: &Ui<Msg>| {
+        ak_of(nodes, ui, viewport(ui)).map(|n| n.supports_action(Action::Focus))
+    };
+    let mut ui = new_ui(1.0);
+    log(&mut ui, Some(true));
+    let tree = ui.a11y_tree();
+    assert_eq!(focusable(&tree.nodes, &ui), Some(false));
+    for (copy, takes_focus) in [(Some(false), true), (Some(true), false), (None, true)] {
+        log(&mut ui, copy);
+        let update = ui.a11y_update().expect("an update");
+        assert_eq!(
+            focusable(&update.nodes, &ui),
+            Some(takes_focus),
+            "the button {copy:?}"
+        );
+    }
+}
+
+/// A focused viewport has nothing to press: Enter and Space go on unused.
+#[test]
+fn enter_and_space_on_a_focused_viewport_go_on_unused() {
+    let mut ui = new_ui(1.0);
+    ui.build(|cx| {
+        cx.add_with(
+            Element::scroll(Key::name("rows"), Axes::Y)
+                .style(rows_style())
+                .name("Log"),
+            |cx| {
+                for r in 0..ROWS {
+                    cx.add(Element::text(Key::index(r), "line").style(row_style()));
+                }
+            },
+        );
+    });
+    ui.layout(&mut FakeText);
+    key(&mut ui, KeyCode::Tab, Mods::default());
+    assert_eq!(ui.focus(), Some(viewport(&ui)));
+    assert!(!key(&mut ui, KeyCode::Enter, Mods::default()));
+    assert!(!key(&mut ui, KeyCode::Space, Mods::default()));
+    assert!(!ui.info(viewport(&ui)).expect("the rows").pressed);
 }

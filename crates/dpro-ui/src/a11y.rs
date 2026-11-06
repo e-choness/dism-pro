@@ -170,6 +170,25 @@ impl<M> Ui<M> {
         }
     }
 
+    /// Node `i`, in a viewport, may have become a tab stop or stopped being one (it was added,
+    /// enabled or disabled, became a viewport or stopped, or goes with its subtree): the nearest
+    /// viewport holding it may have become one with no stop inside, or stopped being one, and
+    /// its `Focus` action goes to a client again. Nested viewports are stops themselves, so only
+    /// the nearest is.
+    pub(crate) fn stop_changed(&mut self, i: u32) {
+        if !self.a11y.active || !self.nodes[i as usize].in_viewport {
+            return;
+        }
+        let mut a = self.nodes[i as usize].parent;
+        while a != NIL {
+            if self.nodes[a as usize].scroll != NIL {
+                self.a11y_touch(a);
+                return;
+            }
+            a = self.nodes[a as usize].parent;
+        }
+    }
+
     fn forget_changes(&mut self) {
         for k in 0..self.a11y.changed.len() {
             let i = self.a11y.changed[k];

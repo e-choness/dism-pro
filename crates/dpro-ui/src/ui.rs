@@ -121,6 +121,9 @@ pub struct Ui<M> {
     pub(crate) drag: Option<Drag>,
     /// The bar whose strip the pointer is on: its viewport's slot and axis.
     pub(crate) bar_hot: Option<(u32, usize)>,
+    /// A node to scroll into view once layout has placed it: it was revealed while layout was
+    /// pending ([`NIL`] if none).
+    pub(crate) reveal_after: u32,
     /// While layout runs, where the subtree it's arranging shows (`layout.rs`).
     pub(crate) shown: Shown,
 }
@@ -218,6 +221,7 @@ impl<M> Ui<M> {
             auto_hide_bars: true,
             drag: None,
             bar_hot: None,
+            reveal_after: NIL,
             shown: Shown::default(),
         };
         ui.damage_all();
@@ -236,8 +240,8 @@ impl<M> Ui<M> {
     /// bounds go to assistive technology again.
     pub fn set_scale(&mut self, scale: f32) {
         if self.scale.to_bits() != scale.to_bits() {
-            self.rescale_scrolls(self.scale, scale);
-            self.scale = scale;
+            let from = std::mem::replace(&mut self.scale, scale);
+            self.rescale_scrolls(from);
             self.damage_all();
             self.a11y.all = true;
         }
@@ -462,6 +466,8 @@ impl<M> Ui<M> {
     /// Unlinks and frees `child` with its subtree, damaging where it was.
     pub(crate) fn remove(&mut self, child: u32) {
         self.damage_view(child);
+        // The stops it takes with it may have been its viewport's only ones.
+        self.stop_changed(child);
         let parent = self.nodes[child as usize].parent;
         self.unlink(child);
         self.free_subtree(child);
@@ -481,6 +487,7 @@ impl<M> Ui<M> {
             &mut self.pressed,
             &mut self.key_pressed,
             &mut self.context,
+            &mut self.reveal_after,
         ] {
             if gone(*slot) {
                 *slot = NIL;

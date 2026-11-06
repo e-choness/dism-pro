@@ -1121,6 +1121,9 @@ impl Run {
         let opening = !self.popup_open;
         let shell = &self.shell;
         self.popup.build(|cx| popup_view(shell, cx));
+        let size = self.popup.natural_size(&mut self.text, START.w);
+        self.popup.set_viewport(size);
+        self.popup.layout(&mut self.text);
         if opening {
             let keyboard = self.ui.focus_visible();
             if keyboard || open.kind == PopupKind::List {
@@ -1131,11 +1134,6 @@ impl Run {
             self.ui.set_active(false);
             self.popup.set_active(true);
             self.popup_open = true;
-        }
-        let size = self.popup.natural_size(&mut self.text, START.w);
-        self.popup.set_viewport(size);
-        self.popup.layout(&mut self.text);
-        if opening {
             self.popup.repaint_all();
         }
     }
