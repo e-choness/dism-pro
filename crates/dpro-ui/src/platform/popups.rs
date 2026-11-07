@@ -253,7 +253,15 @@ impl<P: Model> Host<P> {
                 return true;
             }
             Event::PointerMove(p) => Input::PointerMove(at(p)),
-            Event::PointerDown(p) => Input::PointerDown(at(p)),
+            Event::PointerDown {
+                at: p,
+                mods,
+                double,
+            } => Input::Press {
+                at: at(p),
+                mods: mods_of(mods),
+                double,
+            },
             Event::PointerUp(p) => Input::PointerUp(at(p)),
             Event::PointerLeave => Input::PointerLeave,
             Event::Char(c) => Input::Char(c),

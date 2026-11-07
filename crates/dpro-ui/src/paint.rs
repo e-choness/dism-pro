@@ -22,6 +22,11 @@
 //!   Windows' menus; separators: a hairline across the middle;
 //! - dropdowns: as a button, their value from the start and a chevron at the end;
 //! - tooltips: their text, wrapped, from the start;
+//! - data tables (TD-0009 A2.5): rows with the state layer while hovered or pressed, the current
+//!   one in the selection fill; cells with their text where their column puts it, trimmed, or a
+//!   check box centered in a check cell (none in a row that can't be checked); column headers in
+//!   secondary ink, a sorted one with a chevron at its end (up smallest first); and a hairline
+//!   under the header;
 //! - scroll viewports (TD-0009 A2): their content moved by the offset, in whole pixels, and
 //!   clipped to them; then their bars over it, each thumb a pill in secondary ink (`WindowText`
 //!   in high contrast), and an expanded bar's track under it in the hover layer (a `WindowText`
@@ -35,11 +40,13 @@
 //! keeps `Highlight` fills for what can be used, and shows hover and press as an outline instead
 //! of a state layer.
 
-use dpro_app::table::Tri;
+use dpro_app::table::{Order, Tri};
 
 use crate::{
     canvas::Canvas,
     geom::{Rect, RectPx},
+    style::Justify,
+    table::{TABLE_CHECK, sort_of},
     text::{GlyphSink, Icon, TextSystem},
     theme::{
         Color, Scheme, Theme, Tone,
@@ -122,10 +129,11 @@ impl<M> Ui<M> {
         }
         let under = fill.unwrap_or(under);
         let interactive = node.enabled && node.role.interactive();
+        // A column header that doesn't sort takes focus only: no state layer.
         let button = matches!(
             node.role,
-            Role::Button | Role::Tab | Role::MenuItem | Role::ComboBox
-        );
+            Role::Button | Role::Tab | Role::MenuItem | Role::ComboBox | Role::Row
+        ) || (node.role == Role::ColumnHeader && node.msg.is_some());
         // A focused menu item is lit as if hovered, enabled or not: that's its focus.
         let lit = node.role == Role::MenuItem && self.focus == i;
         // A hold pressed: the part still to go turns permanent, and its fill grows back from the
@@ -182,7 +190,12 @@ impl<M> Ui<M> {
             }
             Role::ComboBox => p.combo(node, ink),
             Role::Separator => p.separator(rect),
+            Role::Cell => p.cell(node, ink),
+            Role::ColumnHeader => p.column_header(node, ink),
+            Role::Container if self.is_table_header(i) => p.rule_below(rect),
             Role::Container
+            | Role::Grid
+            | Role::Row
             | Role::Label
             | Role::Button
             | Role::Tab
@@ -215,7 +228,8 @@ impl<M> Ui<M> {
                     y1: r.y1 - 1,
                 });
             }
-            let o = self.scrolls[node.scroll as usize].offset;
+            // A table's rows are laid out from their base.
+            let o = self.shift_px(node.scroll);
             p.canvas.set_origin([
                 origin[0].saturating_sub(px_offset(o[0])),
                 origin[1].saturating_sub(px_offset(o[1])),
@@ -552,6 +566,13 @@ impl Painter<'_, '_> {
     /// The box, a line high, then the label half a line after it (the size layout measured).
     fn check_box<M>(&mut self, n: &Node<M>, interactive: bool, ink: Color) {
         let (content, line, b) = self.mark_box(n);
+        self.check_mark(n, b, interactive);
+        self.mark_label(n, content, line, ink);
+    }
+
+    /// A check box at `b`, a line square, showing `n`'s check state.
+    fn check_mark<M>(&mut self, n: &Node<M>, b: Rect, interactive: bool) {
+        let line = b.h;
         let r = b.snap(self.scale);
         let corner = radius::SMALL * self.scale;
         let on = n.check != Tri::Off;
@@ -595,7 +616,93 @@ impl Painter<'_, '_> {
             }
             Tri::Off => {}
         }
-        self.mark_label(n, content, line, ink);
+    }
+
+    /// A check box a line high, centered in `n` (a table's check cell or check column header).
+    fn centered_box<M>(&mut self, n: &Node<M>) {
+        let line = self.text.measure("", &n.text_style, f32::INFINITY).height;
+        let r = n.rect;
+        let b = Rect::new(
+            r.x + ((r.w - line) / 2.0).max(0.0),
+            r.y + ((r.h - line) / 2.0).max(0.0),
+            line.min(r.w),
+            line,
+        );
+        self.check_mark(n, b, false);
+    }
+
+    /// `n`'s text in `ink`, centered vertically in `content` and placed across it as its style's
+    /// `justify` says; trimmed if it doesn't fit.
+    fn aligned_text<M>(&mut self, n: &Node<M>, content: Rect, ink: Color) {
+        let m = self.text.measure(&n.text, &n.text_style, content.w);
+        let free = (content.w - m.width).max(0.0);
+        let x = content.x
+            + match n.style.justify {
+                Justify::Center => free / 2.0,
+                Justify::End => free,
+                Justify::Start | Justify::SpaceBetween => 0.0,
+            };
+        let y = content.y + ((content.h - m.height) / 2.0).max(0.0);
+        let rect = Rect::new(x, y, content.right() - x, m.height);
+        let mut sink = Ink {
+            canvas: &mut *self.canvas,
+            color: ink,
+        };
+        self.text
+            .draw(&n.text, &n.text_style, rect, self.scale, &mut sink);
+    }
+
+    /// A table cell: its text, or a check cell's box (none in a row that can't be checked).
+    fn cell<M>(&mut self, n: &Node<M>, ink: Color) {
+        if n.key == TABLE_CHECK {
+            if n.enabled {
+                self.centered_box(n);
+            }
+        } else if !n.text.is_empty() {
+            self.aligned_text(n, n.rect.inset(n.style.padding), ink);
+        }
+    }
+
+    /// A column header: its text, and a sorted one's chevron in a line-high square at its end;
+    /// the check column's, a check box.
+    fn column_header<M>(&mut self, n: &Node<M>, ink: Color) {
+        if n.key == TABLE_CHECK {
+            self.centered_box(n);
+            return;
+        }
+        let content = n.rect.inset(n.style.padding);
+        let Some(order) = sort_of(n.value) else {
+            self.aligned_text(n, content, ink);
+            return;
+        };
+        let line = self.text.measure("", &n.text_style, f32::INFINITY).height;
+        let chevron = Rect::new(
+            (content.right() - line).max(content.x),
+            content.y + ((content.h - line) / 2.0).max(0.0),
+            line.min(content.w),
+            line,
+        );
+        let label = Rect {
+            w: (chevron.x - content.x).max(0.0),
+            ..content
+        };
+        self.aligned_text(n, label, ink);
+        let icon = match order {
+            Order::Ascending => Icon::ChevronUp,
+            Order::Descending => Icon::ChevronDown,
+        };
+        let mut sink = Ink {
+            canvas: &mut *self.canvas,
+            color: ink,
+        };
+        self.text.icon(icon, chevron, self.scale, &mut sink);
+    }
+
+    /// A table header's rule: a hairline in the border color along the bottom of `r`.
+    fn rule_below(&mut self, r: RectPx) {
+        let line = RectPx { y0: r.y1 - 1, ..r };
+        self.canvas
+            .fill(line, self.theme.stroke(Tone::Border, true));
     }
 }
 

@@ -64,9 +64,10 @@ raw-API baseline, measured in this job, so it holds on whatever machine the runn
       rows are DataItems. A wheel notch through SendInput at its center moves the rows up, and a
       notch back puts them where they were; on a focused row, Ctrl+End makes the last row current,
       focused and in view, and Ctrl+Home the first again; UIA's SetFocus on a row out of view
-      scrolls it into view. UIA sees only the rows in view and one past each end: the table builds
-      only those in view and half a view either side, and AccessKit leaves out what a viewport
-      clips but for the children next to those it shows (accesskit_consumer's common_filter). Each is read back as
+      scrolls it into view. UIA sees every row the table builds, those in view and half a view
+      either side: the rows' viewport is a generic container AccessKit leaves out, so a row's
+      parent is the grid, which clips nothing (accesskit_consumer's common_filter drops only what a
+      clipping parent hides, and then not the children next to those it shows). Each is read back as
       the rows' BoundingRectangle within 2 s; the times are advisory (U3: 50 ms), and Windows'
       wheel lines are reported. So is "Automatically hide scroll bars", for A2.3's verify:
       DynamicScrollbars, which the shell reads, beside UISettings.AutoHideScrollBars, with the
@@ -312,7 +313,7 @@ try {
     $boxes = @(Find-Elements $root $types::CheckBox | ForEach-Object { $_.Current.Name })
     $checks['12 pages, Overview first'] = $pages.Count -eq 12 -and $pages[0].Current.Name -eq 'Overview'
     # 750 rows on the first tab. The table builds those in view and half a view either side, and
-    # UIA sees those in view and one past each end (AccessKit's filter of what a viewport clips).
+    # UIA sees each one built: their viewport is a generic container AccessKit leaves out.
     $checks['10 to 99 rows of 750, each named'] = $rows.Count -ge 10 -and $rows.Count -lt 100 -and @($rows | Where-Object { $_.Current.Name }).Count -eq $rows.Count
     $checks['4 check boxes'] = ($boxes -join ',') -eq 'Apps,Games,Tools,System'
     $lines += "pages $($pages.Count), rows $($rows.Count) (first '$(if ($rows) { $rows[0].Current.Name })'), check boxes: $($boxes -join ', ')"
@@ -1410,7 +1411,7 @@ try {
     $firstName = $first.Current.Name
     $last = $rows[$rows.Count - 1]
     $y0 = $first.Current.BoundingRectangle.Y
-    # UIA sees the rows in view and the one past its end (AccessKit's filter, see U12).
+    # UIA sees every row built, half a view past the end too (see U12).
     $checks['the last row UIA sees is out of view'] = $rows.Count -gt 1 -and -not (Test-Inside $last.Current.BoundingRectangle $view)
     $lines += 'table {0:N0}x{1:N0} at {2:N0},{3:N0}; {4} rows built; Windows scrolls {5} lines a notch' -f $view.Width, $view.Height, $view.X, $view.Y, $rows.Count, [ScrollGateWin32]::WheelLines()
     $checks['the window is active'] = [GlassGateWin32]::Activate($hwnd)

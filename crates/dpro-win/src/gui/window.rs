@@ -65,15 +65,16 @@ use windows_sys::{
         UI::{
             HiDpi::{AdjustWindowRectExForDpi, GetDpiForSystem, GetDpiForWindow},
             Input::KeyboardAndMouse::{
-                GetKeyState, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT,
-                TrackMouseEvent, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
+                GetDoubleClickTime, GetKeyState, ReleaseCapture, SetCapture, TME_LEAVE,
+                TRACKMOUSEEVENT, TrackMouseEvent, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
             },
             WindowsAndMessaging::{
                 CREATESTRUCTW, CW_USEDEFAULT, CreateWindowExW, DEVICE_NOTIFY_WINDOW_HANDLE,
                 DefWindowProcW, DestroyWindow, DispatchMessageW, GWLP_USERDATA, GetClientRect,
-                GetMessageW, GetWindowLongPtrW, HCURSOR, HTCLIENT, IDC_ARROW, IDC_IBEAM, KillTimer,
-                LoadCursorW, MINMAXINFO, MSG, PBT_POWERSETTINGCHANGE, PostQuitMessage,
-                RegisterClassExW, SIZE_MINIMIZED, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOMOVE,
+                GetMessageTime, GetMessageW, GetSystemMetrics, GetWindowLongPtrW, HCURSOR,
+                HTCLIENT, IDC_ARROW, IDC_IBEAM, KillTimer, LoadCursorW, MINMAXINFO, MSG,
+                PBT_POWERSETTINGCHANGE, PostQuitMessage, RegisterClassExW, SIZE_MINIMIZED,
+                SM_CXDOUBLECLK, SM_CYDOUBLECLK, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOMOVE,
                 SWP_NOZORDER, SetCursor, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
                 TranslateMessage, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_CREATE, WM_DESTROY,
                 WM_DPICHANGED, WM_DWMCOMPOSITIONCHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO,
@@ -553,6 +554,9 @@ struct State {
     tracking: Cell<bool>,
     /// The primary button is down, and the window holds the pointer.
     pressed: Cell<bool>,
+    /// The last press that could begin a double-click: where, and its message time. A
+    /// double-click's second press clears it, so a third begins anew.
+    last_press: Cell<Option<(PointPx, i32)>>,
     /// Serves the handler's tree to UI Automation; made once the window exists.
     a11y: RefCell<Option<Adapter>>,
     /// Clients' requests, queued on UI Automation's threads.
@@ -697,6 +701,7 @@ impl State {
             close: Cell::new(false),
             tracking: Cell::new(false),
             pressed: Cell::new(false),
+            last_press: Cell::new(None),
             a11y: RefCell::new(None),
             requests: Arc::new(Requests::default()),
             a11y_whole: Cell::new(false),
@@ -924,7 +929,15 @@ impl State {
                 self.pressed.set(true);
                 // SAFETY: hwnd is live; WM_CAPTURECHANGED goes to the window losing the capture.
                 unsafe { SetCapture(hwnd) };
-                self.send(hwnd, Event::PointerDown(point(lp)));
+                let at = point(lp);
+                let double = self.double_click(at);
+                let held = mods();
+                let mods = Mods {
+                    shift: wp & MK_SHIFT != 0,
+                    ctrl: wp & MK_CONTROL != 0,
+                    ..held
+                };
+                self.send(hwnd, Event::PointerDown { at, mods, double });
             }
             WM_LBUTTONUP => {
                 // Cleared first: releasing sends WM_CAPTURECHANGED, which must not cancel.
@@ -1659,6 +1672,35 @@ fn signed(word: u32) -> i32 {
     if w >= 0x8000 { w - 0x1_0000 } else { w }
 }
 
+/// `WM_LBUTTONDOWN`'s `wParam` flags for Shift and Ctrl (WinUser.h's `MK_SHIFT`, `MK_CONTROL`).
+const MK_SHIFT: WPARAM = 0x0004;
+const MK_CONTROL: WPARAM = 0x0008;
+
+impl State {
+    /// Whether a press at `at`, now (the message's time), is a double-click's second: within
+    /// `GetDoubleClickTime` of the last press that could begin one, and within the double-click
+    /// rectangle (`SM_CXDOUBLECLK` by `SM_CYDOUBLECLK`) centered on it.
+    fn double_click(&self, at: PointPx) -> bool {
+        // SAFETY: no preconditions; the time of the message being handled.
+        let now = unsafe { GetMessageTime() };
+        // SAFETY: no preconditions.
+        let (limit, w, h) = unsafe {
+            (
+                GetDoubleClickTime(),
+                GetSystemMetrics(SM_CXDOUBLECLK),
+                GetSystemMetrics(SM_CYDOUBLECLK),
+            )
+        };
+        let double = self.last_press.get().is_some_and(|(p, then)| {
+            // Message times wrap after 49.7 days; the difference doesn't.
+            let elapsed = now.wrapping_sub(then).unsigned_abs();
+            elapsed <= limit && 2 * (at.x - p.x).abs() <= w && 2 * (at.y - p.y).abs() <= h
+        });
+        self.last_press.set((!double).then_some((at, now)));
+        double
+    }
+}
+
 fn point(lp: LPARAM) -> PointPx {
     PointPx {
         x: signed(low(lp)),
@@ -2147,7 +2189,7 @@ mod tests {
         const MK_SHIFT: WPARAM = 0x0004;
         const MK_CONTROL: WPARAM = 0x0008;
         let (window, events, _) = open(0);
-        let press = |x: u16, y: u16, keys: WPARAM| {
+        let press = |x: i16, y: i16, keys: WPARAM| {
             let lp = (LPARAM::from(y) << 16) | LPARAM::from(x);
             // SAFETY: messages sent to this test's live window, on its thread.
             unsafe {

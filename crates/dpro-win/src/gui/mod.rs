@@ -154,8 +154,15 @@ pub struct Mods {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Event {
     PointerMove(PointPx),
-    /// The primary button went down; the window captures the pointer until it goes up.
-    PointerDown(PointPx),
+    /// The primary button went down; the window captures the pointer until it goes up. `mods` are
+    /// the Shift and Ctrl Windows sends with it (and Alt and Windows as they are), and `double` says
+    /// it's the second press of a double-click: within the double-click time and rectangle of the
+    /// press before, which wasn't one itself (Windows' own count, without `CS_DBLCLKS`).
+    PointerDown {
+        at: PointPx,
+        mods: Mods,
+        double: bool,
+    },
     PointerUp(PointPx),
     /// The pointer left the client area.
     PointerLeave,

@@ -1419,6 +1419,8 @@ impl Run {
             self.step(Step::Update(Msg::Row(r)));
             let id = self.ui.find(&Self::row(u64::from(r)));
             self.ui.set_focus(id);
+            // Painted, as the platform paints after a client's SetFocus.
+            self.frame();
         }
         self
     }

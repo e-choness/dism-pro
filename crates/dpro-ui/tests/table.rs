@@ -26,7 +26,8 @@
 
 #![expect(
     clippy::expect_used,
-    reason = "test helpers: a node that isn't there fails the test"
+    clippy::panic,
+    reason = "test helpers: a node that isn't there, or a table that doesn't settle, fails the test"
 )]
 
 use dpro_app::table::{RowMap, RowSource, TableModel};
@@ -84,7 +85,7 @@ const VIEW: f32 = WINDOW.h - ROW;
 const CHECK: f32 = 28.0;
 const TABLE: Key = Key::name("table");
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum Msg {
     Table(TableEvent),
     ClearFilter,
@@ -275,7 +276,7 @@ impl Run {
             self.ui.dispatch(input, &mut out);
         }
         for m in &out {
-            self.page.update(m.clone());
+            self.page.update(*m);
         }
         self.frame();
         out
@@ -790,25 +791,25 @@ fn a_click_makes_a_row_current_and_leaves_the_checks() {
     assert_eq!(run.click(at, plain()), [ev(TableEvent::Current(5))]);
     assert_eq!(run.focused_row(), Some(5));
     assert_eq!(run.page.model.selected_count(), 0);
-    // On its check box, with Ctrl, with Shift: the checks.
-    let check = run.rect(run.cell(7, None)).center();
+    // On its check box, with Ctrl, with Shift: the checks. (Rows 0 to 9 show whole.)
+    let check = run.rect(run.cell(6, None)).center();
     assert_eq!(
         run.click(check, plain()),
+        [ev(TableEvent::Check(6, Pick::Toggle))]
+    );
+    let name = run.rect(run.cell(7, Some(NAME))).center();
+    assert_eq!(
+        run.click(name, ctrl()),
         [ev(TableEvent::Check(7, Pick::Toggle))]
     );
     let name = run.rect(run.cell(9, Some(NAME))).center();
     assert_eq!(
-        run.click(name, ctrl()),
-        [ev(TableEvent::Check(9, Pick::Toggle))]
-    );
-    let name = run.rect(run.cell(11, Some(NAME))).center();
-    assert_eq!(
         run.click(name, shift()),
-        [ev(TableEvent::Check(11, Pick::Extend))]
+        [ev(TableEvent::Check(9, Pick::Extend))]
     );
     assert_eq!(
         run.page.model.selected_rows().collect::<Vec<_>>(),
-        [9, 10, 11]
+        [7, 8, 9]
     );
     // Released on another row: nothing.
     let a = run.rect(run.cell(1, Some(NAME))).center();
@@ -1079,12 +1080,12 @@ fn the_tree_is_a_grid_of_rows_and_cells_with_their_indices() {
     let row = node(&tree, ui, run.row(2).expect("built"));
     assert_eq!(row.role(), AkRole::Row);
     assert_eq!(row.row_index(), Some(2));
-    assert_eq!(row.selected(), Some(true));
+    assert_eq!(row.is_selected(), Some(true));
     assert_eq!(row.label(), Some("Program 00002"));
     assert!(row.supports_action(Action::Focus));
     assert!(row.supports_action(Action::ScrollIntoView));
     let other = node(&tree, ui, run.row(3).expect("built"));
-    assert_eq!(other.selected(), Some(false));
+    assert_eq!(other.is_selected(), Some(false));
 
     let first = node(&tree, ui, run.cell(2, Some(NAME)));
     assert_eq!(first.role(), AkRole::RowHeader);
@@ -1155,7 +1156,7 @@ fn client(run: &mut Run, id: NodeId, action: Action) -> Vec<Msg> {
         &mut out,
     );
     for m in &out {
-        run.page.update(m.clone());
+        run.page.update(*m);
     }
     run.frame();
     out

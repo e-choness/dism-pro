@@ -30,7 +30,7 @@
 #![allow(missing_docs)]
 
 #[path = "fixtures/fling.rs"]
-mod fling;
+mod fling_table;
 #[path = "fixtures/shell.rs"]
 mod shell;
 
@@ -40,7 +40,7 @@ use dpro_ui::{
     Canvas, ColumnId, FakeText, Input, KeyCode, Mods, Motion, Point, Size, TableEvent, Theme, Ui,
     accesskit::TreeUpdate, tokens,
 };
-use fling::Fling;
+use fling_table::Fling;
 use gungraun::{
     Callgrind, LibraryBenchmarkConfig, library_benchmark, library_benchmark_group, main,
 };

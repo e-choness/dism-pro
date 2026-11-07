@@ -3,7 +3,8 @@
 //!
 //! - The current row (the one the detail pane shows) is a source row, moved by a view index. It
 //!   sets the Shift anchor; extending from the anchor moves it without moving the anchor.
-//! - `position` is the inverse of the view, so the current row finds its view index in O(1).
+//! - `position` is the inverse of the view. The current row's view index is kept with the view,
+//!   so a build finds it in O(1).
 //! - A refresh installs new data and carries the checks, the current row and the anchor over by
 //!   their keys. A current row the data lost hands over to the row now at its place. The view
 //!   keeps its order for the rows still there, new rows after them, until the page's new sort

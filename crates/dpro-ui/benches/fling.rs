@@ -3,7 +3,7 @@
 //!
 //! It runs the script once to warm up, then times every frame of a second run, prints p50, p95
 //! and p99, and fails if p99 is over 16.6 ms (60 Hz; headless C1). Times are advisory on shared
-//! runners; the instruction counts in `ir.rs` (`fling::frames`) are the gate.
+//! runners; the instruction counts in `ir.rs` (`table::fling.frames`) are the gate.
 
 #![allow(missing_docs)]
 
@@ -39,7 +39,7 @@ fn main() -> ExitCode {
         times.sort_unstable();
         let at = |p: usize| times[(times.len() * p / 100).min(times.len() - 1)];
         let (p50, p95, p99) = (at(50), at(95), at(99));
-        println!(
+        eprintln!(
             "fling at {scale}: {} frames, p50 {:.2} ms, p95 {:.2} ms, p99 {:.2} ms (budget {:.1} ms)",
             times.len(),
             ms(p50),

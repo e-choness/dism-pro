@@ -26,6 +26,10 @@ use shell::{Msg, Run, START, Shell, Step, click, key, popup_key};
 /// The session, an unchanged event, a filter keystroke, a resize, a tab picked with the arrow
 /// keys, a progress report, a text size switch, an arrow in a row's menu and a wheel notch over
 /// the table, on `run`.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one bench per event, in the session's order"
+)]
 fn events(g: &mut BenchmarkGroup<'_, WallTime>, run: &mut Run) {
     let steps = run.session();
 

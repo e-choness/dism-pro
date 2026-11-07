@@ -10,6 +10,8 @@
 //! "Item 10") and digits before letters, like Explorer. The order is by code point after folding,
 //! not a locale's collation.
 
+use std::collections::HashMap;
+
 use dpro_core::units::{Bytes, UnixMillis};
 
 use crate::Rev;
@@ -442,6 +444,59 @@ impl Selection {
     }
 }
 
+/// The rows' keys and the row each key names (its first, if several share it): what a refresh
+/// carries the checks, the current row and the order over by. Built off the UI thread above
+/// [`INLINE_ROWS`] (TD-0009 A2.5).
+#[derive(Clone, Debug, Default)]
+pub struct RowMap {
+    keys: Vec<RowKey>,
+    rows: HashMap<RowKey, u32>,
+}
+
+impl RowMap {
+    /// The keys of `source`'s rows. O(n).
+    #[must_use]
+    pub fn build(source: &impl RowSource) -> Self {
+        let n = source.len();
+        let mut rows = HashMap::with_capacity(n as usize);
+        let keys = (0..n)
+            .map(|r| {
+                let k = source.key(r);
+                rows.entry(k).or_insert(r);
+                k
+            })
+            .collect();
+        Self { keys, rows }
+    }
+
+    /// The number of rows.
+    #[must_use]
+    pub fn len(&self) -> u32 {
+        u32::try_from(self.keys.len()).unwrap_or(u32::MAX)
+    }
+
+    /// Whether there are no rows.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
+
+    /// The row `key` names, if any: the first with it.
+    #[must_use]
+    pub fn get(&self, key: RowKey) -> Option<u32> {
+        self.rows.get(&key).copied()
+    }
+
+    /// Row `row`'s key.
+    #[must_use]
+    pub fn key(&self, row: u32) -> Option<RowKey> {
+        self.keys.get(row as usize).copied()
+    }
+}
+
+/// No view position: a row the view doesn't show.
+const NOWHERE: u32 = u32::MAX;
+
 /// A table's state on the UI thread: what is visible, in which order, and what is selected.
 #[derive(Clone, Debug)]
 pub struct TableModel {
@@ -454,6 +509,14 @@ pub struct TableModel {
     matches: Option<Vec<u32>>,
     /// Sorted, then filtered: the rows as shown, top to bottom.
     view: Vec<u32>,
+    /// The row the page's detail shows and the keyboard moves (TD-0009 A2.5).
+    current: Option<u32>,
+    /// `current`'s place in `view`, kept with both so each build finds it in O(1). The view's
+    /// whole inverse was 0.85 M instructions a rebuild on the UI thread for 100k rows, and a
+    /// sort's or filter's other lookups (Shift's anchor, a refresh) are O(n) anyway.
+    current_at: Option<u32>,
+    /// The rows' keys, which a refresh carries the state over by; `None` until known.
+    keys: Option<RowMap>,
     /// Scratch for intersecting the sort with the filter.
     mask: Vec<u64>,
     selection: Selection,
@@ -461,6 +524,8 @@ pub struct TableModel {
     filter_gen: u32,
     sort_pending: bool,
     filter_pending: bool,
+    refresh_gen: u32,
+    refresh_pending: bool,
     /// Bumped whenever the view or the selection changes.
     pub rev: Rev,
 }
@@ -476,14 +541,28 @@ impl TableModel {
             query: Query::default(),
             matches: None,
             view: (0..rows).collect(),
+            current: None,
+            current_at: None,
+            keys: None,
             mask: Vec::new(),
             selection: Selection::new(rows),
             sort_gen: 0,
             filter_gen: 0,
             sort_pending: false,
             filter_pending: false,
+            refresh_gen: 0,
+            refresh_pending: false,
             rev: Rev::default(),
         }
+    }
+
+    /// A table of `keys`' rows in source order, unfiltered, nothing checked: a refresh carries
+    /// its state over by key.
+    #[must_use]
+    pub fn with_keys(keys: RowMap) -> Self {
+        let mut m = Self::new(keys.len());
+        m.keys = Some(keys);
+        m
     }
 
     /// Number of source rows.
@@ -632,6 +711,7 @@ impl TableModel {
                 }));
             }
         }
+        self.current_at = self.current.and_then(|c| find(&self.view, c));
         self.rev.bump();
     }
 
@@ -656,7 +736,8 @@ impl TableModel {
                 let from = self
                     .selection
                     .anchor
-                    .and_then(|a| self.view.iter().position(|&r| r == a));
+                    .and_then(|a| self.position(a))
+                    .map(|p| p as usize);
                 let Some(from) = from else {
                     return self.pick(at, Pick::Only);
                 };
@@ -715,11 +796,186 @@ impl TableModel {
     pub fn selected_rows(&self) -> impl Iterator<Item = u32> + '_ {
         (0..self.rows).filter(|&r| self.selection.contains(r))
     }
+
+    /// Source row `row`'s place in the view, if it shows. O(n), in vectorized blocks; the current
+    /// row's is kept ([`Self::current_view`]).
+    #[must_use]
+    pub fn position(&self, row: u32) -> Option<u32> {
+        find(&self.view, row)
+    }
+
+    /// The current row, a source row.
+    #[must_use]
+    pub fn current(&self) -> Option<u32> {
+        self.current
+    }
+
+    /// The current row's place in the view, if it shows. O(1).
+    #[must_use]
+    pub fn current_view(&self) -> Option<u32> {
+        self.current_at
+    }
+
+    /// Makes the row at view position `at` current, and Shift's anchor (ignored past the end).
+    pub fn set_current(&mut self, at: u32) {
+        let Some(&row) = self.view.get(at as usize) else {
+            return;
+        };
+        self.current = Some(row);
+        self.current_at = Some(at);
+        self.selection.anchor = Some(row);
+        self.rev.bump();
+    }
+
+    /// Shift's move to view position `at`: the rows from the anchor to it are the checked ones,
+    /// and it becomes current; the anchor stays. Without an anchor in view, the range starts at
+    /// the current row, else at `at` itself. Ignored past the end.
+    pub fn extend_to(&mut self, at: u32) {
+        let Some(&row) = self.view.get(at as usize) else {
+            return;
+        };
+        let from = self
+            .selection
+            .anchor
+            .and_then(|a| self.position(a))
+            .or_else(|| self.current_view())
+            .unwrap_or(at);
+        self.selection.clear();
+        for &r in &self.view[from.min(at) as usize..=from.max(at) as usize] {
+            self.selection.set(r, true);
+        }
+        if self.selection.anchor.is_none() {
+            self.selection.anchor = self.view.get(from as usize).copied();
+        }
+        self.current = Some(row);
+        self.current_at = Some(at);
+        self.rev.bump();
+    }
+
+    /// Starts a refresh whose key map is built off the UI thread: the returned tag must come
+    /// back with it.
+    pub fn begin_refresh(&mut self) -> Generation {
+        self.refresh_gen = self.refresh_gen.wrapping_add(1);
+        self.refresh_pending = true;
+        Generation(self.refresh_gen)
+    }
+
+    /// Installs new data by its key map: the checks, the current row and the anchor follow their
+    /// keys. The view keeps its order for the rows still there, new rows after them, until the
+    /// page's next sort and filter results; those begun before are dropped. A current row the data
+    /// lost hands over to the row now at its place. Without the old keys, the state starts over.
+    /// Returns false, changing nothing, if a newer refresh began or this one was installed.
+    pub fn finish_refresh(&mut self, generation: Generation, keys: RowMap) -> bool {
+        if generation != Generation(self.refresh_gen) || !self.refresh_pending {
+            return false;
+        }
+        self.refresh_pending = false;
+        self.install(keys);
+        true
+    }
+
+    /// A refresh built inline, at or below [`INLINE_ROWS`].
+    pub fn refresh(&mut self, source: &impl RowSource) {
+        let g = self.begin_refresh();
+        self.finish_refresh(g, RowMap::build(source));
+    }
+
+    fn install(&mut self, keys: RowMap) {
+        let n = keys.len();
+        // Results begun for the old data are dropped.
+        self.sort_gen = self.sort_gen.wrapping_add(1);
+        self.filter_gen = self.filter_gen.wrapping_add(1);
+        self.sort_pending = false;
+        self.filter_pending = false;
+        let Some(old) = self.keys.take() else {
+            self.keys = Some(keys);
+            self.rows = n;
+            self.sort = None;
+            self.sorted = None;
+            self.query = Query::default();
+            self.matches = None;
+            self.selection = Selection::new(n);
+            self.current = None;
+            self.rebuild_view();
+            return;
+        };
+        // Each old row's new row; of old rows sharing a key, the first.
+        let mut taken = vec![false; n as usize];
+        let moved: Vec<u32> = (0..old.len())
+            .map(|r| match old.key(r).and_then(|k| keys.get(k)) {
+                Some(to) if !taken[to as usize] => {
+                    taken[to as usize] = true;
+                    to
+                }
+                _ => NOWHERE,
+            })
+            .collect();
+        let follow = |r: u32| moved.get(r as usize).copied().filter(|&to| to != NOWHERE);
+        let fresh = || (0..n).filter(|&r| !taken[r as usize]);
+        let mut order: Vec<u32> = match &self.sorted {
+            Some(sorted) => sorted.iter().filter_map(|&r| follow(r)).collect(),
+            None => (0..old.len()).filter_map(follow).collect(),
+        };
+        order.extend(fresh());
+        self.matches = self.matches.as_ref().map(|m| {
+            let mut rows: Vec<u32> = m.iter().filter_map(|&r| follow(r)).chain(fresh()).collect();
+            rows.sort_unstable();
+            rows
+        });
+        self.sorted = Some(order);
+        let mut selection = Selection::new(n);
+        for r in (0..self.rows).filter(|&r| self.selection.contains(r)) {
+            if let Some(to) = follow(r) {
+                selection.set(to, true);
+            }
+        }
+        selection.anchor = self.selection.anchor.and_then(follow);
+        let was_at = self.current_view();
+        self.current = self.current.and_then(follow);
+        self.selection = selection;
+        self.rows = n;
+        self.keys = Some(keys);
+        self.rebuild_view();
+        if self.current.is_none()
+            && let (Some(was), Some(last)) = (was_at, self.view.len().checked_sub(1))
+        {
+            let at = (was as usize).min(last);
+            self.current = self.view.get(at).copied();
+            self.current_at = u32::try_from(at).ok();
+        }
+    }
+}
+
+/// `row`'s place in `view`. Each block of 64 is checked whole, with no branch per row, which the
+/// compiler vectorizes; only the block holding `row` is searched.
+#[expect(
+    clippy::needless_bitwise_bool,
+    reason = "`||` would branch on every row, which keeps the scan from vectorizing"
+)]
+fn find(view: &[u32], row: u32) -> Option<u32> {
+    const BLOCK: usize = 64;
+    for (b, block) in view.chunks(BLOCK).enumerate() {
+        if block.iter().fold(false, |hit, &r| hit | (r == row)) {
+            let i = block.iter().position(|&r| r == row)?;
+            return u32::try_from(b * BLOCK + i).ok();
+        }
+    }
+    None
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn find_looks_past_the_first_block_and_at_the_last_partial_one() {
+        let view: Vec<u32> = (0..1000).rev().collect();
+        for (i, &row) in (0u32..).zip(&view) {
+            assert_eq!(find(&view, row), Some(i), "row {row}");
+        }
+        assert_eq!(find(&view, 1000), None);
+        assert_eq!(find(&[], 0), None);
+    }
 
     struct Rows(Vec<Cell<'static>>);
 

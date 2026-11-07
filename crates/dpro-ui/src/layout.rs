@@ -15,6 +15,10 @@
 //! Damage: a node whose rectangle changed damages where it was and where it is. That covers its
 //! descendants, which paint inside it, so they add nothing more.
 //!
+//! A [data table](crate::Element::table) lays itself out (`table.rs`): its columns are tracks its
+//! header and rows share, and its rows sit at their index times the row height, so building only
+//! the rows in view measures no text.
+//!
 //! Children that don't fit overflow their parent. Painting clips them, and a scroll viewport
 //! (`scroll.rs`) scrolls them: they're laid out as if it weren't scrolled, so a scroll lays out
 //! nothing, and their damage goes where they show, clipped to it. A viewport's content may be
@@ -69,11 +73,25 @@ impl<M> Ui<M> {
         let content = if fixed(s.width).is_some() && fixed(s.height).is_some() {
             // The content can't change the size; `arrange` measures it when placing it.
             Size::ZERO
+        } else if let Some(size) = (n.role == Role::Grid)
+            .then(|| self.grid_natural(i))
+            .flatten()
+        {
+            size
         } else if n.first == NIL {
             match n.role {
-                // A progress bar and a separator are as big as their styles make them.
-                Role::Container | Role::Progress | Role::Separator => Size::ZERO,
-                Role::Label | Role::Button | Role::Tab | Role::MenuItem | Role::Tooltip => {
+                // A progress bar and a separator are as big as their styles make them, as is a
+                // table or a row with nothing in it.
+                Role::Container | Role::Progress | Role::Separator | Role::Grid | Role::Row => {
+                    Size::ZERO
+                }
+                Role::Label
+                | Role::Button
+                | Role::Tab
+                | Role::MenuItem
+                | Role::Tooltip
+                | Role::Cell
+                | Role::ColumnHeader => {
                     let m = text.measure(&n.text, &n.text_style, inner_w);
                     Size {
                         w: m.width,
@@ -173,7 +191,7 @@ impl<M> Ui<M> {
 
     /// Puts `i` at `rect` and lays out its children. `covered`: an ancestor already damaged both
     /// its old and new rectangles, which hold this node's. It shows as [`Ui::shown`] says.
-    fn arrange(&mut self, i: u32, rect: Rect, text: &mut dyn TextSystem, covered: bool) {
+    pub(crate) fn arrange(&mut self, i: u32, rect: Rect, text: &mut dyn TextSystem, covered: bool) {
         let (moved, dirty, old) = {
             let n = &self.nodes[i as usize];
             (n.rect != rect, n.dirty, n.rect)
@@ -207,6 +225,10 @@ impl<M> Ui<M> {
     }
 
     fn arrange_children(&mut self, i: u32, text: &mut dyn TextSystem, covered: bool) {
+        // A table's parts lay themselves out.
+        if self.arrange_table(i, text, covered) {
+            return;
+        }
         let (s, inner, first, scroll) = {
             let n = &self.nodes[i as usize];
             (n.style, n.rect.inset(n.style.padding), n.first, n.scroll)
@@ -309,7 +331,7 @@ impl<M> Ui<M> {
     /// Viewport `i`'s children are next: they show moved by its offset and inside it, which
     /// [`Ui::shown`] now says. Returns where `i` shows, to put back after them, and whether it
     /// scrolls across `axis`, which frees its children's cross size.
-    fn enter_viewport(&mut self, i: u32, axis: Axis) -> (Shown, bool) {
+    pub(crate) fn enter_viewport(&mut self, i: u32, axis: Axis) -> (Shown, bool) {
         let outer = self.shown;
         let n = &self.nodes[i as usize];
         let by = self.content_shift(n.scroll);
