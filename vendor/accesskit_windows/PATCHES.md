@@ -39,3 +39,52 @@ amendment).
      workspace, and `cargo test -p accesskit_windows` builds the upstream tests without them.
 3. **The manifest** is crates.io's normalized `Cargo.toml` for 0.35.2, without its
    dev-dependencies (1, 2). It's self-contained, as a crate outside the workspace needs.
+4. **The table and scroll patterns** (TD-0009 A2.5, slice 5c2). A DataGrid's Narrator navigation
+   moves cell by cell (Ctrl+Alt+arrows) through Grid's `GetItem` and reads each cell's headers
+   through TableItem.
+   - **New files:**
+     - `src/table.rs`: the table lookups, in the filtered tree the client sees.
+       - A table is a `Table`, `Grid` or `TreeGrid` with `row_count` and `column_count`.
+         AccessKit computes neither.
+       - Its rows are `Row`s at any depth with a `row_index`.
+       - Its cells are a row's `Cell`, `GridCell`, `RowHeader` and `ColumnHeader` parts with a
+         `column_index`, at the row's index unless they carry their own.
+       - A nested table's parts are its own.
+     - `src/tests/table.rs`: tests that call the providers in process, so Wine runs them too (T2).
+   - **`src/node.rs`:**
+     - **Grid on a table.** `RowCount`, `ColumnCount`, and `GetItem`:
+       - a row or column past the counts is `E_INVALIDARG`;
+       - a row in range that isn't in the tree is `UIA_E_ELEMENTNOTAVAILABLE`.
+     - **Table on a table.**
+       - It's row-major.
+       - `GetColumnHeaders` lists its column headers.
+       - `GetRowHeaders` is empty: only the built rows' headers could be listed, and a cell's row
+         header comes from its TableItem.
+     - **GridItem and TableItem on a table's cells.**
+       - Row, column, spans (1 if not given), and the containing grid.
+       - The row's other row headers, and the column's other column headers.
+     - **Control types.**
+       - A column header that isn't a cell (one outside the rows) is a HeaderItem.
+       - A row group whose first child is one is the Header.
+       - Neither is a content element, as UI Automation's Header and HeaderItem types require.
+       - Upstream maps both to DataItem and Group.
+     - **ItemStatus** is the node's `state_description`: the app's words, in the user's language,
+       such as a sorted header's "Sorted ascending".
+     - **SelectionItem on a `Row`** with `selected`.
+       - Its grid's `GetSelection` lists the selected rows and grid cells at any depth. Upstream
+         lists only "item-like" children, which rows aren't.
+       - `AddToSelection` on a row of a single-select grid with another row selected is
+         `UIA_E_INVALIDOPERATION`.
+       - So is `RemoveFromSelection` on a selected row, since the click that selects a row never
+         deselects one.
+     - **Scroll on any node with `scroll_x` or `scroll_y`.**
+       - An axis scrolls when its maximum is past its minimum (0 if not given).
+       - The view size is the node's bounds along the axis, as a share of the bounds and the range
+         together.
+       - `Scroll` sends `ScrollLeft`, `ScrollRight`, `ScrollUp` or `ScrollDown` with `ScrollUnit`:
+         small is an item, large a page.
+       - `SetScrollPercent` sends one `SetScrollOffset`. An axis given as
+         `UIA_ScrollPatternNoScroll` keeps its offset.
+       - A percentage outside 0–100 is `E_INVALIDARG`. An amount on an axis that doesn't scroll,
+         or a missing action, is `UIA_E_INVALIDOPERATION`, and then nothing is sent.
+   - **`src/lib.rs`, `src/tests/mod.rs`:** the two `mod table;` lines.

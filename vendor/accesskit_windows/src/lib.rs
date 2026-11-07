@@ -6,6 +6,8 @@
 mod context;
 mod filters;
 mod node;
+// dpro: the table patterns' lookups (PATCHES.md, 4).
+mod table;
 mod text;
 mod util;
 mod window_handle;

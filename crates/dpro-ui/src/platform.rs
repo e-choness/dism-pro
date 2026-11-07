@@ -1198,6 +1198,7 @@ mod tests {
                 widths: &[],
                 hidden: &[],
                 sorted: None,
+                sort_status: [""; 2],
                 checks: None,
                 current: None,
                 status: None,

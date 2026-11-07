@@ -473,6 +473,16 @@ impl<M> Ui<M> {
                         Order::Ascending => SortDirection::Ascending,
                         Order::Descending => SortDirection::Descending,
                     });
+                    // UI Automation reads the order in the app's words: the item status.
+                    if let Some(t) = self.table_of_column_header(i) {
+                        let status = &self.tables[t as usize].sort_status[match order {
+                            Order::Ascending => 0,
+                            Order::Descending => 1,
+                        }];
+                        if !status.is_empty() {
+                            node.set_state_description(status.as_str());
+                        }
+                    }
                 }
             }
             _ => {}

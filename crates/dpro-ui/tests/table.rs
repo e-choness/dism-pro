@@ -211,6 +211,7 @@ impl Page {
             widths: &[],
             hidden: &[],
             sorted: self.model.sort(),
+            sort_status: ["Sorted ascending", "Sorted descending"],
             checks: self.checks.then(|| ("Select", self.all_checked())),
             current: self.model.current_view(),
             status: self.status.map(|text| Status {
@@ -1269,9 +1270,11 @@ fn the_tree_is_a_grid_of_rows_and_cells_with_their_indices() {
     assert_eq!(name.role(), AkRole::ColumnHeader);
     assert_eq!((name.label(), name.column_index()), (Some("Name"), Some(1)));
     assert_eq!(name.sort_direction(), Some(SortDirection::Ascending));
+    assert_eq!(name.state_description(), Some("Sorted ascending"));
     assert!(name.supports_action(Action::Click));
     let version = node(&tree, ui, run.header(Some(VERSION)));
     assert_eq!(version.sort_direction(), None);
+    assert_eq!(version.state_description(), None);
     assert!(!version.supports_action(Action::Click));
     assert!(version.supports_action(Action::Focus));
     let check = node(&tree, ui, run.header(None));
@@ -1343,6 +1346,43 @@ fn a_scroll_sends_the_rows_that_came_and_a_sort_only_the_rows_built() {
         .filter(|(_, n)| n.role() == AkRole::Row)
         .count();
     assert_eq!(rows, 19);
+}
+
+/// T1: the sorted header's status is the view's words for its order, and moves with the sort.
+#[test]
+fn a_sorted_header_says_its_order_in_the_view_s_words() {
+    let mut run = Run::new(100);
+    drop(run.ui.a11y_tree());
+    let status = |run: &Run, update: &accesskit::TreeUpdate, col| {
+        let id = ak(&run.ui, update, run.header(Some(col)));
+        let (_, node) = update.nodes.iter().find(|(k, _)| *k == id)?;
+        Some(node.state_description().map(str::to_owned))
+    };
+
+    run.page.sort(NAME);
+    run.frame();
+    let update = run.ui.a11y_update().expect("an update");
+    assert_eq!(
+        status(&run, &update, NAME),
+        Some(Some("Sorted ascending".to_owned()))
+    );
+    // Again: the other way.
+    run.page.sort(NAME);
+    run.frame();
+    let update = run.ui.a11y_update().expect("an update");
+    assert_eq!(
+        status(&run, &update, NAME),
+        Some(Some("Sorted descending".to_owned()))
+    );
+    // Another column: its first order, and the old one says nothing.
+    run.page.sort(SIZE);
+    run.frame();
+    let update = run.ui.a11y_update().expect("an update");
+    assert_eq!(
+        status(&run, &update, SIZE),
+        Some(Some("Sorted descending".to_owned()))
+    );
+    assert_eq!(status(&run, &update, NAME), Some(None));
 }
 
 /// A client's `action` on `id`, its messages applied to the page, then a frame.

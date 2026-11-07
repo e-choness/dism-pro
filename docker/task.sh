@@ -83,7 +83,14 @@ case "${task}" in
       exit 1
     fi
     wineserver --wait
-    exec cargo xwin test --workspace --locked --target x86_64-pc-windows-msvc "$@"
+    # Then the vendored accessibility adapter, outside the workspace: its tests, less the
+    # upstream ones that go through UI Automation's core, which Wine doesn't implement enough of
+    # (T3 runs them all). Both runs happen even if the first fails.
+    status=0
+    cargo xwin test --workspace --locked --target x86_64-pc-windows-msvc "$@" || status=$?
+    cargo xwin test -p accesskit_windows --locked --target x86_64-pc-windows-msvc \
+      -- --skip tests::simple || status=$?
+    exit "${status}"
     ;;
   bench)
     # criterion, advisory timings. The `ir` benches aren't run by default (bench = false).
