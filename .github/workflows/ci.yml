@@ -136,6 +136,20 @@ jobs:
           $text = $out.Trim().Replace('%', '%25').Replace("`r", '').Replace("`n", '%0A')
           Write-Host "::$kind title=dpro-win GUI tests (real Windows, exit $code)::$text"
           exit $code
+      - name: T3 accessibility adapter (UI Automation)
+        # The vendored accesskit_windows's tests (TD-0009 A2.9): a real window, served to UIA's
+        # client in this process. Upstream's tests, then the patterns DISM Pro adds.
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          $out = & dist-t3/accesskit-windows-tests.exe --test-threads 1 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          Write-Host $out
+          $kind = if ($code) { 'error' } else { 'notice' }
+          $text = $out.Trim().Replace('%', '%25').Replace("`r", '').Replace("`n", '%0A')
+          Write-Host "::$kind title=accesskit_windows tests (real Windows, exit $code)::$text"
+          exit $code
       - name: G1 UI gates (startup, idle)
         # TD-0009 §7 against bare_window in this job: U4 startup <= 3x, U6 no timer or paint once
         # settled, U7 idle working set <= 40 MiB.

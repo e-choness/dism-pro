@@ -146,6 +146,59 @@ unsafe extern "system" {
 pub struct Window {
     hwnd: HWND,
     life: Rc<Cell<Life>>,
+    /// Tests: one test's windows at a time.
+    #[cfg(test)]
+    _serial: serial::Serial,
+}
+
+/// Tests run on threads of their own, and under Wine (T2) another test's new window takes the
+/// activation, which dismisses this test's popups as the user's click elsewhere would. Each
+/// window holds one lock while its thread has any (a popup's owner already does), so the window
+/// tests run one after another. T3 runs them with `--test-threads 1` for the same reason.
+#[cfg(test)]
+mod serial {
+    use std::{
+        cell::RefCell,
+        sync::{Mutex, MutexGuard, PoisonError},
+    };
+
+    static LOCK: Mutex<()> = Mutex::new(());
+
+    thread_local! {
+        /// This thread's windows, and the lock while there are any.
+        static HELD: RefCell<(usize, Option<MutexGuard<'static, ()>>)> =
+            const { RefCell::new((0, None)) };
+    }
+
+    #[derive(Debug)]
+    pub(super) struct Serial(());
+
+    impl Serial {
+        /// Waits for other threads' windows to go, unless this thread holds the lock already.
+        pub(super) fn take() -> Self {
+            HELD.with(|held| {
+                let mut held = held.borrow_mut();
+                if held.0 == 0 {
+                    // A failed test's poison doesn't fail the tests after it.
+                    held.1 = Some(LOCK.lock().unwrap_or_else(PoisonError::into_inner));
+                }
+                held.0 += 1;
+            });
+            Self(())
+        }
+    }
+
+    impl Drop for Serial {
+        fn drop(&mut self) {
+            HELD.with(|held| {
+                let mut held = held.borrow_mut();
+                held.0 -= 1;
+                if held.0 == 0 {
+                    held.1 = None;
+                }
+            });
+        }
+    }
 }
 
 impl fmt::Debug for Window {
@@ -153,7 +206,7 @@ impl fmt::Debug for Window {
         f.debug_struct("Window")
             .field("hwnd", &self.hwnd)
             .field("life", &self.life.get())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -191,6 +244,9 @@ impl Window {
         handler: Box<dyn Handler>,
         gpu: Option<Gpu>,
     ) -> Result<Made> {
+        // Before the window exists: it mustn't take another test's activation.
+        #[cfg(test)]
+        let serial = serial::Serial::take();
         let title = WideCString::new(options.title)?;
         // SAFETY: no preconditions; a null name means this executable.
         let instance = unsafe { GetModuleHandleW(null()) };
@@ -243,7 +299,12 @@ impl Window {
             }
             return Err(error.into());
         }
-        let window = Self { hwnd, life };
+        let window = Self {
+            hwnd,
+            life,
+            #[cfg(test)]
+            _serial: serial,
+        };
         // SAFETY: hwnd is live.
         let dpi = unsafe { GetDpiForWindow(hwnd) };
         if dpi != 0 && dpi != system_dpi {

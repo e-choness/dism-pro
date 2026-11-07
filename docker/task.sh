@@ -116,7 +116,9 @@ case "${task}" in
     # ffi-check-source, which prints the S-03 checks that .github/scripts/adk.ps1 compiles
     # against the ADK headers on the runner, so those headers never leave it (decision #22); and
     # G1's UI probes for .github/scripts/ui-gates.ps1 (TD-0009 §7): bare_window, the raw-API
-    # baseline, and shell, the probe target until dismpro.exe has its shell (roadmap 3.2).
+    # baseline, and shell, the probe target until dismpro.exe has its shell (roadmap 3.2); and
+    # the vendored accesskit_windows's tests, a real window served to a UI Automation client
+    # (TD-0009 A2.9), which Wine's UIA can't stand in for.
     xwin_splat
     t=x86_64-pc-windows-msvc
     cargo xwin build --locked --release -p dpro-engine --example regf_dump --target "${t}" "$@"
@@ -134,6 +136,7 @@ case "${task}" in
     # With the GUI's tests: windows and DirectWrite with the runner's own fonts.
     win_tests=$(test_exe dpro-win --features gui "$@")
     broker_tests=$(test_exe dpro-broker "$@")
+    adapter_tests=$(test_exe accesskit_windows "$@")
     mcp_tests=$(cargo xwin test --color never --locked --no-run -p dismpro-cli --test mcp_stdio \
       --target "${t}" "$@" 2>&1 \
       | tee /dev/stderr | sed -n 's/^ *Executable tests\/mcp_stdio\.rs (\(.*\))$/\1/p')
@@ -143,6 +146,7 @@ case "${task}" in
       "target/${t}/release/examples/"{bare_window,shell}.exe dist-t3/
     cp "${win_tests:?no dpro-win test binary}" dist-t3/dpro-win-tests.exe
     cp "${broker_tests:?no dpro-broker test binary}" dist-t3/dpro-broker-tests.exe
+    cp "${adapter_tests:?no accesskit_windows test binary}" dist-t3/accesskit-windows-tests.exe
     cp "${mcp_tests:?no dismpro-cli mcp test binary}" dist-t3/dismpro-cli-mcp-tests.exe
     ;;
   build)
