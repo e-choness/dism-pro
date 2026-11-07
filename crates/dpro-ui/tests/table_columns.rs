@@ -202,6 +202,7 @@ impl Page {
                 self.columns.hidden()
             },
             sorted: self.model.sort(),
+            sort_status: ["Sorted ascending", "Sorted descending"],
             checks: self.checks.then_some(("Select", Tri::Off)),
             current: self.model.current_view(),
             status: None,

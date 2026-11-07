@@ -480,6 +480,7 @@ impl Shell {
             widths: self.columns.widths(),
             hidden: self.columns.hidden(),
             sorted: self.sorted,
+            sort_status: ["Sorted ascending", "Sorted descending"],
             checks: Some(("Select", self.all_checked())),
             current: self.current,
             status: self.visible.is_empty().then_some(Status {

@@ -34,6 +34,9 @@ use crate::{
     text::PlatformRange as PlatformTextRange,
     util::*,
 };
+// dpro: the table and scroll patterns (PATCHES.md, 4).
+use crate::table;
+use accesskit::ScrollUnit;
 
 const RUNTIME_ID_SIZE: usize = 5;
 
@@ -92,7 +95,11 @@ impl NodeWrapper<'_> {
             Role::Button | Role::DefaultButton => UIA_ButtonControlTypeId,
             Role::Pane => UIA_PaneControlTypeId,
             Role::RowHeader => UIA_DataItemControlTypeId,
+            // dpro: a column header that isn't one of a grid's cells is a header item, and a row
+            // group that starts with one is the grid's header (PATCHES.md, 4).
+            Role::ColumnHeader if !table::is_cell(self.node) => UIA_HeaderItemControlTypeId,
             Role::ColumnHeader => UIA_DataItemControlTypeId,
+            Role::RowGroup if table::is_header(self.node) => UIA_HeaderControlTypeId,
             Role::RowGroup => UIA_GroupControlTypeId,
             Role::List => UIA_ListControlTypeId,
             Role::Table => UIA_TableControlTypeId,
@@ -434,6 +441,16 @@ impl NodeWrapper<'_> {
         filter(self.node) == FilterResult::Include
     }
 
+    // dpro: a header and its items are in the control view only, as UI Automation's Header and
+    // HeaderItem control types require (PATCHES.md, 4).
+    fn is_content_view_element(&self) -> bool {
+        self.is_content_element()
+            && !matches!(
+                self.control_type(),
+                UIA_HeaderControlTypeId | UIA_HeaderItemControlTypeId
+            )
+    }
+
     fn aria_properties(&mut self) -> Option<WideString<'_>> {
         let mut result = WideString::new(self.string_buffer);
         let mut properties = AriaProperties::new(&mut result);
@@ -661,6 +678,8 @@ impl NodeWrapper<'_> {
             | Role::MenuListOption
             | Role::Tab
             | Role::TreeItem => self.node.is_selected().is_some(),
+            // dpro: a grid's row, when it says whether it's selected (PATCHES.md, 4).
+            Role::Row => self.node.is_selected().is_some(),
             Role::GridCell => true,
             _ => false,
         }
@@ -740,6 +759,108 @@ impl NodeWrapper<'_> {
         self.node.is_modal()
     }
 
+    // dpro: the Grid, Table, GridItem, TableItem and Scroll patterns, and the item status
+    // (PATCHES.md, 4).
+
+    /// The app's own words for the node's state, such as a sorted column header's "Sorted
+    /// ascending", already in the user's language.
+    fn item_status(&mut self) -> Option<StrWrapper<'_>> {
+        self.node
+            .data()
+            .state_description()
+            .map(|s| StrWrapper::new(s, self.string_buffer))
+    }
+
+    fn is_grid_pattern_supported(&self) -> bool {
+        table::is_table(self.node)
+    }
+
+    fn row_count(&self) -> i32 {
+        to_i32(self.node.data().row_count().unwrap_or(0))
+    }
+
+    fn column_count(&self) -> i32 {
+        to_i32(self.node.data().column_count().unwrap_or(0))
+    }
+
+    fn is_table_pattern_supported(&self) -> bool {
+        table::is_table(self.node)
+    }
+
+    fn is_grid_item_pattern_supported(&self) -> bool {
+        table::is_cell(self.node)
+    }
+
+    fn is_table_item_pattern_supported(&self) -> bool {
+        table::is_cell(self.node)
+    }
+
+    fn grid_row(&self) -> i32 {
+        to_i32(table::row_index(self.node).unwrap_or(0))
+    }
+
+    fn grid_column(&self) -> i32 {
+        to_i32(self.node.data().column_index().unwrap_or(0))
+    }
+
+    fn row_span(&self) -> i32 {
+        to_i32(self.node.data().row_span().unwrap_or(1).max(1))
+    }
+
+    fn column_span(&self) -> i32 {
+        to_i32(self.node.data().column_span().unwrap_or(1).max(1))
+    }
+
+    fn is_scroll_pattern_supported(&self) -> bool {
+        self.node.scroll_x().is_some() || self.node.scroll_y().is_some()
+    }
+
+    fn horizontal_scroll(&self) -> Option<ScrollAxis> {
+        ScrollAxis::new(
+            self.node.scroll_x(),
+            self.node.scroll_x_min(),
+            self.node.scroll_x_max(),
+        )
+    }
+
+    fn vertical_scroll(&self) -> Option<ScrollAxis> {
+        ScrollAxis::new(
+            self.node.scroll_y(),
+            self.node.scroll_y_min(),
+            self.node.scroll_y_max(),
+        )
+    }
+
+    fn horizontal_scroll_percent(&self) -> f64 {
+        self.horizontal_scroll()
+            .map_or(UIA_ScrollPatternNoScroll, ScrollAxis::percent)
+    }
+
+    fn vertical_scroll_percent(&self) -> f64 {
+        self.vertical_scroll()
+            .map_or(UIA_ScrollPatternNoScroll, ScrollAxis::percent)
+    }
+
+    fn horizontal_view_size(&self) -> f64 {
+        let view = self.node.bounding_box().map(|r| r.width());
+        self.horizontal_scroll()
+            .map_or(100.0, |axis| axis.view_size(view))
+    }
+
+    fn vertical_view_size(&self) -> f64 {
+        let view = self.node.bounding_box().map(|r| r.height());
+        self.vertical_scroll()
+            .map_or(100.0, |axis| axis.view_size(view))
+    }
+
+    fn is_horizontally_scrollable(&self) -> bool {
+        self.horizontal_scroll().is_some()
+    }
+
+    fn is_vertically_scrollable(&self) -> bool {
+        self.vertical_scroll().is_some()
+    }
+
     pub(crate) fn enqueue_property_changes(
         &mut self,
         queue: &mut Vec<QueuedEvent>,
@@ -768,6 +889,68 @@ impl NodeWrapper<'_> {
             });
         }
     }
+}
+
+// dpro: the table and scroll patterns' helpers (PATCHES.md, 4).
+
+/// A count or an index as UI Automation's `int`.
+fn to_i32(n: usize) -> i32 {
+    i32::try_from(n).unwrap_or(i32::MAX)
+}
+
+/// An axis that scrolls: its offset, between a minimum and a maximum past it.
+#[derive(Clone, Copy)]
+struct ScrollAxis {
+    offset: f64,
+    min: f64,
+    max: f64,
+}
+
+impl ScrollAxis {
+    /// AccessKit's offset and its range, if they say the axis scrolls. A missing minimum is 0.
+    fn new(offset: Option<f64>, min: Option<f64>, max: Option<f64>) -> Option<Self> {
+        let (offset, min, max) = (offset?, min.unwrap_or(0.0), max?);
+        (max > min).then(|| Self {
+            offset: offset.clamp(min, max),
+            min,
+            max,
+        })
+    }
+
+    fn percent(self) -> f64 {
+        (self.offset - self.min) / (self.max - self.min) * 100.0
+    }
+
+    /// The share of the content in view, in percent, from the node's size along the axis: its
+    /// view, of the view and the range together.
+    fn view_size(self, view: Option<f64>) -> f64 {
+        match view {
+            Some(view) if view > 0.0 => view / (view + self.max - self.min) * 100.0,
+            _ => 0.0,
+        }
+    }
+
+    /// The offset at `percent` of the range.
+    fn at(self, percent: f64) -> f64 {
+        self.min + (self.max - self.min) * percent / 100.0
+    }
+}
+
+/// `nodes` as a SAFEARRAY of their providers.
+fn providers<'a>(
+    context: &Arc<Context>,
+    nodes: impl IntoIterator<Item = NodeRef<'a>>,
+) -> *mut SAFEARRAY {
+    let providers: Vec<IUnknown> = nodes
+        .into_iter()
+        .map(|node| {
+            context
+                .get_or_create_platform_node(node.id())
+                .into_interface::<IRawElementProviderSimple>()
+        })
+        .filter_map(|provider| provider.cast::<IUnknown>().ok())
+        .collect();
+    safe_array_from_com_slice(&providers)
 }
 
 fn enqueue_property_change(
@@ -800,7 +983,13 @@ fn enqueue_property_change(
     ISelectionProvider,
     ITextProvider,
     IExpandCollapseProvider,
-    IWindowProvider
+    IWindowProvider,
+    // dpro: the table and scroll patterns (PATCHES.md, 4).
+    IGridProvider,
+    IGridItemProvider,
+    ITableProvider,
+    ITableItemProvider,
+    IScrollProvider
 )]
 pub(crate) struct PlatformNode {
     pub(crate) context: Weak<Context>,
@@ -997,6 +1186,148 @@ impl PlatformNode {
                 data: None,
             }))
         })
+    }
+
+    // dpro: `do_complex_action` for a method that may send two requests (one per axis): both
+    // are made under the tree's lock, then sent after it (PATCHES.md, 4).
+    fn do_complex_actions<F>(&self, f: F) -> Result<()>
+    where
+        for<'a> F: FnOnce(NodeRef<'a>, NodeId, TreeId) -> Result<[Option<ActionRequest>; 2]>,
+    {
+        let context = self.upgrade_context()?;
+        if context.is_placeholder.load(Ordering::SeqCst) {
+            return Err(element_not_enabled());
+        }
+        let tree = context.read_tree();
+        let (node, target_node, target_tree) = self.node_with_location(&tree)?;
+        let requests = f(node, target_node, target_tree)?;
+        drop(tree);
+        for request in requests.into_iter().flatten() {
+            context.do_action(request);
+        }
+        Ok(())
+    }
+
+    // dpro: IScrollProvider::Scroll as AccessKit's scroll actions. An amount on an axis that
+    // doesn't scroll fails the call, and nothing is sent (PATCHES.md, 4).
+    fn scroll_by(&self, horizontal: ScrollAmount, vertical: ScrollAmount) -> Result<()> {
+        self.do_complex_actions(|node, target_node, target_tree| {
+            if node.is_disabled() {
+                return Err(element_not_enabled());
+            }
+            let mut buffer = StringBuffer::acquire();
+            let wrapper = NodeWrapper {
+                node: &node,
+                string_buffer: &mut buffer,
+            };
+            let step = |amount: ScrollAmount, scrolls: bool, back: Action, forward: Action| {
+                let (action, unit) = match amount {
+                    ScrollAmount_NoAmount => return Ok(None),
+                    ScrollAmount_LargeDecrement => (back, ScrollUnit::Page),
+                    ScrollAmount_SmallDecrement => (back, ScrollUnit::Item),
+                    ScrollAmount_SmallIncrement => (forward, ScrollUnit::Item),
+                    ScrollAmount_LargeIncrement => (forward, ScrollUnit::Page),
+                    _ => return Err(invalid_arg()),
+                };
+                if !scrolls || !node.supports_action(action, &filter) {
+                    return Err(invalid_operation());
+                }
+                Ok(Some(ActionRequest {
+                    action,
+                    target_tree,
+                    target_node,
+                    data: Some(ActionData::ScrollUnit(unit)),
+                }))
+            };
+            Ok([
+                step(
+                    horizontal,
+                    wrapper.horizontal_scroll().is_some(),
+                    Action::ScrollLeft,
+                    Action::ScrollRight,
+                )?,
+                step(
+                    vertical,
+                    wrapper.vertical_scroll().is_some(),
+                    Action::ScrollUp,
+                    Action::ScrollDown,
+                )?,
+            ])
+        })
+    }
+
+    // dpro: IScrollProvider::SetScrollPercent as one SetScrollOffset, the axis given as
+    // `UIA_ScrollPatternNoScroll` staying where it is (PATCHES.md, 4).
+    fn scroll_to_percent(&self, horizontal: f64, vertical: f64) -> Result<()> {
+        self.do_complex_action(|node, target_node, target_tree| {
+            if node.is_disabled() {
+                return Err(element_not_enabled());
+            }
+            let mut buffer = StringBuffer::acquire();
+            let wrapper = NodeWrapper {
+                node: &node,
+                string_buffer: &mut buffer,
+            };
+            let to = |percent: f64, axis: Option<ScrollAxis>| {
+                // The sentinel is exactly -1.
+                #[allow(clippy::float_cmp)]
+                if percent == UIA_ScrollPatternNoScroll {
+                    return Ok(None);
+                }
+                if !(0.0..=100.0).contains(&percent) {
+                    return Err(invalid_arg());
+                }
+                Ok(Some(axis.ok_or_else(invalid_operation)?.at(percent)))
+            };
+            let x = to(horizontal, wrapper.horizontal_scroll())?;
+            let y = to(vertical, wrapper.vertical_scroll())?;
+            if x.is_none() && y.is_none() {
+                return Ok(None);
+            }
+            if !node.supports_action(Action::SetScrollOffset, &filter) {
+                return Err(invalid_operation());
+            }
+            let x = x.or_else(|| node.scroll_x()).unwrap_or(0.0);
+            let y = y.or_else(|| node.scroll_y()).unwrap_or(0.0);
+            Ok(Some(ActionRequest {
+                action: Action::SetScrollOffset,
+                target_tree,
+                target_node,
+                data: Some(ActionData::SetScrollOffset(Point::new(x, y))),
+            }))
+        })
+    }
+
+    // dpro: a row joins a single-select grid's selection only when no other row is selected
+    // (PATCHES.md, 4).
+    fn add_to_selection(&self) -> Result<()> {
+        self.resolve(|node| {
+            let taken = node.role() == Role::Row
+                && node.is_selected() == Some(false)
+                && node.selection_container(&filter).is_some_and(|container| {
+                    !container.is_multiselectable()
+                        && table::selected(&container)
+                            .iter()
+                            .any(|other| other.id() != node.id())
+                });
+            if taken {
+                Err(invalid_operation())
+            } else {
+                Ok(())
+            }
+        })?;
+        self.set_selected(true)
+    }
+
+    // dpro: a click selects a row and never deselects one, so a selected row can't leave the
+    // selection; another row's selection replaces it (PATCHES.md, 4).
+    fn remove_from_selection(&self) -> Result<()> {
+        let selected_row =
+            self.resolve(|node| Ok(node.role() == Role::Row && node.is_selected() == Some(true)))?;
+        if selected_row {
+            return Err(invalid_operation());
+        }
+        self.set_selected(false)
     }
 
     fn is_root(&self, state: &TreeState) -> bool {
@@ -1311,7 +1642,9 @@ properties! {
     (UIA_FullDescriptionPropertyId, description),
     (UIA_CulturePropertyId, culture),
     (UIA_HelpTextPropertyId, placeholder),
-    (UIA_IsContentElementPropertyId, is_content_element),
+    // dpro: the control view's Header and HeaderItem, and the item status (PATCHES.md, 4).
+    (UIA_IsContentElementPropertyId, is_content_view_element),
+    (UIA_ItemStatusPropertyId, item_status),
     (UIA_IsControlElementPropertyId, is_content_element),
     (UIA_IsEnabledPropertyId, is_enabled),
     (UIA_IsKeyboardFocusablePropertyId, is_focusable),
@@ -1395,12 +1728,14 @@ patterns! {
             self.set_selected(true)
         },
 
+        // dpro: a grid's rows (PATCHES.md, 4).
         fn AddToSelection(&self) -> Result<()> {
-            self.set_selected(true)
+            self.add_to_selection()
         },
 
+        // dpro: a grid's rows (PATCHES.md, 4).
         fn RemoveFromSelection(&self) -> Result<()> {
-            self.set_selected(false)
+            self.remove_from_selection()
         },
 
         fn SelectionContainer(&self) -> Result<IRawElementProviderSimple> {
@@ -1419,6 +1754,11 @@ patterns! {
     ), (
         fn GetSelection(&self) -> Result<*mut SAFEARRAY> {
             self.resolve_with_context(|node, context| {
+                // dpro: a grid's selection is its selected rows and cells, below row groups
+                // too (PATCHES.md, 4).
+                if table::is_table_role(node.role()) {
+                    return Ok(providers(context, table::selected(&node)));
+                }
                 let selection: Vec<_> = node
                     .items(&filter)
                     .filter(|item| item.is_selected() == Some(true))
@@ -1526,6 +1866,96 @@ patterns! {
 
         fn IsTopmost(&self) -> Result<BOOL> {
             Err(not_supported())
+        }
+    )),
+    // dpro: the Grid, Table, GridItem, TableItem and Scroll patterns (PATCHES.md, 4).
+    (UIA_GridPatternId, IGridProvider, IGridProvider_Impl, is_grid_pattern_supported, (
+        (UIA_GridRowCountPropertyId, RowCount, row_count, i32),
+        (UIA_GridColumnCountPropertyId, ColumnCount, column_count, i32)
+    ), (
+        fn GetItem(&self, row: i32, column: i32) -> Result<IRawElementProviderSimple> {
+            self.resolve_with_context(|node, context| {
+                let (Ok(row), Ok(column)) = (usize::try_from(row), usize::try_from(column)) else {
+                    return Err(invalid_arg());
+                };
+                let data = node.data();
+                if !data.row_count().is_some_and(|n| row < n)
+                    || !data.column_count().is_some_and(|n| column < n)
+                {
+                    return Err(invalid_arg());
+                }
+                // A row the app hasn't built isn't in the tree.
+                match table::cell_at(&node, row, column) {
+                    Some(cell) => Ok(context.get_or_create_platform_node(cell.id()).into_interface()),
+                    None => Err(element_not_available()),
+                }
+            })
+        }
+    )),
+    (UIA_TablePatternId, ITableProvider, ITableProvider_Impl, is_table_pattern_supported, (), (
+        fn GetRowHeaders(&self) -> Result<*mut SAFEARRAY> {
+            // Only the built rows' headers could be listed, which isn't the table's; a cell's
+            // row header comes from its TableItem.
+            Ok(safe_array_from_com_slice(&[]))
+        },
+
+        fn GetColumnHeaders(&self) -> Result<*mut SAFEARRAY> {
+            self.resolve_with_context(|node, context| {
+                Ok(providers(context, table::column_headers(&node, None)))
+            })
+        },
+
+        fn RowOrColumnMajor(&self) -> Result<RowOrColumnMajor> {
+            Ok(RowOrColumnMajor_RowMajor)
+        }
+    )),
+    (UIA_GridItemPatternId, IGridItemProvider, IGridItemProvider_Impl, is_grid_item_pattern_supported, (
+        (UIA_GridItemRowPropertyId, Row, grid_row, i32),
+        (UIA_GridItemColumnPropertyId, Column, grid_column, i32),
+        (UIA_GridItemRowSpanPropertyId, RowSpan, row_span, i32),
+        (UIA_GridItemColumnSpanPropertyId, ColumnSpan, column_span, i32)
+    ), (
+        fn ContainingGrid(&self) -> Result<IRawElementProviderSimple> {
+            self.resolve_with_context(|node, context| {
+                match table::containing_table(&node) {
+                    Some(table) => Ok(context.get_or_create_platform_node(table.id()).into_interface()),
+                    None => Err(element_not_available()),
+                }
+            })
+        }
+    )),
+    (UIA_TableItemPatternId, ITableItemProvider, ITableItemProvider_Impl, is_table_item_pattern_supported, (), (
+        fn GetRowHeaderItems(&self) -> Result<*mut SAFEARRAY> {
+            self.resolve_with_context(|node, context| {
+                Ok(providers(context, table::row_headers(&node)))
+            })
+        },
+
+        fn GetColumnHeaderItems(&self) -> Result<*mut SAFEARRAY> {
+            self.resolve_with_context(|node, context| {
+                let headers = match (table::containing_table(&node), node.data().column_index()) {
+                    (Some(table), Some(column)) => table::column_headers(&table, Some(column)),
+                    _ => Vec::new(),
+                };
+                let id = node.id();
+                Ok(providers(context, headers.into_iter().filter(|header| header.id() != id)))
+            })
+        }
+    )),
+    (UIA_ScrollPatternId, IScrollProvider, IScrollProvider_Impl, is_scroll_pattern_supported, (
+        (UIA_ScrollHorizontalScrollPercentPropertyId, HorizontalScrollPercent, horizontal_scroll_percent, f64),
+        (UIA_ScrollVerticalScrollPercentPropertyId, VerticalScrollPercent, vertical_scroll_percent, f64),
+        (UIA_ScrollHorizontalViewSizePropertyId, HorizontalViewSize, horizontal_view_size, f64),
+        (UIA_ScrollVerticalViewSizePropertyId, VerticalViewSize, vertical_view_size, f64),
+        (UIA_ScrollHorizontallyScrollablePropertyId, HorizontallyScrollable, is_horizontally_scrollable, BOOL),
+        (UIA_ScrollVerticallyScrollablePropertyId, VerticallyScrollable, is_vertically_scrollable, BOOL)
+    ), (
+        fn Scroll(&self, horizontal: ScrollAmount, vertical: ScrollAmount) -> Result<()> {
+            self.scroll_by(horizontal, vertical)
+        },
+
+        fn SetScrollPercent(&self, horizontal: f64, vertical: f64) -> Result<()> {
+            self.scroll_to_percent(horizontal, vertical)
         }
     ))
 }

@@ -136,6 +136,10 @@ pub struct Table<'s, M> {
     pub hidden: &'s [bool],
     /// The column the rows are sorted by, and which way.
     pub sorted: Option<(ColumnId, Order)>,
+    /// What a screen reader says of the sorted column's header, ascending then descending
+    /// ("Sorted ascending", "Sorted descending"): its item status, in the user's language. Empty
+    /// for none.
+    pub sort_status: [&'s str; 2],
     /// A check column: its header's name ("Select") and the rows' checks together.
     pub checks: Option<(&'s str, Tri)>,
     /// The current row's index.
@@ -296,6 +300,8 @@ pub(crate) struct TableState<M> {
     pub(crate) checks: bool,
     /// The check column's name, which names every check cell.
     pub(crate) check_label: String,
+    /// The sorted column header's status for each order, ascending then descending.
+    pub(crate) sort_status: [String; 2],
     /// Each column's start and width (logical), the check column first: from layout.
     tracks: Vec<(f32, f32)>,
     /// The columns' width (logical): their tracks' sum, from layout.
@@ -337,6 +343,7 @@ impl<M> TableState<M> {
             frozen: Vec::new(),
             checks: false,
             check_label: String::new(),
+            sort_status: [String::new(), String::new()],
             tracks: Vec::new(),
             content_w: 0.0,
             row_px: 0,
@@ -959,6 +966,8 @@ impl<M> Ui<M> {
         fresh.frozen.clear();
         fresh.check_label = mem::take(&mut st.check_label);
         fresh.check_label.clear();
+        fresh.sort_status = mem::take(&mut st.sort_status);
+        fresh.sort_status.iter_mut().for_each(String::clear);
         fresh.tracks = mem::take(&mut st.tracks);
         fresh.tracks.clear();
         fresh.built = mem::take(&mut st.built);
@@ -1097,6 +1106,14 @@ impl<M> Ui<M> {
             st.check_label.clear();
             st.check_label.push_str(label);
         }
+        let mut restated = false;
+        for (kept, given) in st.sort_status.iter_mut().zip(table.sort_status) {
+            if kept != given {
+                kept.clear();
+                kept.push_str(given);
+                restated = true;
+            }
+        }
         // The shown columns at the widths the user left them. A fit asked for again keeps the
         // one measured: it's measured once, and sent once. Compared in place, as they're the
         // same at almost every build.
@@ -1156,6 +1173,10 @@ impl<M> Ui<M> {
                     self.a11y_touch(c);
                 }
             }
+        }
+        if restated {
+            // The sorted header says its order in the new words.
+            self.a11y_touch_children(header, 0);
         }
         if relayout {
             self.mark_dirty(grid);
@@ -1292,6 +1313,15 @@ impl<M> Ui<M> {
                 .nodes
                 .get(n.parent as usize)
                 .is_some_and(|p| p.role == Role::Grid)
+    }
+
+    /// Column header `i`'s table slot; `None` if it isn't in a table's header.
+    pub(crate) fn table_of_column_header(&self, i: u32) -> Option<u32> {
+        let header = self.nodes.get(i as usize)?.parent;
+        let grid = self.nodes.get(header as usize)?.parent;
+        self.is_table_header(header)
+            .then(|| self.table_of_grid(grid))
+            .flatten()
     }
 
     /// Whether cell `i` is its row's first text cell, which names the row (a row header).

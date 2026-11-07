@@ -120,6 +120,7 @@ fn view(data: &Data, cx: &mut Cx<'_, Msg>) {
         widths: &[],
         hidden: &[],
         sorted: None,
+        sort_status: [""; 2],
         checks: Some(("Select", Tri::Mixed)),
         current: Some(2),
         status: None,
