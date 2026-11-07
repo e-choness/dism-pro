@@ -419,6 +419,7 @@ impl<M: Clone> Cx<'_, M> {
             )
         });
         let (kept_text, kept_ends) = (text.len(), ends.len());
+        let shown = Shown::of(table);
         let plan = (t != NIL).then(|| {
             cx.ui
                 .table_plan(t, table, current, cur.map(|r| Key::index(r.key.0)))
@@ -454,7 +455,7 @@ impl<M: Clone> Cx<'_, M> {
                         ends: &ends[cell_ends],
                         start,
                     };
-                    let node = bx.table_row(table, at, current == Some(at), r, &cells);
+                    let node = bx.table_row(table, shown, at, current == Some(at), r, &cells);
                     bx.ui.tables[t as usize].scratch.push((node, at));
                 }
             } else if let Some(status) = &table.status {
@@ -621,12 +622,12 @@ impl<M: Clone> Cx<'_, M> {
     fn table_row(
         &mut self,
         table: &Table<'_, M>,
+        shown: Shown,
         at: u32,
         current: bool,
         r: Row<'_>,
         cells: &CellText<'_>,
     ) -> u32 {
-        let first = shown(table).next().map_or(usize::MAX, |(j, _)| j);
         let mut el = Element {
             selected: Some(current),
             look: if current { CURRENT } else { Look::PLAIN },
@@ -634,7 +635,7 @@ impl<M: Clone> Cx<'_, M> {
             ..Element::new(
                 Key::index(r.key.0),
                 Role::Row,
-                cells.get(first),
+                cells.get(shown.first),
                 Some((table.on)(TableEvent::Current(at))),
             )
         }
@@ -654,16 +655,22 @@ impl<M: Clone> Cx<'_, M> {
                 .tooltip(r.locked),
             );
         }
-        // A hidden column's cell isn't built: the view gave its text, which is skipped.
-        for (j, col) in shown(table) {
+        // A hidden column's cell isn't built: the view gave its text, which is skipped. Every
+        // cell of every row built passes here, so it tests only when some column is hidden, and
+        // only the first cell built can be semibold.
+        let mut weight = if current {
+            font::SEMIBOLD
+        } else {
+            font::REGULAR
+        };
+        for (j, col) in table.columns.iter().enumerate() {
+            if shown.any_hidden && is_hidden(table, j) {
+                continue;
+            }
             rx.add(Element {
                 style: cell_style(col.align),
                 text_style: TextStyle {
-                    weight: if current && j == first {
-                        font::SEMIBOLD
-                    } else {
-                        font::REGULAR
-                    },
+                    weight,
                     mono: col.mono,
                     ..TextStyle::default()
                 },
@@ -674,6 +681,7 @@ impl<M: Clone> Cx<'_, M> {
                     None,
                 )
             });
+            weight = font::REGULAR;
         }
         rx.finish();
         i
@@ -686,7 +694,54 @@ fn shown<'t, 's, M>(table: &'t Table<'s, M>) -> impl Iterator<Item = (usize, &'t
         .columns
         .iter()
         .enumerate()
-        .filter(|&(j, _)| !table.hidden.get(j).copied().unwrap_or(false))
+        .filter(|&(j, _)| !is_hidden(table, j))
+}
+
+/// Shown column `c`, `table`'s column `j`, at the width the user left it. A fit keeps the one
+/// measured in `old`, the columns of the last build, while the view still asks for it.
+fn col_of<M>(table: &Table<'_, M>, j: usize, c: &Column<'_>, old: &[Col]) -> Col {
+    let mut col = Col {
+        id: c.id,
+        width: c.width,
+        min: c.min,
+        fit: false,
+        fitted: false,
+        sorts: c.sort.is_some(),
+    };
+    match table.widths.get(j).copied().unwrap_or_default() {
+        Width::Auto => {}
+        Width::Px(w) => col.width = Track::Fixed(w),
+        Width::Fit => {
+            col.fit = true;
+            if let Some(o) = old.iter().find(|o| o.id == c.id && o.fit) {
+                (col.width, col.fitted) = (o.width, o.fitted);
+            }
+        }
+    }
+    col
+}
+
+/// Whether `table`'s column `j` is hidden (a column past the end of `hidden` shows).
+fn is_hidden<M>(table: &Table<'_, M>, j: usize) -> bool {
+    table.hidden.get(j).copied().unwrap_or(false)
+}
+
+/// Which of a table's columns show, worked out once a build for every row it builds.
+#[derive(Clone, Copy)]
+struct Shown {
+    /// Whether any column is hidden. If not, a row's cells test nothing.
+    any_hidden: bool,
+    /// The first shown column, which names a row (`usize::MAX` if none shows).
+    first: usize,
+}
+
+impl Shown {
+    fn of<M>(table: &Table<'_, M>) -> Self {
+        Self {
+            any_hidden: (0..table.columns.len()).any(|j| is_hidden(table, j)),
+            first: shown(table).next().map_or(usize::MAX, |(j, _)| j),
+        }
+    }
 }
 
 /// The rows' viewport of a table with `rows` rows: one Tab stop if it has any, else the status
@@ -971,31 +1026,18 @@ impl<M> Ui<M> {
             st.check_label.push_str(label);
         }
         // The shown columns at the widths the user left them. A fit asked for again keeps the
-        // one measured: it's measured once, and sent once.
-        let mut next = mem::take(&mut st.cols_next);
-        next.clear();
-        for (j, c) in shown(table) {
-            let mut col = Col {
-                id: c.id,
-                width: c.width,
-                min: c.min,
-                fit: false,
-                fitted: false,
-                sorts: c.sort.is_some(),
-            };
-            match table.widths.get(j).copied().unwrap_or_default() {
-                Width::Auto => {}
-                Width::Px(w) => col.width = Track::Fixed(w),
-                Width::Fit => {
-                    col.fit = true;
-                    if let Some(old) = st.columns.iter().find(|o| o.id == c.id && o.fit) {
-                        (col.width, col.fitted) = (old.width, old.fitted);
-                    }
-                }
-            }
-            next.push(col);
-        }
-        if next != st.columns {
+        // one measured: it's measured once, and sent once. Compared in place, as they're the
+        // same at almost every build.
+        let mut k = 0;
+        let same = shown(table).all(|(j, c)| {
+            let eq = st.columns.get(k) == Some(&col_of(table, j, c, &st.columns));
+            k += 1;
+            eq
+        }) && k == st.columns.len();
+        if !same {
+            let mut next = mem::take(&mut st.cols_next);
+            next.clear();
+            next.extend(shown(table).map(|(j, c)| col_of(table, j, c, &st.columns)));
             mem::swap(&mut st.columns, &mut next);
             seen = true;
             relayout = true;
@@ -1005,8 +1047,8 @@ impl<M> Ui<M> {
             {
                 st.drag = None;
             }
+            st.cols_next = next;
         }
-        st.cols_next = next;
         let grid = st.grid;
         if renamed {
             // Every check cell is named as the column is.
