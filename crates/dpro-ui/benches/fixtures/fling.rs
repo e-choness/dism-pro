@@ -61,11 +61,12 @@ const fn column(
         align,
         mono,
         sort: Some(Order::Ascending),
+        hideable: true,
     }
 }
 
 /// The table's events; the script sends none.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Msg(pub(crate) TableEvent);
 
 /// The rows' text, made once.
@@ -103,6 +104,8 @@ fn view(data: &Data, cx: &mut Cx<'_, Msg>) {
     let table = Table {
         rows: ROWS,
         columns: &COLUMNS,
+        widths: &[],
+        hidden: &[],
         sorted: None,
         checks: Some(("Select", Tri::Mixed)),
         current: Some(2),

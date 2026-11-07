@@ -11,6 +11,9 @@
 //! the ends, which realizes the rows there; then Down and Up move it, and Space twice checks it
 //! and clears it.
 //!
+//! The columns (slice 5b2): Publisher's divider dragged 120 px right in 12 frames and let go, a
+//! fit of every column, which the table measures and sends back, then the columns reset.
+//!
 //! Its own file: the counting allocator is global, `cargo test` runs tests on threads, and
 //! `alloc_per_frame.rs` holds one test.
 
@@ -21,8 +24,8 @@ mod shell;
 
 use std::alloc::System;
 
-use dpro_ui::{Input, KeyCode, Mods, Point, ScrollBar, Theme};
-use shell::{CTRL, Run, Shell, Step, key};
+use dpro_ui::{Input, KeyCode, Mods, Point, ScrollBar, TableEvent, Theme};
+use shell::{CTRL, Msg, Run, Shell, Step, key};
 use stats_alloc::{INSTRUMENTED_SYSTEM, Region, StatsAlloc};
 
 #[global_allocator]
@@ -52,6 +55,20 @@ fn script(run: &Run, bar: ScrollBar) -> Vec<Step> {
         steps.push(key(k, true, Mods::default()));
         steps.push(key(k, false, Mods::default()));
     }
+    let at = run.divider(1);
+    steps.push(Step::Input(Input::PointerMove(at)));
+    steps.push(Step::Input(Input::PointerDown(at)));
+    for k in 1..=12u8 {
+        let x = at.x + 10.0 * f32::from(k);
+        steps.push(Step::Input(Input::PointerMove(Point { x, ..at })));
+    }
+    steps.push(Step::Input(Input::PointerUp(Point {
+        x: at.x + 120.0,
+        ..at
+    })));
+    steps.push(Step::Update(Msg::Table(TableEvent::Fit(None))));
+    steps.push(Step::Update(Msg::Table(TableEvent::ResetColumns)));
+    steps.push(Step::Input(Input::PointerMove(run.center(&Run::TABLE))));
     steps
 }
 

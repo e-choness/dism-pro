@@ -27,7 +27,7 @@
 mod shell;
 
 use dpro_ui::{
-    Caret, ColumnId, FakeText, Input, KeyCode, Mods, TableEvent,
+    Caret, ColumnId, FakeText, Input, KeyCode, Mods, Point, TableEvent,
     tokens::{
         motion::{HOLD_MS, HOVER_MS},
         popup::{TIP_DELAY_MS, TIP_SHOWS_FOR},
@@ -277,4 +277,44 @@ fn the_table_settles_after_each_change() {
         assert_idle(&mut run, when);
         assert!(run.wake().is_none(), "{when} armed a wake");
     }
+}
+
+/// A2, slice 5b2: a divider's drag, a fit, a column hidden and the column menu each settle at
+/// once.
+#[test]
+fn the_columns_settle_after_each_change() {
+    let mut run = Run::accessible(Shell::new()).divider_grabbed(1);
+    assert_idle(&mut run, "a divider pressed");
+    let at = run.divider(1);
+    for (step, when) in [
+        (run.divider_moved(1, 30.0), "a divider dragged"),
+        (
+            Step::Input(Input::PointerUp(Point { x: at.x + 30.0, ..at })),
+            "a divider let go",
+        ),
+        (
+            Step::Update(Msg::Table(TableEvent::Fit(Some(ColumnId(2))))),
+            "a column fitted",
+        ),
+        (
+            Step::Update(Msg::Table(TableEvent::Fit(None))),
+            "every column fitted",
+        ),
+        (
+            Step::Update(Msg::Table(TableEvent::Show(ColumnId(3), false))),
+            "a column hidden",
+        ),
+        (
+            Step::Update(Msg::Table(TableEvent::ResetColumns)),
+            "the columns reset",
+        ),
+    ] {
+        run.step(step);
+        settle(&mut run, when, max_ticks());
+        assert_idle(&mut run, when);
+        assert!(run.wake().is_none(), "{when} armed a wake");
+    }
+    let mut run = run.column_menu_open();
+    assert!(run.popup_open, "the column menu opened");
+    assert_idle(&mut run, "the column menu open");
 }

@@ -1,7 +1,8 @@
 //! TD-0009 §7 U2 and U3 on a shell page of 390 to 476 nodes (`fixtures/shell.rs`):
 //! - `interact`, U2: UI-thread work per input event without raster: dispatch → update → view →
 //!   reconcile → layout → damage. Budget: p99 ≤ 2 ms per event (doc 04 §5), moving within a menu
-//!   (TD-0009 A1.7) and a wheel notch over the table (A2, slice 5a) included.
+//!   (TD-0009 A1.7), a wheel notch over the table (A2, slice 5a) and a column divider's drag
+//!   (slice 5b2) included.
 //! - `paint`, U3 without presenting: the same events with the damage painted into a 1000 × 700
 //!   canvas, and whole-window repaints. Budget: input to visual ≤ 50 ms (doc 04 §2); presenting is
 //!   measured on G1.
@@ -20,7 +21,7 @@ use criterion::{
     BatchSize, BenchmarkGroup, Criterion, Throughput, criterion_group, criterion_main,
     measurement::WallTime,
 };
-use dpro_ui::{Input, KeyCode, Mods, Point, Size, Theme};
+use dpro_ui::{Input, KeyCode, Mods, Point, Size, TableEvent, Theme};
 use shell::{Msg, Run, START, Shell, Step, click, key, popup_key};
 
 /// The session, an unchanged event, a filter keystroke, a resize, a tab picked with the arrow
@@ -159,6 +160,25 @@ fn events(g: &mut BenchmarkGroup<'_, WallTime>, run: &mut Run) {
         });
     });
     run.ui.set_focus(None);
+    run.settle();
+
+    // Columns (TD-0009 A2, slice 5b2): Publisher's divider pressed, then the pointer 30 px right
+    // and back, each a live drag frame: Name frozen, the shared columns right of it re-flowing.
+    let at = run.divider(1);
+    for s in [Input::PointerMove(at), Input::PointerDown(at)] {
+        run.step(Step::Input(s));
+        run.settle();
+    }
+    let (right, back) = (run.divider_moved(1, 30.0), run.divider_moved(1, 0.0));
+    g.bench_function("column_drag", |b| {
+        b.iter(|| {
+            run.step(right.clone());
+            run.step(back.clone());
+        });
+    });
+    run.step(Step::Input(Input::PointerUp(at)));
+    run.step(Step::Update(Msg::Table(TableEvent::ResetColumns)));
+    run.step(Step::Input(Input::PointerLeave));
     run.settle();
 }
 

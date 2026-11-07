@@ -22,10 +22,11 @@
 use std::sync::OnceLock;
 
 use dpro_ui::{
-    Align, Axis, Canvas, Cells, ClipboardRequest, Column, ColumnId, Cx, Dim, Element, FakeText,
-    Input, Insets, Justify, Key, KeyCode, KeyEvent, Look, Mods, Motion, Order, Point, Popup,
-    PopupKind, Radius, Row, RowKey, ScrollBar, Size, Status, Style, TABLE_BODY, Table, TableEvent,
-    TextEdit, TextStyle, Theme, Tone, Track, Tri, Ui, accesskit::TreeUpdate, tokens,
+    Align, Axis, Canvas, Cells, ClipboardRequest, Column, ColumnId, ColumnLayout,
+    ColumnMenuLabels, Cx, Dim, Element, FakeText, Input, Insets, Justify, Key, KeyCode, KeyEvent,
+    Look, Mods, Motion, Order, Point, Popup, PopupKind, Radius, Row, RowKey, ScrollBar, Size,
+    Status, Style, TABLE_BODY, TABLE_HEADER, Table, TableEvent, TextEdit, TextStyle, Theme, Tone,
+    Track, Tri, Ui, accesskit::TreeUpdate, tokens,
 };
 
 const RAIL: u8 = 12;
@@ -58,9 +59,13 @@ pub(crate) const ROW_MENU: [(&str, bool); 5] = [
 ];
 /// What the toolbar says after the row menu's item `i` (the first opens the drawer instead).
 const DONE: [&str; 5] = ["", "Opened file location", "Copied name", "Copied ID", ""];
-/// The table's columns, one per cell: the fixed widths, then shares of what they leave.
+/// The table's columns, one per cell: the fixed widths, then shares of what they leave. Every
+/// column but the name can be hidden from the column menu.
 const COLUMNS: [Column<'static>; CELLS] = [
-    column_of(0, "Name", Track::Share(2.0), Some(Order::Ascending)),
+    Column {
+        hideable: false,
+        ..column_of(0, "Name", Track::Share(2.0), Some(Order::Ascending))
+    },
     column_of(1, "Publisher", Track::Share(1.0), Some(Order::Ascending)),
     Column {
         mono: true,
@@ -93,8 +98,16 @@ const fn column_of(
         align: Align::Start,
         mono: false,
         sort,
+        hideable: true,
     }
 }
+/// The column menu's labels.
+const COLUMN_MENU: ColumnMenuLabels<'static> = ColumnMenuLabels {
+    name: "Columns",
+    fit: "Size column to fit",
+    fit_all: "Size all columns to fit",
+    reset: "Reset columns",
+};
 /// Why Properties is disabled: its tooltip.
 pub(crate) const PROPERTIES_TIP: &str = "Not available for this program";
 /// The header's drawer button's tooltip.
@@ -119,7 +132,7 @@ pub(crate) fn long_text() -> &'static str {
     TEXT.get_or_init(|| "contoso updater ".repeat(dpro_ui::MAX_FIELD_LEN / 16))
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Msg {
     Page(u8),
     Category(u8),
@@ -164,6 +177,8 @@ enum Open {
     RowMenu(u32),
     /// The Start page dropdown's list.
     StartPages,
+    /// The table's column menu, for a column (or the check column).
+    ColumnMenu(Option<ColumnId>),
 }
 
 /// The page's view-model.
@@ -177,6 +192,8 @@ pub(crate) struct Shell {
     checked_count: usize,
     /// The table's sort: the rows in data order, or reversed by the column's header.
     sorted: Option<(ColumnId, Order)>,
+    /// The table's columns as the user arranged them.
+    columns: ColumnLayout,
     categories: [bool; CATEGORIES as usize],
     drawer: bool,
     filter: String,
@@ -224,6 +241,7 @@ impl Shell {
             checked: vec![false; DATA],
             checked_count: 0,
             sorted: None,
+            columns: ColumnLayout::new(&COLUMNS.map(|c| (c.id, false))),
             categories: [false; CATEGORIES as usize],
             drawer: false,
             // Room for the typed text, so typing doesn't allocate (U8).
@@ -334,7 +352,7 @@ impl Shell {
     pub(crate) fn popup(&self) -> Option<Popup<Msg>> {
         let kind = match self.open {
             Open::None => return None,
-            Open::RowMenu(_) => PopupKind::Menu,
+            Open::RowMenu(_) | Open::ColumnMenu(_) => PopupKind::Menu,
             Open::StartPages => PopupKind::List,
         };
         Some(Popup {
@@ -414,6 +432,39 @@ impl Shell {
                 self.sorted = Some((col, order));
                 self.select(self.selected);
             }
+            // The columns: a divider let go or a fit measured, the column menu and its items.
+            TableEvent::Resize(col, w) => {
+                self.columns.resize(col, w);
+            }
+            TableEvent::Fit(col) => {
+                self.columns.fit(col);
+            }
+            TableEvent::ColumnMenu(at) => self.open = Open::ColumnMenu(at),
+            TableEvent::Show(col, on) => {
+                self.columns.set_hidden(col, !on);
+            }
+            TableEvent::ResetColumns => {
+                self.columns.reset();
+            }
+        }
+    }
+
+    /// The table as the view describes it, for the page and for its column menu.
+    fn table_of(&self) -> Table<'_, Msg> {
+        Table {
+            rows: u32::try_from(self.visible.len()).unwrap_or(u32::MAX),
+            columns: &COLUMNS,
+            widths: self.columns.widths(),
+            hidden: self.columns.hidden(),
+            sorted: self.sorted,
+            checks: Some(("Select", self.all_checked())),
+            current: self.current,
+            status: self.visible.is_empty().then_some(Status {
+                text: "No programs match the filter",
+                action: Some(("Clear filter", Msg::ClearFilter)),
+            }),
+            context: true,
+            on: Msg::Table,
         }
     }
 
@@ -657,19 +708,7 @@ fn content(s: &Shell, cx: &mut Cx<'_, Msg>) {
             cx.add_with(Element::stack(Key::name("toolbar")).style(row(8.0)), |cx| {
                 toolbar(s, cx);
             });
-            let table = Table {
-                rows: u32::try_from(s.visible.len()).unwrap_or(u32::MAX),
-                columns: &COLUMNS,
-                sorted: s.sorted,
-                checks: Some(("Select", s.all_checked())),
-                current: s.current,
-                status: s.visible.is_empty().then_some(Status {
-                    text: "No programs match the filter",
-                    action: Some(("Clear filter", Msg::ClearFilter)),
-                }),
-                context: true,
-                on: Msg::Table,
-            };
+            let table = s.table_of();
             cx.table(
                 Element::table(Key::name("table"))
                     .style(Style {
@@ -889,6 +928,8 @@ pub(crate) fn popup_view(s: &Shell, cx: &mut Cx<'_, Msg>) {
                 }
             }
         });
+    } else if let Open::ColumnMenu(at) = s.open {
+        cx.column_menu(Key::name("column-menu"), &s.table_of(), at, &COLUMN_MENU);
     } else if s.open == Open::StartPages {
         cx.add_with(
             Element::options(Key::name("start-pages")).name("Start page"),
@@ -1210,13 +1251,19 @@ impl Run {
     }
 
     /// The view built and laid out, and again if the table asks: its first build guesses its
-    /// rows' view, and a reveal or a scroll may bring other rows into it (TD-0009 A2.5).
+    /// rows' view, and a reveal or a scroll may bring other rows into it (TD-0009 A2.5). A
+    /// column's fit, which layout measures, goes to the shell, which builds once more.
     fn build(&mut self) {
-        let shell = &self.shell;
-        for _ in 0..2 {
+        for _ in 0..3 {
+            let shell = &self.shell;
             self.ui.build(|cx| view(shell, cx));
             self.ui.layout(&mut self.text);
-            if !self.ui.wants_build() {
+            self.ui.take_messages(&mut self.msgs);
+            let fitted = !self.msgs.is_empty();
+            for m in self.msgs.drain(..) {
+                self.shell.update(m);
+            }
+            if !fitted && !self.ui.wants_build() {
                 break;
             }
         }
@@ -1504,6 +1551,79 @@ impl Run {
             .table_bar()
             .map_or(Point::default(), |b| b.thumb.center());
         Step::Input(Input::PointerMove(Point { y: at.y + dy, ..at }))
+    }
+
+    /// Column `c`'s header's path from the root, on the first page (TD-0009 A2, slice 5b2).
+    pub(crate) fn column_header(c: u16) -> [Key; 5] {
+        [
+            Key::name("body"),
+            Key::name("content"),
+            Key::name("table"),
+            TABLE_HEADER,
+            Key::index(u64::from(c)),
+        ]
+    }
+
+    /// Column `c`'s divider: its header's right edge, halfway down it.
+    pub(crate) fn divider(&self, c: u16) -> Point {
+        self.ui
+            .find(&Self::column_header(c))
+            .and_then(|id| self.ui.info(id))
+            .map_or(Point::default(), |n| Point {
+                x: n.rect.right(),
+                y: n.rect.center().y,
+            })
+    }
+
+    /// The pointer resting on column `c`'s divider, then pressed there: a divider drag begun,
+    /// nothing animating.
+    pub(crate) fn divider_grabbed(mut self, c: u16) -> Self {
+        let at = self.divider(c);
+        self.step(Step::Input(Input::PointerMove(at)));
+        self.settle();
+        self.step(Step::Input(Input::PointerDown(at)));
+        self.settle();
+        self
+    }
+
+    /// While [`divider_grabbed`](Self::divider_grabbed) on column `c`, the pointer `dx` right of
+    /// where it pressed: one frame of the drag.
+    pub(crate) fn divider_moved(&self, c: u16, dx: f32) -> Step {
+        let at = self.divider(c);
+        Step::Input(Input::PointerMove(Point { x: at.x + dx, ..at }))
+    }
+
+    /// Column `c`'s divider dragged `dx` across in 4 frames, let go, then the columns reset, so
+    /// the script can repeat: the drag steps.
+    pub(crate) fn divider_drag(&self, c: u16, dx: f32) -> Vec<Step> {
+        let at = self.divider(c);
+        let mut steps = vec![
+            Step::Input(Input::PointerMove(at)),
+            Step::Input(Input::PointerDown(at)),
+        ];
+        for k in 1..=4u8 {
+            let x = at.x + dx * f32::from(k) / 4.0;
+            steps.push(Step::Input(Input::PointerMove(Point { x, ..at })));
+        }
+        steps.push(Step::Input(Input::PointerUp(Point { x: at.x + dx, ..at })));
+        steps.push(Step::Update(Msg::Table(TableEvent::ResetColumns)));
+        steps
+    }
+
+    /// Column `c`'s header focused, as the keyboard leaves it.
+    pub(crate) fn header_focused(mut self, c: u16) -> Self {
+        let header = self.ui.find(&Self::column_header(c));
+        self.ui.set_focus(header);
+        self
+    }
+
+    /// The column menu open from the keyboard on column 1's header (Shift+F10), its first item
+    /// focused, nothing animating.
+    pub(crate) fn column_menu_open(self) -> Self {
+        let mut run = self.header_focused(1);
+        run.step(Step::Input(Input::ContextMenu(None)));
+        run.settle();
+        run
     }
 
     /// TD-0009 §7's session: a hover sweep over the rail, two wheel notches down the table and two

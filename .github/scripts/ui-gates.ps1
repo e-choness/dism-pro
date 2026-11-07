@@ -72,6 +72,16 @@ raw-API baseline, measured in this job, so it holds on whatever machine the runn
       wheel lines are reported. So is "Automatically hide scroll bars", for A2.3's verify:
       DynamicScrollbars, which the shell reads, beside UISettings.AutoHideScrollBars, with the
       value written both ways (no broadcast, before the shell starts) and put back.
+  Columns (TD-0009 A2, slice 5b2): the shell's table header, through real mouse input and keys.
+      The pointer on Publisher's divider (its HeaderItem's right edge) shows the left-right arrows
+      (IDC_SIZEWE); pressed there and dragged 60 px right in 3 moves, let go, the HeaderItem is
+      60 px wider, and Name's, left of it, holds still. A double-click there fits the column: its
+      width changes, measured by DirectWrite, and holds. Shift+F10 on the focused Publisher header
+      opens a Menu "Columns" in an owned popup, its hideable columns MenuItems with Toggle
+      (Publisher On) and then its three commands; Toggle on Publisher closes the menu and takes
+      its HeaderItem away, focus going to Version's; Shift+F10 there and Invoke on Reset columns
+      brings it back at its first width. Each is read back through UIA within 2 s; the drag's time
+      is advisory (U3: 50 ms).
 
 The probe target is dpro-ui's `shell` example until roadmap 3.2 gives dismpro.exe its shell.
 Results go to annotations and the job summary; the raw reports and screenshots go to -Out, which
@@ -669,10 +679,12 @@ public static class TextGateWin32 {
     // The system cursors, shared handles: the same in every process of the session.
     static readonly IntPtr IBeam = LoadCursorW(IntPtr.Zero, (IntPtr) 32513);
     static readonly IntPtr Arrow = LoadCursorW(IntPtr.Zero, (IntPtr) 32512);
+    static readonly IntPtr SizeWE = LoadCursorW(IntPtr.Zero, (IntPtr) 32644);
     static string Name(IntPtr cursor) {
         if (cursor == IntPtr.Zero) { return "none"; }
         if (cursor == IBeam) { return "I-beam"; }
         if (cursor == Arrow) { return "arrow"; }
+        if (cursor == SizeWE) { return "left-right arrows"; }
         return "0x" + cursor.ToString("X");
     }
     // The pointer moved to (x, y) on the primary monitor as mouse input, like a mouse would, not
@@ -683,11 +695,14 @@ public static class TextGateWin32 {
         i.u.mi = new MOUSEINPUT { dx = (int) (x * 65535L / (w - 1)), dy = (int) (y * 65535L / (h - 1)), dwFlags = MOVE | ABSOLUTE };
         return Send(new[] { i });
     }
-    // Whether the pointer over `hwnd` is an I-beam, and what was read. A pointer Windows shows
-    // must be the I-beam. When it shows none (no mouse on the machine, or hidden while typing),
-    // the cursor the window's thread set is read instead, through its input queue
-    // (AttachThreadInput, then GetCursor): what the shell asked for is all there is to see.
-    public static string Pointer(IntPtr hwnd, out bool ibeam) {
+    // Whether the pointer over `hwnd` is an I-beam, and what was read.
+    public static string Pointer(IntPtr hwnd, out bool ibeam) { return Pointer(hwnd, 32513, out ibeam); }
+    // Whether the pointer over `hwnd` is the system cursor `id` (IDC_*), and what was read. A
+    // pointer Windows shows must be that one. When it shows none (no mouse on the machine, or
+    // hidden while typing), the cursor the window's thread set is read instead, through its input
+    // queue (AttachThreadInput, then GetCursor): what the shell asked for is all there is to see.
+    public static string Pointer(IntPtr hwnd, int id, out bool match) {
+        IntPtr want = LoadCursorW(IntPtr.Zero, (IntPtr) id);
         var info = new CURSORINFO();
         info.cbSize = Marshal.SizeOf(info);
         bool got = GetCursorInfo(ref info);
@@ -701,7 +716,7 @@ public static class TextGateWin32 {
             set = GetCursor();
             AttachThreadInput(me, thread, false);
         }
-        ibeam = shown ? info.hCursor == IBeam : attached && set == IBeam;
+        match = shown ? info.hCursor == want : attached && set == want;
         POINT at;
         GetCursorPos(out at);
         IntPtr under = GetAncestor(WindowFromPoint(at), 2); // GA_ROOT
@@ -1462,6 +1477,130 @@ try {
 foreach ($k in $checks.Keys) { $lines += '{0,-50} {1}' -f $k, (Format-Verdict $checks[$k]) }
 $ok = $checks.Count -gt 0 -and -not ($checks.Values -contains $false)
 Publish 'Scrolling' $lines $ok
+if (-not $ok) { $failed++ }
+
+# Columns (TD-0009 A2, slice 5b2) ------------------------------------------------------------------
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class ColumnsGateWin32 {
+    [StructLayout(LayoutKind.Sequential)]
+    struct MOUSEINPUT { public int dx; public int dy; public uint mouseData; public uint dwFlags; public uint time; public IntPtr dwExtraInfo; }
+    [StructLayout(LayoutKind.Sequential)]
+    struct KEYBDINPUT { public ushort wVk; public ushort wScan; public uint dwFlags; public uint time; public IntPtr dwExtraInfo; }
+    [StructLayout(LayoutKind.Explicit)]
+    struct InputUnion { [FieldOffset(0)] public MOUSEINPUT mi; [FieldOffset(0)] public KEYBDINPUT ki; }
+    [StructLayout(LayoutKind.Sequential)]
+    struct INPUT { public uint type; public InputUnion u; }
+    [DllImport("user32.dll", SetLastError = true)]
+    static extern uint SendInput(uint n, INPUT[] inputs, int size);
+    // The left button pressed, or let go, where the pointer is, as mouse input. Returns the
+    // events sent.
+    public static uint Button(bool down) {
+        var inputs = new INPUT[1];
+        inputs[0].u.mi.dwFlags = down ? 0x0002u : 0x0004u; // MOUSEEVENTF_LEFTDOWN, LEFTUP
+        return SendInput(1, inputs, Marshal.SizeOf(typeof(INPUT)));
+    }
+}
+'@
+# The HeaderItem named `$Name` in the shell's tree, or $null.
+function Get-Header($Root, [string] $Name) { Find-First $Root $types::HeaderItem $Name }
+# The middle of `$Header`'s right edge, where its divider is, in screen pixels.
+function Get-Divider($Header) {
+    $r = $Header.Current.BoundingRectangle
+    @([int] [Math]::Round($r.Right), [int] [Math]::Round($r.Y + $r.Height / 2))
+}
+
+$lines = @("Columns in the shell at $Size (the checks are gates, each read back through UIA within 2 s; the drag's time is advisory, U3: 50 ms)")
+$checks = [ordered]@{}
+$hwnd = [IntPtr]::Zero
+$p = Start-Process -FilePath $exe.shell -ArgumentList @('--size', $Size) -PassThru
+$null = $p.Handle
+try {
+    $shown = Wait-Until {
+        $script:hwnd = [UiaGateWin32]::FindWindowW('dismpro.window', 'DISM Pro shell probe')
+        $script:hwnd -ne [IntPtr]::Zero -and [UiaGateWin32]::IsWindowVisible($script:hwnd)
+    } 30000
+    if (-not $shown) { throw "the shell showed no window in 30 s (exited: $($p.HasExited))" }
+    $root = $ae::FromHandle($hwnd)
+    $publisher = $null
+    $found = Wait-Until { $script:publisher = Get-Header $root 'Publisher'; $null -ne $script:publisher } 10000
+    if (-not $found) { throw 'no HeaderItem "Publisher" in 10 s' }
+    $name = Get-Header $root 'Name'
+    $nameW = $name.Current.BoundingRectangle.Width
+    $w0 = $publisher.Current.BoundingRectangle.Width
+    $lines += 'Name {0:N0} px, Publisher {1:N0} px wide' -f $nameW, $w0
+    $checks['the window is active'] = [GlassGateWin32]::Activate($hwnd)
+
+    # The divider: the left-right arrows over it, then a drag through SendInput.
+    $at = Get-Divider $publisher
+    [void][TextGateWin32]::MoveTo($at[0] - 1, $at[1])
+    $hit = $false
+    $pointer = ''
+    $checks['the pointer on a divider shows the left-right arrows'] = Wait-Until { $script:pointer = [TextGateWin32]::Pointer($hwnd, 32644, [ref] $script:hit); $script:hit } 2000
+    $lines += "pointer on Publisher's divider: $pointer"
+    [void][ColumnsGateWin32]::Button($true)
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    foreach ($dx in 20, 40, 60) { [void][TextGateWin32]::MoveTo($at[0] - 1 + $dx, $at[1]) }
+    $live = Wait-Until { [Math]::Abs($publisher.Current.BoundingRectangle.Width - ($w0 + 60)) -le 1 } 2000
+    $lines += '{0,-12} {1}' -f 'drag', (Format-Ms $sw.Elapsed.TotalMilliseconds 50)
+    [void][ColumnsGateWin32]::Button($false)
+    Start-Sleep -Milliseconds 200 # a release that put the column back would have by now
+    $w1 = $publisher.Current.BoundingRectangle.Width
+    $lines += '  Publisher {0:N0} px after the drag, Name {1:N0} px' -f $w1, $name.Current.BoundingRectangle.Width
+    $checks['a drag 60 px right widens the column 60 px'] = $live -and [Math]::Abs($w1 - ($w0 + 60)) -le 1
+    $checks['the column left of it holds still'] = [Math]::Abs($name.Current.BoundingRectangle.Width - $nameW) -le 0.5
+
+    # A double-click on the divider fits the column to its header and the cells built.
+    $at = Get-Divider $publisher
+    [void][TextGateWin32]::MoveTo($at[0] - 1, $at[1])
+    [void][PopupGateWin32]::Click($false)
+    [void][PopupGateWin32]::Click($false)
+    $fitted = Wait-Until { [Math]::Abs($publisher.Current.BoundingRectangle.Width - $w1) -gt 1 } 2000
+    Start-Sleep -Milliseconds 200
+    $w2 = $publisher.Current.BoundingRectangle.Width
+    Start-Sleep -Milliseconds 200
+    $lines += '  Publisher {0:N0} px fitted' -f $w2
+    $checks['a double-click on the divider fits the column'] = $fitted -and $publisher.Current.BoundingRectangle.Width -eq $w2
+
+    # The column menu from the keyboard, on the focused header.
+    $publisher.SetFocus()
+    $focused = Wait-Until { $publisher.Current.HasKeyboardFocus } 2000
+    [void][TextGateWin32]::Chord($shift, 0x79) # Shift+F10
+    $menu = $null
+    $opened = $focused -and (Wait-Until { $script:menu = Find-Popup $hwnd $types::Menu 'Columns'; $null -ne $script:menu } 2000)
+    if (-not $opened) { throw "Shift+F10 on the Publisher header showed no Menu ""Columns"" in 2 s (header focused: $focused, $((Get-Shown $hwnd).Count) popups shown)" }
+    $menuRoot = $ae::FromHandle($menu.Hwnd)
+    $items = @(Find-Elements $menuRoot $types::MenuItem | ForEach-Object { $_.Current.Name })
+    $lines += "  the menu: $($items -join ', ')"
+    $checks['a Menu "Columns": the hideable columns, then its commands'] = ($items -join ',') -eq 'Publisher,Version,Size,Installed,Status,Location,ID,Size column to fit,Size all columns to fit,Reset columns'
+    $item = Find-First $menuRoot $types::MenuItem 'Publisher'
+    $toggle = Get-Pattern $item ([Windows.Automation.TogglePattern]::Pattern)
+    $checks['a shown column is a toggled MenuItem'] = $toggle.Current.ToggleState -eq $toggleState::On
+    $toggle.Toggle()
+    $checks['Toggle hides the column and closes the menu'] = Wait-Until { (Get-Shown $hwnd).Count -eq 0 -and $null -eq (Get-Header $root 'Publisher') } 2000
+    $checks['focus moves to the next header'] = Wait-Until { Test-Focused $types::HeaderItem 'Version' } 2000
+
+    [void][TextGateWin32]::Chord($shift, 0x79)
+    $opened = Wait-Until { $script:menu = Find-Popup $hwnd $types::MenuItem 'Reset columns'; $null -ne $script:menu } 2000
+    if ($opened) { (Get-Pattern $menu.Element ([Windows.Automation.InvokePattern]::Pattern)).Invoke() }
+    $back = $null
+    $checks['Reset columns brings it back at its first width'] = $opened -and (Wait-Until {
+        $script:back = Get-Header $root 'Publisher'
+        $null -ne $script:back -and [Math]::Abs($script:back.Current.BoundingRectangle.Width - $w0) -le 0.5
+    } 2000)
+} catch {
+    $lines += "columns FAILED: $($_.Exception.Message)"
+    $checks['client'] = $false
+} finally {
+    if (-not $p.HasExited) {
+        if ($hwnd -ne [IntPtr]::Zero) { [void][UiaGateWin32]::PostMessageW($hwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) } # WM_CLOSE
+        if (-not $p.WaitForExit(5000)) { $p.Kill(); $lines += 'the shell did not close on WM_CLOSE'; $checks['closes'] = $false }
+    }
+}
+foreach ($k in $checks.Keys) { $lines += '{0,-50} {1}' -f $k, (Format-Verdict $checks[$k]) }
+$ok = $checks.Count -gt 0 -and -not ($checks.Values -contains $false)
+Publish 'Columns' $lines $ok
 if (-not $ok) { $failed++ }
 
 exit $failed

@@ -2299,4 +2299,59 @@ mod tests {
         // SAFETY: msg is a live local; PM_REMOVE takes the message.
         while unsafe { PeekMessageW(&raw mut msg, null_mut(), 0, 0, PM_REMOVE) } != 0 {}
     }
+
+    /// Shows the shape its test sets.
+    struct Shaped(Rc<Cell<Cursor>>);
+
+    impl Handler for Shaped {
+        fn event(&mut self, event: Event, cx: &mut WindowCx<'_>) -> bool {
+            if event == Event::Close {
+                cx.close();
+            }
+            true
+        }
+
+        fn paint(&mut self, _: &mut Frame<'_>) {}
+
+        fn cursor(&self) -> Cursor {
+            self.0.get()
+        }
+    }
+
+    /// TD-0009 A2, slice 5b2: over the client area the handler's shape shows, the left-right
+    /// arrows over a column divider among them.
+    #[test]
+    fn the_handler_s_cursor_shows_over_the_client_area() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{GetCursor, IDC_SIZEWE, WM_MOUSEMOVE};
+        let shape = Rc::new(Cell::new(Cursor::Arrow));
+        let options = WindowOptions {
+            title: "dpro-win cursor test",
+            size: (320, 200),
+            min_size: (100, 100),
+            compose: Compose::Never,
+        };
+        let window =
+            Window::new(&options, Box::new(Shaped(Rc::clone(&shape)))).expect("a window");
+        let hwnd = window.hwnd;
+        // As the system asks when the pointer moves over the client area.
+        let lp = LPARAM::try_from(HTCLIENT | (WM_MOUSEMOVE << 16)).unwrap_or(1);
+        for (cursor, id) in [
+            (Cursor::SizeWE, IDC_SIZEWE),
+            (Cursor::IBeam, IDC_IBEAM),
+            (Cursor::Arrow, IDC_ARROW),
+        ] {
+            shape.set(cursor);
+            // SAFETY: a message sent to this test's live window, on its thread.
+            let handled = unsafe { SendMessageW(hwnd, WM_SETCURSOR, 0, lp) };
+            assert_eq!(handled, 1, "{cursor:?}: the window set it");
+            // SAFETY: system cursors by their predefined ids; GetCursor has no preconditions.
+            let (shown, expected) = unsafe { (GetCursor(), LoadCursorW(null_mut(), id)) };
+            assert_eq!(shown, expected, "{cursor:?}");
+        }
+        drop(window);
+        // SAFETY: plain data; all-zero is a valid value.
+        let mut msg: MSG = unsafe { std::mem::zeroed() };
+        // SAFETY: msg is a live local; PM_REMOVE takes the message.
+        while unsafe { PeekMessageW(&raw mut msg, null_mut(), 0, 0, PM_REMOVE) } != 0 {}
+    }
 }

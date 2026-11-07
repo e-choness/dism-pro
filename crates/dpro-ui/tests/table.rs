@@ -54,6 +54,7 @@ const COLUMNS: [Column<'static>; 3] = [
         align: Align::Start,
         mono: false,
         sort: Some(Order::Ascending),
+        hideable: false,
     },
     Column {
         id: VERSION,
@@ -63,6 +64,7 @@ const COLUMNS: [Column<'static>; 3] = [
         align: Align::Start,
         mono: true,
         sort: None,
+        hideable: true,
     },
     Column {
         id: SIZE,
@@ -72,6 +74,7 @@ const COLUMNS: [Column<'static>; 3] = [
         align: Align::End,
         mono: false,
         sort: Some(Order::Descending),
+        hideable: true,
     },
 ];
 
@@ -161,6 +164,11 @@ impl Page {
             TableEvent::CheckAll => self.model.select_all(),
             TableEvent::Activate(_) => {}
             TableEvent::Sort(col) => self.sort(col),
+            TableEvent::Resize(..)
+            | TableEvent::Fit(_)
+            | TableEvent::ColumnMenu(_)
+            | TableEvent::Show(..)
+            | TableEvent::ResetColumns => {}
         }
     }
 
@@ -200,6 +208,8 @@ impl Page {
         let table = Table {
             rows: u32::try_from(self.model.view().len()).expect("rows"),
             columns: self.columns,
+            widths: &[],
+            hidden: &[],
             sorted: self.model.sort(),
             checks: self.checks.then(|| ("Select", self.all_checked())),
             current: self.model.current_view(),

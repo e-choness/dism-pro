@@ -179,6 +179,25 @@ fn accessible_with(step: Step) -> (Run, Step) {
     (warm_accessible(), step)
 }
 
+/// Warm, Publisher's divider pressed, then the pointer `dx` right: one frame of a divider drag,
+/// Name frozen and the shared columns right of it re-flowing (A2, slice 5b2).
+fn divider_with(dx: f32) -> (Run, Step) {
+    let run = warm().0.divider_grabbed(1);
+    let step = run.divider_moved(1, dx);
+    (run, step)
+}
+
+fn divider_painted_with(dx: f32) -> (Run, Step) {
+    let run = warm_painted().0.divider_grabbed(1);
+    let step = run.divider_moved(1, dx);
+    (run, step)
+}
+
+/// Warm, Publisher's header focused, then `step`.
+fn header_with(step: Step) -> (Run, Step) {
+    (warm().0.header_focused(1), step)
+}
+
 fn warm_painted_150() -> (Run, Vec<Step>) {
     warmed(Run::painted(Shell::new(), 1.5, Theme::DARK))
 }
@@ -219,6 +238,9 @@ fn session((mut run, steps): (Run, Vec<Step>)) -> (Run, Vec<Step>) {
 #[bench::check_space(args = (key(KeyCode::Space, true, Mods::default())), setup = row_with)]
 #[bench::header_sort(args = (Step::Update(Msg::Table(TableEvent::Sort(ColumnId(0))))), setup = warm_with)]
 #[bench::realize(args = (Step::Realize(700)), setup = accessible_with)]
+#[bench::column_drag(args = (30.0), setup = divider_with)]
+#[bench::column_fit(args = (Step::Update(Msg::Table(TableEvent::Fit(Some(ColumnId(1)))))), setup = warm_with)]
+#[bench::column_menu(args = (Step::Input(Input::ContextMenu(None))), setup = header_with)]
 fn event((mut run, step): (Run, Step)) -> Run {
     run.step(black_box(step));
     run
@@ -256,6 +278,7 @@ fn painted_session((mut run, steps): (Run, Vec<Step>)) -> (Run, Vec<Step>) {
 #[bench::progress(args = (Step::Update(Msg::Progress(41))), setup = drawer_painted_with)]
 #[bench::context_menu(args = (Step::Input(Input::ContextMenu(None))), setup = row_painted_with)]
 #[bench::wheel_notch(args = (-120), setup = table_painted_with)]
+#[bench::column_drag(args = (30.0), setup = divider_painted_with)]
 fn painted_event((mut run, step): (Run, Step)) -> Run {
     run.step(black_box(step));
     run
@@ -412,6 +435,7 @@ fn a11y_tree((mut run, popup): (Box<Run>, bool)) -> (TreeUpdate, Box<Run>) {
 #[bench::page_back(args = (Some(Step::Update(Msg::Page(1))), Step::Update(Msg::Page(0))), setup = accessible_after)]
 #[bench::progress(args = (Some(Step::Update(Msg::Drawer)), Step::Update(Msg::Progress(41))), setup = accessible_after)]
 #[bench::scroll(setup = accessible_scroll)]
+#[bench::column_hide(args = (None, Step::Update(Msg::Table(TableEvent::Show(ColumnId(2), false)))), setup = accessible_after)]
 fn a11y_update(mut run: Box<Run>) -> (Option<TreeUpdate>, Box<Run>) {
     (run.a11y_update(), run)
 }
