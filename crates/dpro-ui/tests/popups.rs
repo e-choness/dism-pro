@@ -322,7 +322,7 @@ fn the_menu_closes_when_its_row_goes_away() {
 #[test]
 fn a_wheel_over_the_window_closes_the_menu_and_scrolls() {
     let mut run = menu_from_keyboard();
-    let table = run.ui.find(&Run::TABLE).expect("the table");
+    let table = run.ui.find(&Run::TABLE_ROWS).expect("the rows' view");
     let before = run
         .ui
         .info(table)

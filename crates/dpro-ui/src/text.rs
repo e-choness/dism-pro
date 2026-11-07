@@ -46,8 +46,10 @@ pub struct TextMetrics {
 pub enum Icon {
     /// A check box's check.
     CheckMark,
-    /// A dropdown's chevron.
+    /// A dropdown's chevron, and a column sorted largest first.
     ChevronDown,
+    /// A column sorted smallest first.
+    ChevronUp,
 }
 
 impl Icon {
@@ -57,6 +59,7 @@ impl Icon {
         match self {
             Self::CheckMark => 0xE73E,
             Self::ChevronDown => 0xE70D,
+            Self::ChevronUp => 0xE70E,
         }
     }
 }

@@ -20,7 +20,9 @@ raw-API baseline, measured in this job, so it holds on whatever machine the runn
       (the "Review changes" button found through UIA) is advisory: <= 100 ms (S-01: 40-42 ms).
       The client is warmed on bare_window first, so its own start isn't counted.
       The checks are gates: names and roles (the page list, the table's rows, the check boxes),
-      then Toggle, SelectionItem and Invoke through UIA, each read back through UIA.
+      then Toggle, SetFocus on a row and Invoke through UIA, each read back through UIA. A table
+      row's SelectionItem comes with slice 5c's adapter: accesskit_windows 0.35.2 gives none to
+      a grid's rows ("TODO: tables").
   Live theme switch: see its section.
   Glass (ADR-0007, TD-0009 §5.2): the glass shell's window base, read off the screen, is DWM's
       backdrop and not the solid token. Switching transparency off shows the solid token, and on
@@ -58,12 +60,14 @@ raw-API baseline, measured in this job, so it holds on whatever machine the runn
       and second menu opens, the right-click and the dropdown, from the input to UIA seeing it;
       and (U7, 2 MiB) the working set the open menu adds. Screenshots of the menu, the list and
       the tip go to -Out for A1.3's shadow and corners, checked by hand.
-  Scrolling (TD-0009 A2, slice 5a): the shell's table, 40 rows taller than its viewport. A wheel
-      notch through SendInput at its center moves the rows up, and a notch back puts them where
-      they were; with a row focused, Ctrl+End shows the last row and Ctrl+Home the first again;
-      UIA's SetFocus on a row out of view scrolls it into view. UIA sees only the rows in view
-      and one past each end: AccessKit leaves out the children a viewport clips, but for those
-      next to one it shows (accesskit_consumer's common_filter), so they can be scrolled to. Each is read back as
+  Scrolling (TD-0009 A2, slices 5a and 5b1): the shell's table of 750 rows, a DataGrid whose
+      rows are DataItems. A wheel notch through SendInput at its center moves the rows up, and a
+      notch back puts them where they were; on a focused row, Ctrl+End makes the last row current,
+      focused and in view, and Ctrl+Home the first again; UIA's SetFocus on a row out of view
+      scrolls it into view. UIA sees every row the table builds, those in view and half a view
+      either side: the rows' viewport is a generic container AccessKit leaves out, so a row's
+      parent is the grid, which clips nothing (accesskit_consumer's common_filter drops only what a
+      clipping parent hides, and then not the children next to those it shows). Each is read back as
       the rows' BoundingRectangle within 2 s; the times are advisory (U3: 50 ms), and Windows'
       wheel lines are reported. So is "Automatically hide scroll bars", for A2.3's verify:
       DynamicScrollbars, which the shell reads, beside UISettings.AutoHideScrollBars, with the
@@ -239,6 +243,14 @@ function Find-Elements($Root, $Type, [string] $Name) {
     @($Root.FindAll([Windows.Automation.TreeScope]::Descendants, $c))
 }
 
+# The table's rows: the DataItems right under the DataGrid "Programs" (TD-0009 A2.5). Its rows'
+# view isn't exposed and its header is a Group, so cells, deeper down, aren't among them. Only the
+# rows built are there: those in view, half a view either side, and the current row.
+function Get-Rows($Root) {
+    $c = [Windows.Automation.PropertyCondition]::new($ae::ControlTypeProperty, $types::DataItem)
+    @(Find-Elements $Root $types::DataGrid 'Programs' | ForEach-Object { @($_.FindAll([Windows.Automation.TreeScope]::Children, $c)) })
+}
+
 # Polls `$Test` every 10 ms until it's true or `$Ms` pass; returns whether it came true.
 function Wait-Until([scriptblock] $Test, [int] $Ms = 3000) {
     $sw = [Diagnostics.Stopwatch]::StartNew()
@@ -297,12 +309,12 @@ try {
     $checks['served'] = $served
 
     $pages = @(Find-Elements $root $types::List 'Pages' | ForEach-Object { Find-Elements $_ $types::ListItem })
-    $rows = @(Find-Elements $root $types::Group 'Programs' | ForEach-Object { Find-Elements $_ $types::ListItem })
+    $rows = @(Get-Rows $root)
     $boxes = @(Find-Elements $root $types::CheckBox | ForEach-Object { $_.Current.Name })
     $checks['12 pages, Overview first'] = $pages.Count -eq 12 -and $pages[0].Current.Name -eq 'Overview'
-    # The table's 40 rows overflow it: UIA sees those in view and the one past its end, as AccessKit
-    # leaves out what a viewport clips but for the children next to those it shows.
-    $checks['the rows in view and one more, each named'] = $rows.Count -ge 10 -and $rows.Count -lt 40 -and @($rows | Where-Object { $_.Current.Name }).Count -eq $rows.Count
+    # 750 rows on the first tab. The table builds those in view and half a view either side, and
+    # UIA sees each one built: their viewport is a generic container AccessKit leaves out.
+    $checks['10 to 99 rows of 750, each named'] = $rows.Count -ge 10 -and $rows.Count -lt 100 -and @($rows | Where-Object { $_.Current.Name }).Count -eq $rows.Count
     $checks['4 check boxes'] = ($boxes -join ',') -eq 'Apps,Games,Tools,System'
     $lines += "pages $($pages.Count), rows $($rows.Count) (first '$(if ($rows) { $rows[0].Current.Name })'), check boxes: $($boxes -join ', ')"
 
@@ -315,9 +327,9 @@ try {
         $checks['Toggle(Games) turns it on'] = $before -eq $toggleState::Off -and (Wait-Until { $toggle.Current.ToggleState -eq $toggleState::On })
     }
     if ($rows.Count -gt 3) {
-        $item = Get-Pattern $rows[3] ([Windows.Automation.SelectionItemPattern]::Pattern)
-        $item.Select()
-        $checks['Select(row 4) selects it'] = Wait-Until { $item.Current.IsSelected }
+        # SetFocus makes it current (TD-0009 A2.5); its SelectionItem comes with slice 5c.
+        $rows[3].SetFocus()
+        $checks['SetFocus(row 4) focuses it'] = Wait-Until { $rows[3].Current.HasKeyboardFocus }
     }
     if ($review) {
         (Get-Pattern $review ([Windows.Automation.InvokePattern]::Pattern)).Invoke()
@@ -763,7 +775,7 @@ try {
 
     $value.SetValue('Fabrikam')
     $checks['SetValue("Fabrikam") filters the table'] = Wait-Until {
-        $rows = @(Find-Elements $root $types::Group 'Programs' | ForEach-Object { Find-Elements $_ $types::ListItem })
+        $rows = @(Get-Rows $root)
         $value.Current.Value -eq 'Fabrikam' -and $rows.Count -gt 0 -and $rows[0].Current.Name -like 'Fabrikam*'
     } 2000
 
@@ -848,7 +860,7 @@ try {
     $checks['TabItems in a Tab "Program types"'] = $found -and (Find-Elements $root $types::Tab 'Program types').Count -eq 1
     if (-not $found) { throw 'no TabItem "Store apps" in 10 s' }
     $desktop = Find-First $root $types::TabItem 'Desktop programs'
-    $firstRow = { @(Find-Elements $root $types::Group 'Programs' | ForEach-Object { Find-Elements $_ $types::ListItem } | ForEach-Object { $_.Current.Name }) | Select-Object -First 1 }
+    $firstRow = { @(Get-Rows $root | ForEach-Object { $_.Current.Name }) | Select-Object -First 1 }
 
     # Tabs: Select through UIA, then Left on the focused tab (selection follows focus).
     Select-Item $store
@@ -1121,7 +1133,7 @@ try {
     $root = $ae::FromHandle($hwnd)
     $rows = @()
     $found = Wait-Until {
-        $script:rows = @(Find-Elements $root $types::Group 'Programs' | ForEach-Object { Find-Elements $_ $types::ListItem })
+        $script:rows = @(Get-Rows $root)
         $script:rows.Count -gt 4
     } 10000
     if (-not $found) { throw 'no table rows in 10 s' }
@@ -1303,7 +1315,7 @@ $ok = $checks.Count -gt 0 -and -not ($checks.Values -contains $false)
 Publish 'Popups' $lines $ok
 if (-not $ok) { $failed++ }
 
-# Scrolling (TD-0009 A2, slice 5a) -----------------------------------------------------------------
+# Scrolling (TD-0009 A2, slices 5a and 5b1) ---------------------------------------------------------
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
@@ -1391,16 +1403,17 @@ try {
     if (-not $shown) { throw "the shell showed no window in 30 s (exited: $($p.HasExited))" }
     $root = $ae::FromHandle($hwnd)
     $table = $null
-    $found = Wait-Until { $script:table = Find-First $root $types::Group 'Programs'; $null -ne $script:table } 10000
-    if (-not $found) { throw 'no Group "Programs" in 10 s' }
-    $rows = @(Find-Elements $table $types::ListItem)
+    $found = Wait-Until { $script:table = Find-First $root $types::DataGrid 'Programs'; $null -ne $script:table } 10000
+    if (-not $found) { throw 'no DataGrid "Programs" in 10 s' }
+    $rows = @(Get-Rows $root)
     $view = $table.Current.BoundingRectangle
     $first = $rows[0]
+    $firstName = $first.Current.Name
     $last = $rows[$rows.Count - 1]
     $y0 = $first.Current.BoundingRectangle.Y
-    # UIA sees the rows in view and the one past its end (AccessKit's filter, see U12).
-    $checks['the table overflows: the last row UIA sees is out of view'] = $rows.Count -gt 1 -and -not (Test-Inside $last.Current.BoundingRectangle $view)
-    $lines += 'table {0:N0}x{1:N0} at {2:N0},{3:N0}; {4} rows; Windows scrolls {5} lines a notch' -f $view.Width, $view.Height, $view.X, $view.Y, $rows.Count, [ScrollGateWin32]::WheelLines()
+    # UIA sees every row built, half a view past the end too (see U12).
+    $checks['the last row UIA sees is out of view'] = $rows.Count -gt 1 -and -not (Test-Inside $last.Current.BoundingRectangle $view)
+    $lines += 'table {0:N0}x{1:N0} at {2:N0},{3:N0}; {4} rows built; Windows scrolls {5} lines a notch' -f $view.Width, $view.Height, $view.X, $view.Y, $rows.Count, [ScrollGateWin32]::WheelLines()
     $checks['the window is active'] = [GlassGateWin32]::Activate($hwnd)
 
     # The wheel, through SendInput, at the table's center.
@@ -1414,25 +1427,29 @@ try {
     [void][ScrollGateWin32]::Wheel(120, $false)
     $checks['a notch up moves them back'] = Wait-Until { $first.Current.BoundingRectangle.Y -eq $y0 } 2000
 
-    # Ctrl+End and Ctrl+Home scroll the viewport holding the focus.
+    # On the focused row, Ctrl+End makes the table's last row current: it's built, focused and in
+    # view. Ctrl+Home goes back to the first, built again.
     $first.SetFocus()
     $focused = Wait-Until { $first.Current.HasKeyboardFocus } 2000
     $sw.Restart()
     Send-Chord 0x11 0x23
-    # At the end there's no row past the view, so the last row UIA sees is wholly in it.
     $end = $focused -and (Wait-Until {
-        $tail = @(Find-Elements $table $types::ListItem) | Select-Object -Last 1
-        $null -ne $tail -and $tail.Current.Name -ne $last.Current.Name -and (Test-Inside $tail.Current.BoundingRectangle $view)
+        $f = $ae::FocusedElement
+        $f.Current.Name -eq 'Northwind Toolbox 998' -and (Test-Inside $f.Current.BoundingRectangle $view)
     } 2000)
     $ms = $sw.Elapsed.TotalMilliseconds
-    $checks['Ctrl+End shows the last row'] = $end
+    $checks['Ctrl+End focuses the last row, in view'] = $end
     $lines += '{0,-12} {1,7:N1} ms' -f 'Ctrl+End', $ms
     Send-Chord 0x11 0x24
-    $checks['Ctrl+Home shows the first again'] = Wait-Until { $first.Current.BoundingRectangle.Y -eq $y0 } 2000
+    $checks['Ctrl+Home shows the first again'] = Wait-Until {
+        $top = @(Get-Rows $root) | Select-Object -First 1
+        $null -ne $top -and $top.Current.Name -eq $firstName -and $top.Current.BoundingRectangle.Y -eq $y0
+    } 2000
 
-    # Focus moving to a row out of view brings it into view.
+    # Focus moving to a row out of view brings it into view, and makes it current.
+    $last = @(Get-Rows $root) | Select-Object -Last 1
     $last.SetFocus()
-    $checks['SetFocus on the last row scrolls it into view'] = Wait-Until { $last.Current.HasKeyboardFocus -and (Test-Inside $last.Current.BoundingRectangle $view) } 2000
+    $checks['SetFocus on the last row UIA sees scrolls it into view'] = Wait-Until { $last.Current.HasKeyboardFocus -and (Test-Inside $last.Current.BoundingRectangle $view) } 2000
 } catch {
     $lines += "scrolling FAILED: $($_.Exception.Message)"
     $checks['client'] = $false

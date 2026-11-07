@@ -23,6 +23,12 @@
 //!   scroll bars" off. Dragging the thumb scrolls in proportion; a press elsewhere on the strip
 //!   moves a page toward it. The bar is no tab stop and not in the accessibility tree: the wheel,
 //!   the keys and a client's scroll actions do all it does.
+//! - **Tables** (`table.rs`): a table's rows' viewport lays its rows out from a base, a whole
+//!   number of rows above the first in the layout's coordinates, so no layout coordinate grows
+//!   past what `f32` holds exactly; its content's height is exact, its rows times its row height
+//!   in physical pixels, and its line is a row. Its header is a follower: a viewport whose offset
+//!   across is the rows', which scrolls nothing itself and has no bar; the wheel, the keys and
+//!   reveals on it go to the rows.
 //! - **No timers.** A scroll is done when its event is (no smooth scrolling, no fading), so a
 //!   settled viewport asks for no frames or wakes (U6).
 
@@ -31,9 +37,13 @@ use crate::{
     input::{KeyCode, KeyEvent},
     text::TextSystem,
     theme::tokens::scroll as bar,
-    tree::{NIL, rare},
+    tree::{NIL, Role, rare},
     ui::{ROOT, Ui},
 };
+
+/// How far past its view content still fits, in logical pixels: float error in a sum of widths,
+/// far below a pixel at any scale.
+const FIT_SLACK: f32 = 0.01;
 
 /// Which ways a [scroll viewport](crate::Element::scroll) scrolls.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -101,6 +111,17 @@ pub(crate) struct Scroll {
     pub(crate) rest: [i64; 2],
     /// The pointer is on the bar's strip, per axis.
     pub(crate) hot: [bool; 2],
+    /// What layout's origin stands for in the content, in physical pixels: a table's rows are
+    /// laid out from a base row, and show moved by the offset less this. 0 for other viewports.
+    pub(crate) base: [i64; 2],
+    /// The content's size in whole physical pixels: from layout, or a table's rows exactly.
+    pub(crate) content_px: [i64; 2],
+    /// A table's rows' viewport: its slot in the Ui's table table; [`NIL`] for other viewports.
+    pub(crate) table: u32,
+    /// A follower's leader (a table's header's, its rows'); [`NIL`] if it leads itself.
+    pub(crate) leader: u32,
+    /// The follower whose offset across follows this one's; [`NIL`] if none.
+    pub(crate) follower: u32,
 }
 
 /// A thumb being dragged: the press's capture.
@@ -134,7 +155,7 @@ fn coord(p: Point, axis: usize) -> f32 {
     clippy::cast_possible_truncation,
     reason = "content is far below 2^63 px; `as` saturates anyway"
 )]
-fn to_px(v: f32, scale: f32) -> i64 {
+pub(crate) fn to_px(v: f32, scale: f32) -> i64 {
     (f64::from(v) * f64::from(scale)).round() as i64
 }
 
@@ -147,7 +168,7 @@ fn to_px(v: f32, scale: f32) -> i64 {
     clippy::cast_possible_truncation,
     reason = "a logical length; f32 keeps it to its 24 bits"
 )]
-fn to_logical(px: i64, scale: f32) -> f32 {
+pub(crate) fn to_logical(px: i64, scale: f32) -> f32 {
     (px as f64 / f64::from(scale)) as f32
 }
 
@@ -186,6 +207,11 @@ impl<M> Ui<M> {
             line: [0.0; 2],
             rest: [0; 2],
             hot: [false; 2],
+            base: [0; 2],
+            content_px: [0; 2],
+            table: NIL,
+            leader: NIL,
+            follower: NIL,
         };
         if let Some(s) = self.free_scrolls.pop() {
             self.scrolls[s as usize] = fresh;
@@ -197,7 +223,21 @@ impl<M> Ui<M> {
     }
 
     pub(crate) fn release_scroll(&mut self, s: u32) {
-        self.scrolls[s as usize].node = NIL;
+        let sc = &mut self.scrolls[s as usize];
+        sc.node = NIL;
+        let (table, leader, follower) = (sc.table, sc.leader, sc.follower);
+        sc.table = NIL;
+        sc.leader = NIL;
+        sc.follower = NIL;
+        if table != NIL {
+            self.release_table(table);
+        }
+        if leader != NIL && self.scrolls[leader as usize].follower == s {
+            self.scrolls[leader as usize].follower = NIL;
+        }
+        if follower != NIL && self.scrolls[follower as usize].leader == s {
+            self.scrolls[follower as usize].leader = NIL;
+        }
         if self.drag.is_some_and(|d| d.slot == s) {
             self.drag = None;
         }
@@ -294,10 +334,7 @@ impl<M> Ui<M> {
     pub(crate) fn max_px(&self, s: u32) -> [i64; 2] {
         let sc = &self.scrolls[s as usize];
         let view = self.view_px(s);
-        let content = [
-            to_px(sc.content.w, self.scale),
-            to_px(sc.content.h, self.scale),
-        ];
+        let content = sc.content_px;
         [0, 1].map(|k| {
             if sc.axes[k] {
                 (content[k] - view[k]).max(0)
@@ -307,8 +344,16 @@ impl<M> Ui<M> {
         })
     }
 
-    /// A line (or character) of slot `s` along `axis`, in whole pixels, at least one.
-    fn line_px(&self, s: u32, axis: usize) -> i64 {
+    /// A line (or character) of slot `s` along `axis`, in whole pixels, at least one. A table's
+    /// line down is a row.
+    pub(crate) fn line_px(&self, s: u32, axis: usize) -> i64 {
+        let t = self.scrolls[s as usize].table;
+        if axis == 1 && t != NIL {
+            let row = self.tables[t as usize].row_px;
+            if row > 0 {
+                return row;
+            }
+        }
         to_px(self.scrolls[s as usize].line[axis], self.scale).max(1)
     }
 
@@ -318,9 +363,19 @@ impl<M> Ui<M> {
         (self.view_px(s)[axis] - line).max(line)
     }
 
-    /// How far slot `s`'s content is moved, in logical pixels: minus its offset.
+    /// How far slot `s`'s content shows from where layout put it, in physical pixels: its offset
+    /// less its base.
+    pub(crate) fn shift_px(&self, s: u32) -> [i64; 2] {
+        let sc = &self.scrolls[s as usize];
+        [
+            sc.offset[0].saturating_sub(sc.base[0]),
+            sc.offset[1].saturating_sub(sc.base[1]),
+        ]
+    }
+
+    /// How far slot `s`'s content is moved, in logical pixels: minus its offset, less its base.
     pub(crate) fn content_shift(&self, s: u32) -> Point {
-        let o = self.scrolls[s as usize].offset;
+        let o = self.shift_px(s);
         Point {
             x: -to_logical(o[0], self.scale),
             y: -to_logical(o[1], self.scale),
@@ -387,7 +442,8 @@ impl<M> Ui<M> {
     pub(crate) fn bar_local(&self, s: u32, axis: usize) -> Option<(Rect, Rect, bool)> {
         let sc = &self.scrolls[s as usize];
         let max = self.max_px(s);
-        if max[axis] == 0 {
+        // A follower shows the leader's offset, and the leader's bar is the one.
+        if max[axis] == 0 || sc.leader != NIL {
             return None;
         }
         let v = self.nodes[sc.node as usize].rect;
@@ -482,9 +538,37 @@ impl<M> Ui<M> {
             style.size / 2.0,
             text.measure("", &style, f32::INFINITY).height,
         ];
+        let mut content = content;
+        let t = self.scrolls[s as usize].table;
+        // An empty table's status line is as wide as its columns, so its header, which follows
+        // it, still scrolls to the columns past the view.
+        if t != NIL && self.tables[t as usize].rows == 0 {
+            content.w = content.w.max(self.tables[t as usize].content_w);
+        }
+        let mut content_px = [to_px(content.w, self.scale), to_px(content.h, self.scale)];
+        // Content that fits its view fits: rounding its size and the view's edges apart mustn't
+        // leave a pixel to scroll (a table's columns share its width exactly).
+        let (rect, view) = (self.nodes[i as usize].rect, self.view_px(s));
+        for (a, (c, v)) in [(content.w, rect.w), (content.h, rect.h)]
+            .into_iter()
+            .enumerate()
+        {
+            if c <= v + FIT_SLACK {
+                content_px[a] = content_px[a].min(view[a]);
+            }
+        }
+        // A table's rows: their height exactly, past what `f32` counts.
+        if t != NIL {
+            let st = &self.tables[t as usize];
+            if st.rows > 0 && st.row_px > 0 {
+                content_px[1] = i64::from(st.rows).saturating_mul(st.row_px);
+                content.h = to_logical(content_px[1], self.scale);
+            }
+        }
         let sc = &mut self.scrolls[s as usize];
-        let seen = sc.content != content;
+        let seen = sc.content != content || sc.content_px != content_px;
         sc.content = content;
+        sc.content_px = content_px;
         sc.line = line;
         let max = self.max_px(s);
         let sc = &mut self.scrolls[s as usize];
@@ -497,17 +581,54 @@ impl<M> Ui<M> {
         }
         if clamped {
             self.damage_view(i);
+            self.sync_follower(s);
+            self.touch_grid(s);
         } else if seen {
             // A bar comes, goes or changes with the content, over children that may not have.
             self.damage_strips(i);
         }
         if seen || clamped {
             self.a11y_touch(i);
+            self.touch_grid(s);
         }
     }
 
+    /// Slot `s`'s follower, if it has one, takes its offset across.
+    pub(crate) fn sync_follower(&mut self, s: u32) {
+        let f = self.scrolls[s as usize].follower;
+        if f == NIL {
+            return;
+        }
+        let x = self.scrolls[s as usize].offset[0];
+        let fs = &mut self.scrolls[f as usize];
+        if fs.node != NIL && fs.offset[0] != x {
+            fs.offset[0] = x;
+            let node = fs.node;
+            self.damage_view(node);
+            self.a11y_touch(node);
+        }
+    }
+
+    /// A table's grid gives a client its rows' offset and extent: slot `s`'s changing, if it's
+    /// a table's rows', is the grid's to send.
+    pub(crate) fn touch_grid(&mut self, s: u32) {
+        let t = self.scrolls[s as usize].table;
+        if t != NIL {
+            let grid = self.tables[t as usize].grid;
+            if grid != NIL {
+                self.a11y_touch(grid);
+            }
+        }
+    }
+
+    /// The slot that scrolls for slot `s`: its leader if it follows one, else itself.
+    pub(crate) fn leader_of(&self, s: u32) -> u32 {
+        let l = self.scrolls[s as usize].leader;
+        if l == NIL { s } else { l }
+    }
+
     /// Damages what shows of viewport `i`'s bar strips, along its right and bottom edges.
-    fn damage_strips(&mut self, i: u32) {
+    pub(crate) fn damage_strips(&mut self, i: u32) {
         let at = self.window_rect(i);
         let shows = self.window_clip(i);
         let right = Rect::new(at.right() - bar::STRIP, at.y, bar::STRIP, at.h);
@@ -527,16 +648,34 @@ impl<M> Ui<M> {
             if sc.node == NIL {
                 continue;
             }
-            let o = sc.offset.map(|o| to_px(to_logical(o, from), to));
+            let mut o = sc.offset.map(|o| to_px(to_logical(o, from), to));
+            sc.content_px = [to_px(sc.content.w, to), to_px(sc.content.h, to)];
+            let t = sc.table;
+            // A table keeps its top row: its rows are whole pixels at any scale.
+            if t != NIL {
+                let (y, base, content) = self.rescale_rows(t, self.scrolls[s].offset[1], from);
+                o[1] = y;
+                let sc = &mut self.scrolls[s];
+                sc.base[1] = base;
+                if content > 0 {
+                    sc.content_px[1] = content;
+                }
+            }
             let max = self.max_px(slot(s));
             self.scrolls[s].offset = [0, 1].map(|k| o[k].clamp(0, max[k]));
+        }
+        for s in 0..self.scrolls.len() {
+            if self.scrolls[s].node != NIL {
+                self.sync_follower(slot(s));
+            }
         }
     }
 
     // ---- scrolling ---------------------------------------------------------------------------
 
     /// Scrolls slot `s` along `axis` to `to` physical pixels, clamped. Returns whether it moved.
-    pub(crate) fn scroll_to(&mut self, s: u32, axis: usize, to: i64) -> bool {
+    /// Its follower follows it across.
+    pub(crate) fn scroll_axis(&mut self, s: u32, axis: usize, to: i64) -> bool {
         let to = to.clamp(0, self.max_px(s)[axis]);
         let sc = &mut self.scrolls[s as usize];
         if sc.offset[axis] == to {
@@ -546,12 +685,16 @@ impl<M> Ui<M> {
         let i = sc.node;
         self.damage_view(i);
         self.a11y_touch(i);
+        self.touch_grid(s);
+        if axis == 0 {
+            self.sync_follower(s);
+        }
         true
     }
 
-    fn scroll_by(&mut self, s: u32, axis: usize, by: i64) -> bool {
+    pub(crate) fn scroll_by(&mut self, s: u32, axis: usize, by: i64) -> bool {
         let at = self.scrolls[s as usize].offset[axis];
-        self.scroll_to(s, axis, at.saturating_add(by))
+        self.scroll_axis(s, axis, at.saturating_add(by))
     }
 
     /// A client's step: slot `s` scrolls a line (or a `page`) along `axis`, toward `dir`.
@@ -571,8 +714,8 @@ impl<M> Ui<M> {
     /// A client's offset: slot `s` scrolls to `to` physical pixels, each clamped. Returns
     /// whether it moved.
     pub(crate) fn scroll_set(&mut self, s: u32, to: [i64; 2]) -> bool {
-        let x = self.scroll_to(s, 0, to[0]);
-        let y = self.scroll_to(s, 1, to[1]);
+        let x = self.scroll_axis(s, 0, to[0]);
+        let y = self.scroll_axis(s, 1, to[1]);
         x || y
     }
 
@@ -603,6 +746,8 @@ impl<M> Ui<M> {
         let (mut a, _) = self.walk_at(p, |_| {});
         while a != NIL {
             let s = self.nodes[a as usize].scroll;
+            // A follower's wheel scrolls its leader: over a table's header, its rows.
+            let s = if s == NIL { s } else { self.leader_of(s) };
             if s != NIL && self.can_move(s, axis, travel) {
                 self.wheel_on(s, axis, travel);
                 return true;
@@ -689,6 +834,7 @@ impl<M> Ui<M> {
         if s == NIL {
             return false;
         }
+        let s = self.leader_of(s);
         let y = usize::from(self.scrolls[s as usize].axes[1]);
         let ctrl = k.mods.ctrl;
         let end = i64::MAX / 2;
@@ -723,9 +869,15 @@ impl<M> Ui<M> {
             self.reveal_after = i;
             return true;
         }
-        // The node where it shows in each viewport's content, viewport by viewport outward.
-        let mut target = self.nodes[i as usize].rect.snap(self.scale);
+        // The node where it shows in each viewport's content, viewport by viewport outward: a
+        // table's row exactly, however far down.
+        let mut target = self.row_rect_px(i).unwrap_or_else(|| {
+            let r = self.nodes[i as usize].rect.snap(self.scale);
+            [r.x0, r.y0, r.x1, r.y1].map(i64::from)
+        });
         let mut found = false;
+        // A table's row comes into view down its rows, where it already spans them across.
+        let mut row = self.nodes[i as usize].role == Role::Row;
         let mut a = self.nodes[i as usize].parent;
         while a != NIL {
             let s = self.nodes[a as usize].scroll;
@@ -733,38 +885,42 @@ impl<M> Ui<M> {
                 found = true;
                 let view = self.nodes[a as usize].rect.snap(self.scale);
                 let sc = &self.scrolls[s as usize];
+                let base = sc.base;
                 let mut to = sc.offset;
                 for (k, (t0, t1, v0, v1)) in [
-                    (target.x0, target.x1, view.x0, view.x1),
-                    (target.y0, target.y1, view.y0, view.y1),
+                    (target[0], target[2], view.x0, view.x1),
+                    (target[1], target[3], view.y0, view.y1),
                 ]
                 .into_iter()
                 .enumerate()
                 {
-                    if !sc.axes[k] {
+                    if !sc.axes[k] || (row && k == 0) {
                         continue;
                     }
-                    let (t0, t1, v0, v1) =
-                        (i64::from(t0), i64::from(t1), i64::from(v0), i64::from(v1));
-                    // Shown from `o`: [v0 + o, v1 + o) of the content.
-                    let o = to[k];
+                    let (v0, v1) = (i64::from(v0), i64::from(v1));
+                    // Shown from `o`: [v0 + o, v1 + o) of what layout placed.
+                    let o = to[k] - base[k];
                     if t1 - t0 > v1 - v0 || t0 < v0 + o {
-                        to[k] = t0 - v0;
+                        to[k] = t0 - v0 + base[k];
                     } else if t1 > v1 + o {
-                        to[k] = t1 - v1;
+                        to[k] = t1 - v1 + base[k];
                     }
                 }
-                self.scroll_to(s, 0, to[0]);
-                self.scroll_to(s, 1, to[1]);
-                let off = self.scrolls[s as usize].offset;
+                // A follower's leader scrolls, and the follower with it.
+                let by = self.leader_of(s);
+                if by == s {
+                    self.scroll_axis(s, 1, to[1]);
+                }
+                self.scroll_axis(by, 0, to[0]);
+                row = false;
+                let [dx, dy] = self.shift_px(s);
                 // Where it now shows in this viewport's parent's content.
-                let (dx, dy) = (px_i32(off[0]), px_i32(off[1]));
-                target = crate::geom::RectPx {
-                    x0: target.x0 - dx,
-                    y0: target.y0 - dy,
-                    x1: target.x1 - dx,
-                    y1: target.y1 - dy,
-                };
+                target = [
+                    target[0].saturating_sub(dx),
+                    target[1].saturating_sub(dy),
+                    target[2].saturating_sub(dx),
+                    target[3].saturating_sub(dy),
+                ];
             }
             a = self.nodes[a as usize].parent;
         }
@@ -914,7 +1070,7 @@ impl<M> Ui<M> {
             reason = "a fraction of the travel, rounded to a pixel"
         )]
         let to = (f64::from(t) * max as f64).round() as i64;
-        self.scroll_to(d.slot, d.axis, to);
+        self.scroll_axis(d.slot, d.axis, to);
     }
 }
 
@@ -926,10 +1082,4 @@ fn moved(r: Rect, by: Point) -> Rect {
 /// A slot index as a `u32`.
 fn slot(s: usize) -> u32 {
     u32::try_from(s).unwrap_or(NIL)
-}
-
-/// An offset as pixel coordinates; offsets past `i32` are clamped (a reveal past 2^31 px is
-/// off the grid anyway).
-fn px_i32(v: i64) -> i32 {
-    i32::try_from(v).unwrap_or(if v < 0 { i32::MIN } else { i32::MAX })
 }

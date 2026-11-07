@@ -405,11 +405,18 @@ impl<P: Model> Host<P> {
         }
     }
 
-    /// Rebuilds and lays out the main view.
+    /// Rebuilds and lays out the main view, and once more if a table asks: a new table guesses
+    /// its rows' height and view until a layout has measured them, and a scroll can bring other
+    /// rows into view than it built (TD-0009 A2.5).
     fn build(&mut self) {
         let model = &self.model;
-        self.ui.build(|c| model.view(c));
-        self.ui.layout(self.text.as_mut());
+        for _ in 0..2 {
+            self.ui.build(|c| model.view(c));
+            self.ui.layout(self.text.as_mut());
+            if !self.ui.wants_build() {
+                break;
+            }
+        }
     }
 
     fn now_ms(&self) -> u64 {
@@ -441,7 +448,15 @@ impl<P: Model> Host<P> {
                 true
             }
             Event::PointerMove(p) => self.input(Input::PointerMove(at(p))),
-            Event::PointerDown(p) => self.input(Input::PointerDown(at(p))),
+            Event::PointerDown {
+                at: p,
+                mods,
+                double,
+            } => self.input(Input::Press {
+                at: at(p),
+                mods: mods_of(mods),
+                double,
+            }),
             Event::Char(c) => self.input(Input::Char(c)),
             Event::PointerUp(p) => self.input(Input::PointerUp(at(p))),
             Event::PointerLeave => self.input(Input::PointerLeave),

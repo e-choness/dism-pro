@@ -29,6 +29,14 @@
 //! - A [dropdown](crate::Element::combo) is a combo box: named by its name, its value its text,
 //!   expanded or collapsed (`ExpandCollapse`). Any node that [opens a popup](
 //!   crate::Element::expanded) says whether it's open.
+//! - A [data table](crate::Element::table) (TD-0009 A2.5) is a grid with its row and column
+//!   counts, which gives its rows' scroll offsets and takes their scroll actions. Its header is a
+//!   row group of column headers, each with its column index, a sortable one taking `Click` and
+//!   giving its order. Its rows' viewport is a generic container, which the client leaves out,
+//!   so the rows are the grid's: each with its index, named by its first column, the current one
+//!   selected. Cells have their row and column; the first text column's are row headers, and a
+//!   check column's are named as its header is, toggled, taking `Click`. `Focus` on a row makes
+//!   it current.
 //! - A node's [tooltip](crate::Element::tooltip) is its description (UI Automation's
 //!   `FullDescription`), so a screen reader reads it on focus whether or not it shows.
 //!
@@ -51,11 +59,12 @@
 
 use accesskit::{
     Action, ActionData, ActionRequest, Affine, Node, NodeId as AkId, Rect as AkRect,
-    Role as AkRole, ScrollUnit, Toggled, TreeId, TreeInfo, TreeUpdate,
+    Role as AkRole, ScrollUnit, SortDirection, Toggled, TreeId, TreeInfo, TreeUpdate,
 };
-use dpro_app::table::Tri;
+use dpro_app::table::{Order, Tri};
 
 use crate::{
+    table::{TABLE_CHECK, sort_of},
     tree::{Group, NIL, NodeId, Role},
     ui::{ROOT, Ui},
 };
@@ -217,7 +226,11 @@ impl<M> Ui<M> {
         }
         let n = &self.nodes[i as usize];
         match n.role {
+            // A table's header is a row group of its column headers.
+            Role::Container if self.is_table_header(i) => AkRole::RowGroup,
             Role::Container => match n.group {
+                // A table's rows' viewport: the client leaves it out, so its rows are the grid's.
+                Some(Group::Rows) => AkRole::GenericContainer,
                 Some(Group::Tabs) => AkRole::TabList,
                 Some(Group::Radios) => AkRole::RadioGroup,
                 Some(Group::List) => AkRole::List,
@@ -239,6 +252,11 @@ impl<M> Ui<M> {
             Role::ComboBox => AkRole::ComboBox,
             Role::Separator => AkRole::Splitter,
             Role::Tooltip => AkRole::Tooltip,
+            Role::Grid => AkRole::Grid,
+            Role::Row => AkRole::Row,
+            Role::Cell if self.is_row_header(i) => AkRole::RowHeader,
+            Role::Cell => AkRole::Cell,
+            Role::ColumnHeader => AkRole::ColumnHeader,
         }
     }
 
@@ -251,6 +269,12 @@ impl<M> Ui<M> {
         node.set_bounds(self.ak_bounds(i));
         if n.scroll != NIL {
             self.ak_viewport(i, &mut node);
+        }
+        if matches!(
+            n.role,
+            Role::Grid | Role::Row | Role::Cell | Role::ColumnHeader
+        ) {
+            self.ak_table(i, &mut node);
         }
         if n.in_viewport {
             node.add_action(Action::ScrollIntoView);
@@ -306,7 +330,9 @@ impl<M> Ui<M> {
         if n.role.interactive() {
             if n.enabled {
                 match n.role {
+                    // A column header that doesn't sort only takes focus.
                     Role::Field => {}
+                    Role::ColumnHeader if n.msg.is_none() => {}
                     Role::ComboBox => node.add_action(Action::Expand),
                     _ => node.add_action(Action::Click),
                 }
@@ -319,11 +345,7 @@ impl<M> Ui<M> {
             }
         }
         if n.role == Role::CheckBox {
-            node.set_toggled(match n.check {
-                Tri::Off => Toggled::False,
-                Tri::On => Toggled::True,
-                Tri::Mixed => Toggled::Mixed,
-            });
+            node.set_toggled(toggled(n.check));
         }
         match (n.role, n.selected) {
             // UI Automation reads a radio button's selection from its toggled state.
@@ -350,7 +372,7 @@ impl<M> Ui<M> {
         let [ox, oy] = if n.scroll == NIL {
             [0.0; 2]
         } else {
-            self.scrolls[n.scroll as usize].offset.map(px_f64)
+            self.shift_px(n.scroll).map(px_f64)
         };
         AkRect {
             x0: f64::from(r.x0) + ox,
@@ -363,11 +385,25 @@ impl<M> Ui<M> {
     /// Viewport `i`'s scroll state and actions.
     fn ak_viewport(&self, i: u32, node: &mut Node) {
         let s = self.nodes[i as usize].scroll;
+        let [dx, dy] = self.shift_px(s).map(px_f64);
+        node.set_transform(Affine::translate((-dx, -dy)));
+        node.set_clips_children();
+        let sc = &self.scrolls[s as usize];
+        // A table's header follows its rows, whose grid gives their scroll state.
+        if sc.leader != NIL || sc.table != NIL {
+            return;
+        }
+        self.ak_scroll_state(s, node);
+        if self.lone_viewport(i) {
+            node.add_action(Action::Focus);
+        }
+    }
+
+    /// Slot `s`'s offsets, extent and scroll actions, on its viewport or its table's grid.
+    pub(crate) fn ak_scroll_state(&self, s: u32, node: &mut Node) {
         let sc = &self.scrolls[s as usize];
         let [x, y] = sc.offset.map(px_f64);
         let [max_x, max_y] = self.max_px(s).map(px_f64);
-        node.set_transform(Affine::translate((-x, -y)));
-        node.set_clips_children();
         if sc.axes[0] {
             node.set_scroll_x(x);
             node.set_scroll_x_min(0.0);
@@ -383,14 +419,73 @@ impl<M> Ui<M> {
             node.add_action(Action::ScrollDown);
         }
         node.add_action(Action::SetScrollOffset);
-        if self.lone_viewport(i) {
-            node.add_action(Action::Focus);
+    }
+
+    /// A table part's grid, row and column facts: the grid's counts and its rows' scroll state, a
+    /// row's index, a cell's row and column (a check cell's name and state), a column header's
+    /// column and sort.
+    fn ak_table(&self, i: u32, node: &mut Node) {
+        let n = &self.nodes[i as usize];
+        match n.role {
+            Role::Grid => {
+                let Some(t) = self.table_of_grid(i) else {
+                    return;
+                };
+                let st = &self.tables[t as usize];
+                node.set_row_count(st.rows as usize);
+                // AccessKit computes neither a set's size nor a member's place (A2.3).
+                node.set_size_of_set(st.rows as usize);
+                node.set_column_count(st.columns.len() + usize::from(st.checks));
+                let s = self.grid_rows_slot(i);
+                if s != NIL {
+                    self.ak_scroll_state(s, node);
+                }
+            }
+            Role::Row => {
+                if let Some((_, at)) = self.row_place(i) {
+                    node.set_row_index(at as usize);
+                    node.set_position_in_set(at as usize);
+                }
+            }
+            Role::Cell => {
+                if let Some((t, at)) = self.row_place(n.parent) {
+                    node.set_row_index(at as usize);
+                    node.set_column_index(self.sibling_index(i));
+                    if n.key == TABLE_CHECK {
+                        let label = self.tables[t as usize].check_label.as_str();
+                        if !label.is_empty() {
+                            node.set_label(label);
+                        }
+                        if n.enabled {
+                            node.set_toggled(toggled(n.check));
+                            node.add_action(Action::Click);
+                        }
+                    }
+                }
+            }
+            Role::ColumnHeader => {
+                node.set_column_index(self.sibling_index(i));
+                if n.key == TABLE_CHECK {
+                    node.set_toggled(toggled(n.check));
+                } else if let Some(order) = sort_of(n.value) {
+                    node.set_sort_direction(match order {
+                        Order::Ascending => SortDirection::Ascending,
+                        Order::Descending => SortDirection::Descending,
+                    });
+                }
+            }
+            _ => {}
         }
     }
 
     /// A client's scroll request for node `i`; `None` if it isn't one.
     fn ak_scroll_action(&mut self, i: u32, request: &ActionRequest) -> Option<bool> {
-        let s = self.nodes[i as usize].scroll;
+        // A table's grid scrolls its rows; its header scrolls them too.
+        let s = match self.nodes[i as usize].role {
+            Role::Grid => self.grid_rows_slot(i),
+            _ => self.nodes[i as usize].scroll,
+        };
+        let s = if s == NIL { s } else { self.leader_of(s) };
         let unit = match &request.data {
             Some(ActionData::ScrollUnit(ScrollUnit::Item)) => Some(false),
             // No unit is a page: UI Automation's large increment.
@@ -417,6 +512,15 @@ impl<M> Ui<M> {
             _ => return None,
         };
         Some(by.is_some_and(|(axis, dir, page)| self.scroll_step(s, axis, dir, page)))
+    }
+}
+
+/// A check state as a client reads it.
+const fn toggled(check: Tri) -> Toggled {
+    match check {
+        Tri::Off => Toggled::False,
+        Tri::On => Toggled::True,
+        Tri::Mixed => Toggled::Mixed,
     }
 }
 
@@ -452,6 +556,9 @@ impl<M: Clone> Ui<M> {
             return false;
         };
         if let Some(applied) = self.ak_scroll_action(i, request) {
+            return applied;
+        }
+        if let Some(applied) = self.table_action(i, request.action, out) {
             return applied;
         }
         let n = &self.nodes[i as usize];

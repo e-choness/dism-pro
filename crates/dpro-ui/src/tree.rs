@@ -1,7 +1,7 @@
 //! The retained tree's pieces: keys, node ids, roles, the per-frame [`Element`] description, and
 //! the long-lived node behind it (TD-0009 §5.1).
 
-use dpro_app::table::Tri;
+use dpro_app::table::{Order, Tri};
 
 use crate::{
     field::TextEdit,
@@ -82,6 +82,15 @@ pub enum Role {
     Separator,
     /// A tooltip window's [text](Element::tooltip_text). Not interactive.
     Tooltip,
+    /// A [data table](Element::table): a header of column headers over a scroll viewport of rows
+    /// (`table.rs`). Not interactive itself.
+    Grid,
+    /// A table's row: focusable, the arrows move the current row, and its cells are its children.
+    Row,
+    /// A row's cell: its text, or its check box. Not interactive: a click goes to its row.
+    Cell,
+    /// A column's header: focusable, and a sortable one's message sorts by it.
+    ColumnHeader,
 }
 
 impl Role {
@@ -95,6 +104,8 @@ impl Role {
                 | Self::Radio
                 | Self::MenuItem
                 | Self::ComboBox
+                | Self::Row
+                | Self::ColumnHeader
         )
     }
 }
@@ -117,6 +128,9 @@ pub enum Group {
     /// A dropdown list's [options](Element::options): Up and Down move focus without wrapping,
     /// and Enter or Space picks.
     Options,
+    /// A table's rows (`table.rs`): one Tab stop, landing on the current row. The table moves
+    /// the current row; focus follows it.
+    Rows,
 }
 
 /// How a node is painted, in theme tokens only (doc 05 §4). Changing it repaints the node; it never
@@ -313,6 +327,8 @@ pub(crate) enum Extra<'s, M> {
         label: &'s str,
         step: Option<fn(bool) -> M>,
     },
+    /// A column header's sort: by its column, which way, or not.
+    Sort(Option<Order>),
 }
 
 // Copy whatever `M` is: it holds no `M`, only functions that make one, so building a node drops
@@ -327,7 +343,7 @@ impl<M> Clone for Extra<'_, M> {
 impl<M> Copy for Extra<'_, M> {}
 
 impl<'s, M> Element<'s, M> {
-    fn new(key: Key, role: Role, text: &'s str, msg: Option<M>) -> Self {
+    pub(crate) fn new(key: Key, role: Role, text: &'s str, msg: Option<M>) -> Self {
         Self {
             key,
             role,
@@ -349,6 +365,15 @@ impl<'s, M> Element<'s, M> {
     #[must_use]
     pub fn stack(key: Key) -> Self {
         Self::new(key, Role::Container, "", None)
+    }
+
+    /// A data table (TD-0009 A2): give it to [`Cx::table`](crate::Cx::table), which builds its
+    /// header of column headers and its scroll viewport of rows. Give it a height (fixed, a max,
+    /// or grown into its parent): only the rows in view are built, and it has no natural height
+    /// short of all of them. [Name](Self::name) it, for assistive technology.
+    #[must_use]
+    pub fn table(key: Key) -> Self {
+        Self::new(key, Role::Grid, "", None)
     }
 
     /// A scroll viewport (TD-0009 A2): a container whose children scroll along `axes` when they
@@ -953,6 +978,8 @@ mod tests {
             Role::Progress,
             Role::Separator,
             Role::Tooltip,
+            Role::Grid,
+            Role::Cell,
         ] {
             assert!(!Node::<()>::new(Key(1), role).interactive(), "{role:?}");
         }
@@ -963,6 +990,8 @@ mod tests {
             Role::Radio,
             Role::MenuItem,
             Role::ComboBox,
+            Role::Row,
+            Role::ColumnHeader,
         ] {
             assert!(Node::<()>::new(Key(1), role).interactive(), "{role:?}");
         }

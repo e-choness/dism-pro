@@ -65,24 +65,25 @@ use windows_sys::{
         UI::{
             HiDpi::{AdjustWindowRectExForDpi, GetDpiForSystem, GetDpiForWindow},
             Input::KeyboardAndMouse::{
-                GetKeyState, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT,
-                TrackMouseEvent, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
+                GetDoubleClickTime, GetKeyState, ReleaseCapture, SetCapture, TME_LEAVE,
+                TRACKMOUSEEVENT, TrackMouseEvent, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
             },
             WindowsAndMessaging::{
                 CREATESTRUCTW, CW_USEDEFAULT, CreateWindowExW, DEVICE_NOTIFY_WINDOW_HANDLE,
                 DefWindowProcW, DestroyWindow, DispatchMessageW, GWLP_USERDATA, GetClientRect,
-                GetMessageW, GetWindowLongPtrW, HCURSOR, HTCLIENT, IDC_ARROW, IDC_IBEAM, KillTimer,
-                LoadCursorW, MINMAXINFO, MSG, PBT_POWERSETTINGCHANGE, PostQuitMessage,
-                RegisterClassExW, SIZE_MINIMIZED, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOMOVE,
+                GetMessageTime, GetMessageW, GetSystemMetrics, GetWindowLongPtrW, HCURSOR,
+                HTCLIENT, IDC_ARROW, IDC_IBEAM, KillTimer, LoadCursorW, MINMAXINFO, MSG,
+                PBT_POWERSETTINGCHANGE, PostQuitMessage, RegisterClassExW, SIZE_MINIMIZED,
+                SM_CXDOUBLECLK, SM_CYDOUBLECLK, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOMOVE,
                 SWP_NOZORDER, SetCursor, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
                 TranslateMessage, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_CREATE, WM_DESTROY,
                 WM_DPICHANGED, WM_DWMCOMPOSITIONCHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO,
                 WM_GETOBJECT, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP,
-                WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_PAINT,
-                WM_POWERBROADCAST, WM_SETCURSOR, WM_SETFOCUS, WM_SETTINGCHANGE, WM_SIZE,
-                WM_SYSCOLORCHANGE, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_THEMECHANGED, WM_TIMER,
-                WM_WTSSESSION_CHANGE, WNDCLASS_STYLES, WNDCLASSEXW, WS_EX_NOREDIRECTIONBITMAP,
-                WS_OVERLAPPEDWINDOW,
+                WM_MBUTTONDOWN, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE,
+                WM_NCDESTROY, WM_PAINT, WM_POWERBROADCAST, WM_RBUTTONDOWN, WM_SETCURSOR,
+                WM_SETFOCUS, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_SYSKEYDOWN,
+                WM_SYSKEYUP, WM_THEMECHANGED, WM_TIMER, WM_WTSSESSION_CHANGE, WM_XBUTTONDOWN,
+                WNDCLASS_STYLES, WNDCLASSEXW, WS_EX_NOREDIRECTIONBITMAP, WS_OVERLAPPEDWINDOW,
             },
         },
     },
@@ -924,7 +925,15 @@ impl State {
                 self.pressed.set(true);
                 // SAFETY: hwnd is live; WM_CAPTURECHANGED goes to the window losing the capture.
                 unsafe { SetCapture(hwnd) };
-                self.send(hwnd, Event::PointerDown(point(lp)));
+                let at = point(lp);
+                let double = double_click(hwnd, WM_LBUTTONDOWN, at);
+                let held = mods();
+                let mods = Mods {
+                    shift: wp & MK_SHIFT != 0,
+                    ctrl: wp & MK_CONTROL != 0,
+                    ..held
+                };
+                self.send(hwnd, Event::PointerDown { at, mods, double });
             }
             WM_LBUTTONUP => {
                 // Cleared first: releasing sends WM_CAPTURECHANGED, which must not cancel.
@@ -933,6 +942,12 @@ impl State {
                     unsafe { ReleaseCapture() };
                 }
                 self.send(hwnd, Event::PointerUp(point(lp)));
+            }
+            // The other buttons go the default way, but end a double-click: left, right, left is
+            // two clicks, not a double-click.
+            WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_XBUTTONDOWN => {
+                double_click(hwnd, msg, point(lp));
+                return None;
             }
             WM_CAPTURECHANGED => {
                 // Another window took the pointer mid-press: the press is cancelled.
@@ -1659,6 +1674,62 @@ fn signed(word: u32) -> i32 {
     if w >= 0x8000 { w - 0x1_0000 } else { w }
 }
 
+/// `WM_LBUTTONDOWN`'s `wParam` flags for Shift and Ctrl (WinUser.h's `MK_SHIFT`, `MK_CONTROL`).
+const MK_SHIFT: WPARAM = 0x0004;
+const MK_CONTROL: WPARAM = 0x0008;
+
+/// A button press that could begin a double-click.
+#[derive(Clone, Copy)]
+struct Press {
+    hwnd: HWND,
+    /// Its message: `WM_LBUTTONDOWN`, `WM_RBUTTONDOWN`, ...
+    button: u32,
+    at: PointPx,
+    /// Its message time.
+    time: i32,
+}
+
+thread_local! {
+    /// The last press on any of this thread's windows (the main window and its popups). A
+    /// double-click's second press clears it, so a third begins anew.
+    static LAST_PRESS: Cell<Option<Press>> = const { Cell::new(None) };
+}
+
+/// Whether `button` pressed at `at` on `hwnd`, now (the message's time), is a double-click's
+/// second, as Windows counts them: the same button on the same window as the last press on any
+/// of the thread's windows, within `GetDoubleClickTime` of it, and within the double-click
+/// rectangle (`SM_CXDOUBLECLK` by `SM_CYDOUBLECLK`) centered on it.
+fn double_click(hwnd: HWND, button: u32, at: PointPx) -> bool {
+    // SAFETY: no preconditions; the time of the message being handled.
+    let now = unsafe { GetMessageTime() };
+    // SAFETY: no preconditions.
+    let (limit, w, h) = unsafe {
+        (
+            GetDoubleClickTime(),
+            GetSystemMetrics(SM_CXDOUBLECLK),
+            GetSystemMetrics(SM_CYDOUBLECLK),
+        )
+    };
+    LAST_PRESS.with(|last| {
+        let double = last.get().is_some_and(|p| {
+            // Message times wrap after 49.7 days; the difference doesn't.
+            let elapsed = now.wrapping_sub(p.time).unsigned_abs();
+            p.hwnd == hwnd
+                && p.button == button
+                && elapsed <= limit
+                && 2 * (at.x - p.at.x).abs() <= w
+                && 2 * (at.y - p.at.y).abs() <= h
+        });
+        last.set((!double).then_some(Press {
+            hwnd,
+            button,
+            at,
+            time: now,
+        }));
+        double
+    })
+}
+
 fn point(lp: LPARAM) -> PointPx {
     PointPx {
         x: signed(low(lp)),
@@ -2130,6 +2201,99 @@ mod tests {
         drop(window);
         assert_eq!(Rc::strong_count(&events), 1);
         // Destroying it posted WM_QUIT; take it, so the next test's loop doesn't end at once.
+        // SAFETY: plain data; all-zero is a valid value.
+        let mut msg: MSG = unsafe { std::mem::zeroed() };
+        // SAFETY: msg is a live local; PM_REMOVE takes the message.
+        while unsafe { PeekMessageW(&raw mut msg, null_mut(), 0, 0, PM_REMOVE) } != 0 {}
+    }
+
+    /// TD-0009 A2.4, slice 5b1: a press carries the Shift and Ctrl that Windows sends with it
+    /// (`MK_SHIFT`, `MK_CONTROL`), and a second press within the double-click rectangle and time
+    /// is a double-click; a third starts over, as Windows counts them. The window has no
+    /// `CS_DBLCLKS`, so a popup's watch for presses outside it sees every press as a button-down.
+    ///
+    /// The presses are sent, not posted, so they all share the last queued message's time.
+    #[test]
+    fn a_press_carries_its_modifiers_and_a_quick_second_one_is_a_double_click() {
+        const MK_SHIFT: WPARAM = 0x0004;
+        const MK_CONTROL: WPARAM = 0x0008;
+        let (window, events, _) = open(0);
+        let press = |x: i16, y: i16, keys: WPARAM| {
+            let lp = (LPARAM::from(y) << 16) | LPARAM::from(x);
+            // SAFETY: messages sent to this test's live window, on its thread.
+            unsafe {
+                SendMessageW(window.hwnd, WM_LBUTTONDOWN, keys, lp);
+                SendMessageW(window.hwnd, WM_LBUTTONUP, 0, lp);
+            }
+        };
+        events.borrow_mut().clear();
+        press(10, 10, MK_CONTROL);
+        press(11, 10, MK_SHIFT);
+        press(11, 10, 0);
+        press(200, 10, 0);
+        press(10, 10, MK_SHIFT | MK_CONTROL);
+        let presses: Vec<(i32, bool, bool, bool)> = events
+            .borrow()
+            .iter()
+            .filter_map(|e| match *e {
+                Event::PointerDown { at, mods, double } => {
+                    Some((at.x, mods.shift, mods.ctrl, double))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            presses,
+            [
+                (10, false, true, false),
+                (11, true, false, true),
+                (11, false, false, false),
+                (200, false, false, false),
+                (10, true, true, false),
+            ],
+            "the last is too far from the one before"
+        );
+        drop(window);
+        // SAFETY: plain data; all-zero is a valid value.
+        let mut msg: MSG = unsafe { std::mem::zeroed() };
+        // SAFETY: msg is a live local; PM_REMOVE takes the message.
+        while unsafe { PeekMessageW(&raw mut msg, null_mut(), 0, 0, PM_REMOVE) } != 0 {}
+    }
+
+    /// Windows counts a double-click on one button: a right-click between two quick left ones,
+    /// on the same spot, makes them two clicks. (A left click on a row, a right-click for its
+    /// menu, and a left click to dismiss it mustn't open the row.)
+    #[test]
+    fn another_button_between_two_presses_ends_a_double_click() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::WM_RBUTTONUP;
+        let (window, events, _) = open(0);
+        let lp: LPARAM = (LPARAM::from(10_i16) << 16) | LPARAM::from(10_i16);
+        events.borrow_mut().clear();
+        // SAFETY: messages sent to this test's live window, on its thread.
+        unsafe {
+            SendMessageW(window.hwnd, WM_LBUTTONDOWN, 0, lp);
+            SendMessageW(window.hwnd, WM_LBUTTONUP, 0, lp);
+            SendMessageW(window.hwnd, WM_RBUTTONDOWN, 0, lp);
+            SendMessageW(window.hwnd, WM_RBUTTONUP, 0, lp);
+            SendMessageW(window.hwnd, WM_LBUTTONDOWN, 0, lp);
+            SendMessageW(window.hwnd, WM_LBUTTONUP, 0, lp);
+            SendMessageW(window.hwnd, WM_LBUTTONDOWN, 0, lp);
+            SendMessageW(window.hwnd, WM_LBUTTONUP, 0, lp);
+        }
+        let doubles: Vec<bool> = events
+            .borrow()
+            .iter()
+            .filter_map(|e| match *e {
+                Event::PointerDown { double, .. } => Some(double),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            doubles,
+            [false, false, true],
+            "the third is the second's double"
+        );
+        drop(window);
         // SAFETY: plain data; all-zero is a valid value.
         let mut msg: MSG = unsafe { std::mem::zeroed() };
         // SAFETY: msg is a live local; PM_REMOVE takes the message.

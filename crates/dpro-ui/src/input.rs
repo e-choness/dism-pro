@@ -29,6 +29,8 @@
 //!   slides off pauses it, back to the start; letting go, focus moving, the button going away
 //!   or being disabled, or the window going inactive ends it. It never activates any other way
 //!   but through UI Automation, whose Invoke sends its other message (§8).
+//! - **Tables** (`table.rs`): a table row takes its own keys and clicks, which become the table's
+//!   events: a press's modifiers and a double-click say which.
 //! - **Fields** take a press as a caret position and a drag as a selection; they never activate,
 //!   and show no hover highlight.
 //! - **Animations:** hover fades over [`Motion::hover_ms`](crate::Motion) with an ease-out curve
@@ -46,7 +48,15 @@ use crate::{
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Input {
     PointerMove(Point),
+    /// A press with no modifiers, not a double-click: [`Input::Press`] as most tests send it.
     PointerDown(Point),
+    /// The primary button went down (`WM_LBUTTONDOWN`), with the Shift and Ctrl held (a table's
+    /// Ctrl+click and Shift+click), and whether it's a double-click's second press.
+    Press {
+        at: Point,
+        mods: Mods,
+        double: bool,
+    },
     PointerUp(Point),
     /// The pointer left the window (`WM_MOUSELEAVE`), or the window lost it mid-press
     /// (`WM_CAPTURECHANGED`: Windows sends no leave while a press holds the capture). A pointer
@@ -117,7 +127,10 @@ impl<M: Clone> Ui<M> {
     /// used it; a key it didn't use goes on to the caller's accelerators and then the system.
     pub fn dispatch(&mut self, input: Input, out: &mut Vec<M>) -> bool {
         self.pointer = match input {
-            Input::PointerMove(p) | Input::PointerDown(p) | Input::PointerUp(p) => Some(p),
+            Input::PointerMove(p)
+            | Input::PointerDown(p)
+            | Input::PointerUp(p)
+            | Input::Press { at: p, .. } => Some(p),
             Input::PointerLeave => None,
             Input::Key(_) | Input::Char(_) | Input::ContextMenu(_) | Input::Wheel { .. } => {
                 self.pointer
@@ -160,7 +173,8 @@ impl<M: Clone> Ui<M> {
                 self.pointer_over(NIL)
             }
             Input::ContextMenu(at) => self.context_request(at, out),
-            Input::PointerDown(p) => self.pointer_down(p),
+            Input::PointerDown(p) => self.pointer_down(p, Mods::default(), false),
+            Input::Press { at, mods, double } => self.pointer_down(at, mods, double),
             Input::PointerUp(p) => self.pointer_up(p, out),
             Input::Key(k) => {
                 let before = self.focus;
@@ -200,7 +214,12 @@ impl<M: Clone> Ui<M> {
         }
     }
 
-    fn pointer_down(&mut self, p: Point) -> bool {
+    fn pointer_down(&mut self, p: Point, mods: Mods, double: bool) -> bool {
+        self.press = crate::table::Press {
+            at: p,
+            mods,
+            double,
+        };
         // A press on a scroll bar's strip drags its thumb or pages (A2.4).
         if self.scroll_press(p) {
             self.tip_cancel(true);
@@ -214,8 +233,15 @@ impl<M: Clone> Ui<M> {
             return false;
         }
         self.pressed = hit;
-        // Focus from the pointer scrolls nothing: the node stays under the pointer.
-        self.focus_node(hit);
+        // Focus from the pointer scrolls nothing: the node stays under the pointer. A press on a
+        // table's row focuses its current row, which the keys act on: the click makes the
+        // pressed row current, and focus follows it then; a press that ends elsewhere leaves
+        // both where they were.
+        let to = self
+            .row_place(hit)
+            .and_then(|(t, _)| self.current_row_node(t))
+            .unwrap_or(hit);
+        self.focus_node(to);
         if self.is_field(hit) {
             self.field_pointer(hit, p, false);
         } else {
@@ -259,12 +285,21 @@ impl<M: Clone> Ui<M> {
             target
         };
         if hit == to && !held && !self.is_field(to) {
-            self.activate(to, out);
+            if self.nodes[to as usize].role == Role::Row {
+                // A table's row: its click is the table's.
+                self.row_click(to, out);
+            } else {
+                self.activate(to, out);
+            }
         }
         true
     }
 
     fn key(&mut self, k: KeyEvent, out: &mut Vec<M>) -> bool {
+        // A focused table row takes its keys first (A2.5).
+        if let Some(used) = self.table_key(k, out) {
+            return used;
+        }
         // What nothing else used may scroll the viewport holding the focus (A2.4).
         self.control_key(k, out) || self.scroll_key(k)
     }
@@ -426,6 +461,10 @@ impl<M: Clone> Ui<M> {
         else {
             return false;
         };
+        // A table's rows move its current row instead (`table.rs`).
+        if group == Group::Rows {
+            return false;
+        }
         let row = axis == crate::Axis::Row;
         let step = match key {
             KeyCode::Home => Rove::First,
@@ -641,8 +680,12 @@ impl<M> Ui<M> {
         }
     }
 
-    /// Where Tab lands in group `g`: its picked item, else its first (`forward`) or last.
+    /// Where Tab lands in group `g`: its picked item, else its first (`forward`) or last. A
+    /// table's rows are built half a view past it: there it's [`Ui::table_entry`].
     fn group_entry(&self, g: u32, forward: bool) -> u32 {
+        if let Some(row) = self.table_entry(g) {
+            return row;
+        }
         let mut c = self.nodes[g as usize].first;
         while c != NIL {
             let n = &self.nodes[c as usize];

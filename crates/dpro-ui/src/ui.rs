@@ -12,6 +12,7 @@ use crate::{
     layout::Shown,
     pool::TextPool,
     scroll::{Drag, Scroll},
+    table::{Press, TableState},
     tooltip::Tip,
     tree::{Key, NIL, Node, NodeId, NodeInfo, Role},
 };
@@ -126,6 +127,16 @@ pub struct Ui<M> {
     pub(crate) reveal_after: u32,
     /// While layout runs, where the subtree it's arranging shows (`layout.rs`).
     pub(crate) shown: Shown,
+    /// Data tables' state, by their rows' viewport's `table` slot; freed slots are reused
+    /// (`table.rs`).
+    pub(crate) tables: Vec<TableState<M>>,
+    pub(crate) free_tables: Vec<u32>,
+    /// A table row's cells as the view gives them, while it's built: their text end to end, and
+    /// where each ends. Kept, so a warm table builds without allocating.
+    pub(crate) cell_text: String,
+    pub(crate) cell_ends: Vec<usize>,
+    /// The last press: where, with which modifiers, and whether it was a double-click's second.
+    pub(crate) press: Press,
 }
 
 /// A node's tooltip, and a dropdown's accessible name and step: in a side table, so the nodes
@@ -223,6 +234,11 @@ impl<M> Ui<M> {
             bar_hot: None,
             reveal_after: NIL,
             shown: Shown::default(),
+            tables: Vec::new(),
+            free_tables: Vec::new(),
+            cell_text: String::new(),
+            cell_ends: Vec::new(),
+            press: Press::default(),
         };
         ui.damage_all();
         ui

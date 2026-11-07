@@ -12,6 +12,7 @@
 use crate::{
     field::TextEdit,
     pool::capacity_for,
+    table::sort_value,
     text::TextStyle,
     tree::{Element, Extra, NIL, NodeId, Role, rare},
     ui::{HoldSlot, ROOT, Side, Ui},
@@ -20,10 +21,10 @@ use crate::{
 /// Builds one parent's children for this frame.
 #[derive(Debug)]
 pub struct Cx<'u, M> {
-    ui: &'u mut Ui<M>,
-    parent: u32,
+    pub(crate) ui: &'u mut Ui<M>,
+    pub(crate) parent: u32,
     /// The first retained child not matched yet; everything before it is this frame's.
-    next: u32,
+    pub(crate) next: u32,
 }
 
 impl<M> Ui<M> {
@@ -71,7 +72,17 @@ impl<M> Cx<'_, M> {
         self.id(i)
     }
 
-    fn id(&self, i: u32) -> NodeId {
+    /// Builds node `i`'s children: the rest of this frame's description goes under it.
+    pub(crate) fn child(&mut self, i: u32) -> Cx<'_, M> {
+        let next = self.ui.nodes[i as usize].first;
+        Cx {
+            ui: &mut *self.ui,
+            parent: i,
+            next,
+        }
+    }
+
+    pub(crate) fn id(&self, i: u32) -> NodeId {
         NodeId {
             index: i,
             generation: self.ui.nodes[i as usize].generation,
@@ -80,7 +91,7 @@ impl<M> Cx<'_, M> {
 
     /// Matches, moves or creates the node for `el` at the cursor, and updates it.
     #[inline]
-    fn place(&mut self, el: Element<'_, M>) -> u32 {
+    pub(crate) fn place(&mut self, el: Element<'_, M>) -> u32 {
         let ui = &mut *self.ui;
         let matches = |ui: &Ui<M>, c: u32| {
             let n = &ui.nodes[c as usize];
@@ -126,7 +137,7 @@ impl<M> Cx<'_, M> {
     }
 
     /// Removes the children no description matched.
-    fn finish(self) {
+    pub(crate) fn finish(self) {
         let mut c = self.next;
         while c != NIL {
             let next = self.ui.nodes[c as usize].next;
@@ -265,14 +276,16 @@ impl<M> Ui<M> {
         seen
     }
 
-    /// Copies a group, a progress bar's value or a hold button's Invoke message into node `i`,
-    /// clearing what it had of the others. Returns whether a client sees a change, and whether
-    /// it shows.
+    /// Copies a group, a progress bar's value, a column header's sort or a hold button's Invoke
+    /// message into node `i`, clearing what it had of the others. Returns whether a client sees a
+    /// change, and whether it shows.
     fn update_extra(&mut self, i: u32, extra: Extra<'_, M>) -> (bool, bool) {
         let (group, value, invoke) = match extra {
             Extra::Group(g) => (Some(g), 0.0, None),
             Extra::Progress(v) => (None, v, None),
             Extra::Hold(m) => (None, 0.0, Some(m)),
+            // A column header's sort is its value: a client reads it, and its glyph shows it.
+            Extra::Sort(order) => (None, sort_value(order), None),
             Extra::None | Extra::Field { .. } | Extra::Combo { .. } => (None, 0.0, None),
         };
         let n = &mut self.nodes[i as usize];

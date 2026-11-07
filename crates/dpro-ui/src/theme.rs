@@ -460,6 +460,24 @@ pub mod tokens {
         /// (a proposal for design, TD-0009 §13).
         pub const INSET: f32 = 2.0;
     }
+
+    /// The data table (TD-0009 A2.10 item 2: proposals for design until the canvas's artboard 08
+    /// gives them; the canvas wins).
+    pub mod table {
+        /// A row's least height, and the header's.
+        pub const ROW: f32 = 36.0;
+        /// Above and below a row's text: a row is its line and these, at least [`ROW`].
+        pub const ROW_PAD_Y: f32 = 9.0;
+        /// A cell's text from its sides.
+        pub const CELL_PAD_X: f32 = 12.0;
+        /// The column headers' text size.
+        pub const HEADER_TEXT: f32 = 12.0;
+        /// The check column's width.
+        pub const CHECK_COL: f32 = 28.0;
+        /// The empty table's status line from the view's edge, and its action from it.
+        pub const STATUS_PAD: f32 = 16.0;
+        pub const STATUS_GAP: f32 = 8.0;
+    }
 }
 
 #[cfg(test)]
