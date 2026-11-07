@@ -107,11 +107,13 @@ impl<M> Cx<'_, M> {
                 ui.mark_dirty(self.parent);
                 ui.a11y_touch(i);
                 ui.a11y_touch(self.parent);
+                if el.role.interactive() {
+                    ui.stop_changed(i);
+                }
                 i
             } else {
                 // Moved: its old place is damaged, and layout finds its new one.
-                let rect = ui.nodes[found as usize].rect;
-                ui.damage_rect(rect);
+                ui.damage_view(found);
                 ui.unlink(found);
                 ui.link_before(self.parent, found, self.next);
                 ui.mark_dirty(self.parent);
@@ -190,6 +192,9 @@ impl<M> Ui<M> {
             n.enabled = el.enabled;
             if !el.enabled {
                 self.lose_input(i);
+            }
+            if self.nodes[i as usize].role.interactive() {
+                self.stop_changed(i);
             }
         }
         if rare != 0 {
@@ -290,6 +295,7 @@ impl<M> Ui<M> {
     #[inline(never)]
     fn update_rare(&mut self, i: u32, r: u8, tip: &str, extra: Extra<'_, M>) -> bool {
         let n = &mut self.nodes[i as usize];
+        let scrolled = (n.rare | r) & rare::SCROLL != 0;
         n.rare = r;
         n.context = r & rare::CONTEXT != 0;
         // Whether its popup is open: a client sees it (ExpandCollapse).
@@ -302,6 +308,9 @@ impl<M> Ui<M> {
         };
         if n.side != NIL || !tip.is_empty() || !label.is_empty() || step.is_some() {
             seen |= self.update_side(i, tip, label, step);
+        }
+        if scrolled {
+            seen |= self.update_scroll(i, r);
         }
         seen
     }

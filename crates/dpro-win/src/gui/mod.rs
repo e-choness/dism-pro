@@ -192,6 +192,16 @@ pub enum Event {
     /// A context menu was asked for (`WM_CONTEXTMENU`): a right-click at a point in the client
     /// area, or the keyboard (`None`: Shift+F10, the Menu key).
     ContextMenu(Option<PointPx>),
+    /// The wheel turned (`WM_MOUSEWHEEL`, `WM_MOUSEHWHEEL`) with the pointer at a point in this
+    /// surface's client area: `delta` in 120ths of a notch, positive away from the user, or with
+    /// `horizontal` to the right. It goes to the surface under the pointer, whichever window
+    /// Windows sent it to (the one under the pointer, or with *Scroll inactive windows* off the
+    /// focused one); one outside them all reaches nobody.
+    Wheel {
+        delta: i32,
+        horizontal: bool,
+        at: PointPx,
+    },
     /// The popup this event is for must close: a click outside it, another window activated, the
     /// main window moving, resizing, minimizing or changing DPI, or its presenter lost. The
     /// handler hides it ([`WindowCx::hide_popup`]).

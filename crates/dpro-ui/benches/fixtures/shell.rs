@@ -2,9 +2,10 @@
 //!
 //! A header, a rail of 12 pages, a toolbar (the filter, two tabs and 4 category check boxes), and
 //! a table of 40 rows × 8 cells over 1,000 data rows; the drawer adds 20 rows, a progress bar and
-//! its actions, Hold to apply among them. §7 estimates a real page at about 600 nodes. Pages 1 to
-//! 10 show 8 summary cards instead of the toolbar and table, so switching pages replaces the
-//! content, and Settings (the last) shows a radio group and the Start page dropdown.
+//! its actions, Hold to apply among them. The table scrolls (TD-0009 A2, slice 5a): its 40 rows of
+//! 32 px are taller than the window. §7 estimates a real page at about 600 nodes. Pages 1 to 10
+//! show 8 summary cards instead of the toolbar and table, so switching pages replaces the content,
+//! and Settings (the last) shows a radio group and the Start page dropdown.
 //!
 //! Popups (TD-0009 A1): a row's context menu (5 items and a separator, the last item disabled
 //! with a tooltip saying why), the Start page dropdown's list, and tooltips on the header's
@@ -20,9 +21,10 @@
 use std::sync::OnceLock;
 
 use dpro_ui::{
-    Align, Axis, Canvas, ClipboardRequest, Cx, Dim, Element, FakeText, Input, Insets, Justify, Key,
-    KeyCode, KeyEvent, Look, Mods, Motion, Point, Popup, PopupKind, Radius, Size, Style, TextEdit,
-    TextStyle, Theme, Tone, Tri, Ui, accesskit::TreeUpdate, tokens,
+    Align, Axes, Axis, Canvas, ClipboardRequest, Cx, Dim, Element, FakeText, Input, Insets,
+    Justify, Key, KeyCode, KeyEvent, Look, Mods, Motion, Point, Popup, PopupKind, Radius,
+    ScrollBar, Size, Style, TextEdit, TextStyle, Theme, Tone, Tri, Ui, accesskit::TreeUpdate,
+    tokens,
 };
 
 const RAIL: u8 = 12;
@@ -543,7 +545,7 @@ fn content(s: &Shell, cx: &mut Cx<'_, Msg>) {
                 toolbar(s, cx);
             });
             cx.add_with(
-                Element::stack(Key::name("table"))
+                Element::scroll(Key::name("table"), Axes::Y)
                     .style(Style {
                         grow: 1.0,
                         padding: Insets::all(4.0),
@@ -930,6 +932,13 @@ impl Run {
     pub(crate) fn step(&mut self, step: Step) {
         match step {
             Step::Input(input) => {
+                // A wheel over the window closes its popup, as its anchor may move (A2.4).
+                if matches!(input, Input::Wheel { .. })
+                    && self.popup_open
+                    && let Some(open) = self.shell.popup()
+                {
+                    self.msgs.push(open.on_close);
+                }
                 self.ui.dispatch(input, &mut self.msgs);
                 self.clipboard();
             }
@@ -1112,6 +1121,9 @@ impl Run {
         let opening = !self.popup_open;
         let shell = &self.shell;
         self.popup.build(|cx| popup_view(shell, cx));
+        let size = self.popup.natural_size(&mut self.text, START.w);
+        self.popup.set_viewport(size);
+        self.popup.layout(&mut self.text);
         if opening {
             let keyboard = self.ui.focus_visible();
             if keyboard || open.kind == PopupKind::List {
@@ -1122,11 +1134,6 @@ impl Run {
             self.ui.set_active(false);
             self.popup.set_active(true);
             self.popup_open = true;
-        }
-        let size = self.popup.natural_size(&mut self.text, START.w);
-        self.popup.set_viewport(size);
-        self.popup.layout(&mut self.text);
-        if opening {
             self.popup.repaint_all();
         }
     }
@@ -1198,6 +1205,10 @@ impl Run {
 
     /// The header's drawer button's path from the root.
     pub(crate) const DRAWER_BUTTON: [Key; 2] = [Key::name("header"), Key::name("drawer")];
+
+    /// The table's path from the root, on the first page: a scroll viewport.
+    pub(crate) const TABLE: [Key; 3] =
+        [Key::name("body"), Key::name("content"), Key::name("table")];
 
     /// Data row `r`'s path from the root, while it's shown on the first page.
     pub(crate) fn row(r: u64) -> [Key; 4] {
@@ -1296,12 +1307,56 @@ impl Run {
         run
     }
 
-    /// TD-0009 §7's session: a hover sweep over the rail, Tab through the shell, a click into the
-    /// filter, typing 10 characters into it and clearing it with Ctrl+A and Backspace, opening the
-    /// drawer, pressing Hold to apply for three frames and letting go early, two progress reports,
-    /// closing the drawer, toggling a category on and off, clicking the second tab and going back
-    /// with Left, and a resize from 1000 to 1400 px and back. It ends where it started, so it can
-    /// repeat.
+    /// The pointer resting on the table, its hover settled: where a wheel scrolls it.
+    pub(crate) fn over_table(mut self) -> Self {
+        let at = self.center(&Self::TABLE);
+        self.step(Step::Input(Input::PointerMove(at)));
+        self.settle();
+        self
+    }
+
+    /// A notch of the wheel, `delta` (120 away from the user, -120 toward), at the table's center.
+    pub(crate) fn table_wheel(&self, delta: i32) -> Step {
+        wheel(self.center(&Self::TABLE), delta)
+    }
+
+    /// The table's vertical bar, if its content overflows.
+    pub(crate) fn table_bar(&self) -> Option<ScrollBar> {
+        let id = self.ui.find(&Self::TABLE)?;
+        self.ui.info(id)?.scroll?.bar_y
+    }
+
+    /// The pointer on the table's bar, so it's expanded, then pressed on its thumb: a thumb drag
+    /// begun, nothing animating.
+    pub(crate) fn thumb_grabbed(mut self) -> Self {
+        let strip = self
+            .table_bar()
+            .map_or(Point::default(), |b| b.track.center());
+        self.step(Step::Input(Input::PointerMove(strip)));
+        self.settle();
+        let thumb = self
+            .table_bar()
+            .map_or(Point::default(), |b| b.thumb.center());
+        self.step(Step::Input(Input::PointerMove(thumb)));
+        self.step(Step::Input(Input::PointerDown(thumb)));
+        self.settle();
+        self
+    }
+
+    /// While [`thumb_grabbed`](Self::thumb_grabbed), the pointer `dy` below where it pressed.
+    pub(crate) fn thumb_moved(&self, dy: f32) -> Step {
+        let at = self
+            .table_bar()
+            .map_or(Point::default(), |b| b.thumb.center());
+        Step::Input(Input::PointerMove(Point { y: at.y + dy, ..at }))
+    }
+
+    /// TD-0009 §7's session: a hover sweep over the rail, two wheel notches down the table and two
+    /// back (A2, slice 5a), Tab through the shell, a click into the filter, typing 10 characters
+    /// into it and clearing it with Ctrl+A and Backspace, opening the drawer, pressing Hold to
+    /// apply for three frames and letting go early, two progress reports, closing the drawer,
+    /// toggling a category on and off, clicking the second tab and going back with Left, and a
+    /// resize from 1000 to 1400 px and back. It ends where it started, so it can repeat.
     pub(crate) fn session(&self) -> Vec<Step> {
         let plain = |code, down| key(code, down, Mods::default());
         let body = [Key::name("body")];
@@ -1309,6 +1364,12 @@ impl Run {
         for p in 0..u64::from(RAIL) {
             let at = self.center(&[body[0], Key::name("rail"), Key::index(p)]);
             steps.push(Step::Input(Input::PointerMove(at)));
+        }
+        steps.push(Step::Input(Input::PointerLeave));
+        let table = self.center(&Self::TABLE);
+        steps.push(Step::Input(Input::PointerMove(table)));
+        for delta in [-120, -120, 120, 120] {
+            steps.push(wheel(table, delta));
         }
         steps.push(Step::Input(Input::PointerLeave));
         for _ in 0..20 {
@@ -1344,6 +1405,16 @@ impl Run {
         }
         steps
     }
+}
+
+/// A notch of the vertical wheel at `at`: `delta` 120 is away from the user (up the content), -120
+/// toward.
+pub(crate) fn wheel(at: Point, delta: i32) -> Step {
+    Step::Input(Input::Wheel {
+        at,
+        delta,
+        horizontal: false,
+    })
 }
 
 /// A press and release at `p`.

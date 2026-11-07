@@ -58,15 +58,15 @@ use windows_sys::{
                 GetActiveWindow, GetCapture, ReleaseCapture, SetActiveWindow,
             },
             WindowsAndMessaging::{
-                CS_DROPSHADOW, CreateWindowExW, DefWindowProcW, HTCLIENT, HTTRANSPARENT, HWND_TOP,
-                MA_ACTIVATEANDEAT, MA_NOACTIVATE, PostMessageW, SC_CLOSE, SW_HIDE,
-                SW_PARENTOPENING, SW_SHOW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SendMessageW,
-                SetCursor, SetWindowPos, ShowWindow, WA_INACTIVE, WM_ACTIVATE, WM_CANCELMODE,
-                WM_CONTEXTMENU, WM_CREATE, WM_DPICHANGED, WM_GETMINMAXINFO, WM_LBUTTONDOWN,
-                WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEACTIVATE, WM_MOVE,
-                WM_NCACTIVATE, WM_NCHITTEST, WM_POWERBROADCAST, WM_RBUTTONDOWN, WM_RBUTTONUP,
-                WM_SETCURSOR, WM_SETTINGCHANGE, WM_SHOWWINDOW, WM_SYSCOLORCHANGE, WM_SYSCOMMAND,
-                WM_THEMECHANGED, WM_WTSSESSION_CHANGE, WM_XBUTTONDOWN, WM_XBUTTONUP,
+                CS_DROPSHADOW, CreateWindowExW, DefWindowProcW, GetClientRect, HTCLIENT,
+                HTTRANSPARENT, HWND_TOP, MA_ACTIVATEANDEAT, MA_NOACTIVATE, PostMessageW, SC_CLOSE,
+                SW_HIDE, SW_PARENTOPENING, SW_SHOW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE,
+                SendMessageW, SetCursor, SetWindowPos, ShowWindow, WA_INACTIVE, WM_ACTIVATE,
+                WM_CANCELMODE, WM_CONTEXTMENU, WM_CREATE, WM_DPICHANGED, WM_GETMINMAXINFO,
+                WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEACTIVATE,
+                WM_MOVE, WM_NCACTIVATE, WM_NCHITTEST, WM_POWERBROADCAST, WM_RBUTTONDOWN,
+                WM_RBUTTONUP, WM_SETCURSOR, WM_SETTINGCHANGE, WM_SHOWWINDOW, WM_SYSCOLORCHANGE,
+                WM_SYSCOMMAND, WM_THEMECHANGED, WM_WTSSESSION_CHANGE, WM_XBUTTONDOWN, WM_XBUTTONUP,
                 WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_POPUP,
             },
         },
@@ -599,6 +599,36 @@ impl State {
         (inside(pt.x, size.w) && inside(pt.y, size.h)).then_some(Some(PointPx { x: pt.x, y: pt.y }))
     }
 
+    /// On a main window's state: a wheel turned (`WM_MOUSEWHEEL`, or `WM_MOUSEHWHEEL` if
+    /// `horizontal`), sent to `hwnd` or one of its popups. The surface under the pointer hears
+    /// it in its client pixels: a shown menu or list, else the window's client area. A tooltip
+    /// is never under it, as clicks pass through it too.
+    pub(super) fn wheel(&self, hwnd: HWND, horizontal: bool, wp: WPARAM, lp: LPARAM) {
+        // GET_WHEEL_DELTA_WPARAM: the high word, signed.
+        let word = u16::try_from((wp >> 16) & 0xFFFF).unwrap_or(0);
+        let delta = i32::from(word.cast_signed());
+        let screen = point(lp);
+        let event = |at: PointPx| Event::Wheel {
+            delta,
+            horizontal,
+            at,
+        };
+        for kind in [PopupKind::Menu, PopupKind::List] {
+            if !self.popups.shown(kind) {
+                continue;
+            }
+            if let Some(popup) = self.popups.hwnd(kind)
+                && let Some(at) = client_point(popup, screen)
+            {
+                self.dispatch_as(hwnd, Surface::Popup(kind), |h, cx| h.event(event(at), cx));
+                return;
+            }
+        }
+        if let Some(at) = client_point(hwnd, screen) {
+            self.send(hwnd, event(at));
+        }
+    }
+
     /// Every shown popup must close: the handler hears [`Event::Dismiss`] for each.
     pub(super) fn dismiss_popups(&self, hwnd: HWND) {
         for kind in PopupKind::ALL {
@@ -809,6 +839,27 @@ fn work_area(r: RectPx, fallback: u32) -> (RectPx, u32) {
         }
     };
     (work, monitor_dpi(monitor).unwrap_or(fallback))
+}
+
+/// `screen` (screen pixels) in `hwnd`'s client pixels, if it's in its client area.
+fn client_point(hwnd: HWND, screen: PointPx) -> Option<PointPx> {
+    let mut pt = POINT {
+        x: screen.x,
+        y: screen.y,
+    };
+    let mut client = RECT {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    // SAFETY: hwnd is a live window of this thread, and both out-pointers are live locals.
+    let ok = unsafe {
+        ScreenToClient(hwnd, &raw mut pt) != 0 && GetClientRect(hwnd, &raw mut client) != 0
+    };
+    let inside = |v: i32, end: i32| (0..end).contains(&v);
+    (ok && inside(pt.x, client.right) && inside(pt.y, client.bottom))
+        .then_some(PointPx { x: pt.x, y: pt.y })
 }
 
 type GetDpiForMonitor = unsafe extern "system" fn(HMONITOR, i32, *mut u32, *mut u32) -> HRESULT;
@@ -1259,6 +1310,88 @@ mod tests {
         // SAFETY: as above.
         unsafe { SendMessageW(window.hwnd, WM_CONTEXTMENU, wp, lparam(screen(-40, -40))) };
         assert_eq!(log.borrow().len(), before, "the title bar's");
+        drop(window);
+        drain();
+    }
+
+    /// T2 (TD-0009 A2.5, slice 5a): `WM_MOUSEWHEEL` and `WM_MOUSEHWHEEL` reach the surface under
+    /// the pointer as [`Event::Wheel`] in its client pixels, whichever of them Windows sent them
+    /// to: the window under the pointer, or with "Scroll inactive windows" off the focused one (an
+    /// open list). Both are handled, so `DefWindowProc` never passes them on to an owner again.
+    #[test]
+    fn wheels_reach_the_surface_under_the_pointer() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{WM_MOUSEHWHEEL, WM_MOUSEWHEEL};
+
+        let (window, log, _) = open();
+        let lparam = |p: POINT| {
+            let word = |v: i32| v.cast_unsigned() & 0xFFFF;
+            LPARAM::try_from((word(p.y) << 16) | word(p.x)).unwrap_or(0)
+        };
+        // The delta is wParam's high word, signed; its low word is the buttons and keys held.
+        let wparam = |delta: i16| WPARAM::from(delta.cast_unsigned()) << 16;
+        let screen = |hwnd: HWND, x: i32, y: i32| {
+            let mut p = POINT { x, y };
+            // SAFETY: a live window of the test's, and a live local.
+            unsafe { ClientToScreen(hwnd, &raw mut p) };
+            p
+        };
+        let wheel = |delta: i32, horizontal: bool, x: i32, y: i32| Event::Wheel {
+            delta,
+            horizontal,
+            at: PointPx { x, y },
+        };
+        let main = window.hwnd;
+        let to = |hwnd: HWND, msg: u32, delta: i16, at: POINT| {
+            // SAFETY: a message sent to one of the test's live windows, on their thread.
+            unsafe { SendMessageW(hwnd, msg, wparam(delta), lparam(at)) }
+        };
+        assert_eq!(
+            to(main, WM_MOUSEWHEEL, -120, screen(main, 10, 12)),
+            0,
+            "handled"
+        );
+        assert_eq!(
+            heard(&log, Surface::Main, wheel(-120, false, 10, 12)),
+            1,
+            "{:?}",
+            log.borrow()
+        );
+        assert_eq!(to(main, WM_MOUSEHWHEEL, 30, screen(main, 20, 30)), 0);
+        assert_eq!(heard(&log, Surface::Main, wheel(30, true, 20, 30)), 1);
+
+        // Over an open list, the list's; over the owner beside it, the owner's. The list covers
+        // the owner's right side, clear of the owner's point below.
+        let o = screen(main, 150, 40);
+        as_handler(&window, |cx| {
+            let at = rect(o.x, o.y, o.x + 150, o.y + 140);
+            cx.show_popup(PopupKind::List, at, Backdrop::None);
+        });
+        let list = popup(&window, PopupKind::List).expect("the list's window");
+        let in_list = Surface::Popup(PopupKind::List);
+        to(list, WM_MOUSEWHEEL, 120, screen(list, 5, 6));
+        assert_eq!(
+            heard(&log, in_list, wheel(120, false, 5, 6)),
+            1,
+            "{:?}",
+            log.borrow()
+        );
+        to(list, WM_MOUSEWHEEL, -240, screen(main, 15, 16));
+        assert_eq!(
+            heard(&log, Surface::Main, wheel(-240, false, 15, 16)),
+            1,
+            "{:?}",
+            log.borrow()
+        );
+        assert_eq!(heard(&log, in_list, wheel(-240, false, 15, 16)), 0);
+
+        // Outside both (the title bar, another window): nobody's.
+        let before = log.borrow().len();
+        to(main, WM_MOUSEWHEEL, 120, screen(main, -40, -40));
+        let wheels = log.borrow()[before..]
+            .iter()
+            .filter(|(_, e)| matches!(e, Event::Wheel { .. }))
+            .count();
+        assert_eq!(wheels, 0);
         drop(window);
         drain();
     }

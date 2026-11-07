@@ -78,10 +78,11 @@ use windows_sys::{
                 TranslateMessage, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_CREATE, WM_DESTROY,
                 WM_DPICHANGED, WM_DWMCOMPOSITIONCHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO,
                 WM_GETOBJECT, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP,
-                WM_MOUSEMOVE, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_POWERBROADCAST, WM_SETCURSOR,
-                WM_SETFOCUS, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_SYSKEYDOWN,
-                WM_SYSKEYUP, WM_THEMECHANGED, WM_TIMER, WM_WTSSESSION_CHANGE, WNDCLASS_STYLES,
-                WNDCLASSEXW, WS_EX_NOREDIRECTIONBITMAP, WS_OVERLAPPEDWINDOW,
+                WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_PAINT,
+                WM_POWERBROADCAST, WM_SETCURSOR, WM_SETFOCUS, WM_SETTINGCHANGE, WM_SIZE,
+                WM_SYSCOLORCHANGE, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_THEMECHANGED, WM_TIMER,
+                WM_WTSSESSION_CHANGE, WNDCLASS_STYLES, WNDCLASSEXW, WS_EX_NOREDIRECTIONBITMAP,
+                WS_OVERLAPPEDWINDOW,
             },
         },
     },
@@ -909,6 +910,15 @@ impl State {
                 if !self.pressed.get() {
                     self.send(hwnd, Event::PointerLeave);
                 }
+            }
+            // The surface under the pointer hears it; handled either way, so DefWindowProc never
+            // passes it on to an owner as well.
+            WM_MOUSEWHEEL | WM_MOUSEHWHEEL => {
+                let main = match self.kind {
+                    Kind::Main => hwnd,
+                    Kind::Popup { owner, .. } => owner,
+                };
+                self.with_owner(|o| o.wheel(main, msg == WM_MOUSEHWHEEL, wp, lp));
             }
             WM_LBUTTONDOWN => {
                 self.pressed.set(true);

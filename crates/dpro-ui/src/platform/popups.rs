@@ -257,6 +257,15 @@ impl<P: Model> Host<P> {
             Event::PointerUp(p) => Input::PointerUp(at(p)),
             Event::PointerLeave => Input::PointerLeave,
             Event::Char(c) => Input::Char(c),
+            Event::Wheel {
+                delta,
+                horizontal,
+                at: p,
+            } => Input::Wheel {
+                at: at(p),
+                delta,
+                horizontal,
+            },
             Event::Key { vk, down, mods } => {
                 let key = key_code(vk);
                 if down && closes(kind, key, mods.alt) {
@@ -325,15 +334,18 @@ impl<P: Model> Host<P> {
         }
         let model = &self.model;
         layer.ui.build(|c| model.popup_view(c));
+        let rect = layer.fit(self.text.as_mut(), Placement::Below, tokens::MAX_HEIGHT);
+        layer.ui.layout(self.text.as_mut());
         if opening {
             // A list shows where its value is; a menu opened by the pointer waits for a move.
+            // After layout, so a list taller than its window scrolls to the option from where
+            // this open placed it, and before the window shows, so a client sees it focused.
             if keyboard || kind == gui::PopupKind::List {
                 layer.ui.focus_first(keyboard);
             } else {
                 layer.ui.set_focus(None);
             }
         }
-        let rect = layer.fit(self.text.as_mut(), Placement::Below, tokens::MAX_HEIGHT);
         // Shown again when it moves, and when the main window goes glass or solid under it.
         if opening || rect != layer.rect || backdrop != layer.backdrop {
             layer.rect = rect;
@@ -341,7 +353,6 @@ impl<P: Model> Host<P> {
             layer.shown = true;
             cx.show_popup(kind, rect, backdrop);
         }
-        layer.ui.layout(self.text.as_mut());
         if opening {
             // The window may be one kept from an earlier open: none of its pixels are this one's.
             layer.ui.repaint_all();

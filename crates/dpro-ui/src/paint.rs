@@ -22,6 +22,10 @@
 //!   Windows' menus; separators: a hairline across the middle;
 //! - dropdowns: as a button, their value from the start and a chevron at the end;
 //! - tooltips: their text, wrapped, from the start;
+//! - scroll viewports (TD-0009 A2): their content moved by the offset, in whole pixels, and
+//!   clipped to them; then their bars over it, each thumb a pill in secondary ink (`WindowText`
+//!   in high contrast), and an expanded bar's track under it in the hover layer (a `WindowText`
+//!   outline in high contrast);
 //! - while focus is visible, Windows 11's focus visual over everything else: a ring in text color
 //!   with a one-pixel surface-colored ring inside it, so it shows on any fill, accent included.
 //!
@@ -103,8 +107,9 @@ impl<M> Ui<M> {
     /// ancestor's, which picks high contrast's ink).
     fn paint_node(&self, i: u32, clip: RectPx, under: Tone, p: &mut Painter<'_, '_>) {
         let node = &self.nodes[i as usize];
+        // In the node's own coordinates; the canvas moves them to where they show.
         let rect = node.rect.snap(p.scale);
-        let visible = rect.intersect(clip);
+        let visible = p.canvas.placed(rect).intersect(clip);
         if visible.is_empty() {
             // Children are clipped to their parent: nothing below shows either.
             return;
@@ -161,7 +166,7 @@ impl<M> Ui<M> {
                         (RectPx { x1: x, ..rect }, ink),
                         (RectPx { x0: x, ..rect }, to_go),
                     ] {
-                        let clip = part.intersect(visible);
+                        let clip = p.canvas.placed(part).intersect(visible);
                         if !clip.is_empty() {
                             p.canvas.set_clip(clip);
                             p.text(node, content, button, ink);
@@ -184,15 +189,51 @@ impl<M> Ui<M> {
             | Role::MenuItem
             | Role::Tooltip => {}
         }
+        self.paint_children(i, visible, under, p);
+        // A menu item's focus is its light, not a ring.
+        if self.focus == i && self.focus_visible && node.role != Role::MenuItem {
+            p.canvas.set_clip(visible);
+            p.focus_ring(rect, corner);
+        }
+    }
+
+    /// Node `i`'s children within `visible`, over the fill `under`. A viewport's show moved by
+    /// its offset, and its bars go over them, inside its hairline if it has one.
+    fn paint_children(&self, i: u32, visible: RectPx, under: Tone, p: &mut Painter<'_, '_>) {
+        let node = &self.nodes[i as usize];
+        let origin = p.canvas.origin();
+        let mut visible = visible;
+        if node.scroll != NIL {
+            if node.look.border.is_some() {
+                // Content scrolls under the hairline (a pixel wide), not over it, as CSS clips
+                // to the padding box. No viewport is rounded, so the corners need no clip.
+                let r = p.canvas.placed(node.rect.snap(p.scale));
+                visible = visible.intersect(RectPx {
+                    x0: r.x0 + 1,
+                    y0: r.y0 + 1,
+                    x1: r.x1 - 1,
+                    y1: r.y1 - 1,
+                });
+            }
+            let o = self.scrolls[node.scroll as usize].offset;
+            p.canvas.set_origin([
+                origin[0].saturating_sub(px_offset(o[0])),
+                origin[1].saturating_sub(px_offset(o[1])),
+            ]);
+        }
         let mut child = node.first;
         while child != NIL {
             self.paint_node(child, visible, under, p);
             child = self.nodes[child as usize].next;
         }
-        // A menu item's focus is its light, not a ring.
-        if self.focus == i && self.focus_visible && node.role != Role::MenuItem {
+        if node.scroll != NIL {
+            p.canvas.set_origin(origin);
             p.canvas.set_clip(visible);
-            p.focus_ring(rect, corner);
+            for axis in [1, 0] {
+                if let Some((track, thumb, expanded)) = self.bar_local(node.scroll, axis) {
+                    p.scroll_bar(track.snap(p.scale), thumb.snap(p.scale), expanded, under);
+                }
+            }
         }
     }
 
@@ -210,7 +251,7 @@ impl<M> Ui<M> {
         let node = &self.nodes[i as usize];
         let field = &self.fields[node.field as usize];
         let content = node.rect.inset(node.style.padding);
-        let clip = content.snap(p.scale).intersect(visible);
+        let clip = p.canvas.placed(content.snap(p.scale)).intersect(visible);
         if clip.is_empty() {
             return;
         }
@@ -242,7 +283,7 @@ impl<M> Ui<M> {
             if let Some(sel) = selection
                 && selected_ink != ink
             {
-                p.canvas.set_clip(sel.intersect(clip));
+                p.canvas.set_clip(p.canvas.placed(sel).intersect(clip));
                 p.line(slice, node, run, selected_ink);
                 p.canvas.set_clip(clip);
             }
@@ -289,6 +330,23 @@ impl Painter<'_, '_> {
             1,
             self.theme.color(Tone::Surface),
         );
+    }
+
+    /// A scroll bar over its viewport, on the fill `under`: the track while `expanded`, then the
+    /// thumb. In high contrast they're `COLOR_BTNFACE` and `COLOR_BTNTEXT` (A2.5), a pair whose
+    /// contrast the theme guarantees whatever is under them.
+    fn scroll_bar(&mut self, track: RectPx, thumb: RectPx, expanded: bool, under: Tone) {
+        let high_contrast = self.theme.scheme() == Scheme::HighContrast;
+        let (fill, ink) = if high_contrast {
+            // `Subtle` is ButtonFace in high contrast, and text on it ButtonText.
+            (Tone::Subtle, self.theme.ink(Tone::Text, Tone::Subtle))
+        } else {
+            (Tone::Hover, self.theme.ink(Tone::TextSecondary, under))
+        };
+        if expanded {
+            self.canvas.fill(track, self.theme.color(fill));
+        }
+        self.canvas.rrect(thumb, half(thumb), ink);
     }
 
     /// The hover or pressed layer over a control's shape (none in high contrast: see
@@ -356,7 +414,10 @@ impl Painter<'_, '_> {
     /// end, the permanent fill. Returns where the parts meet. The clip is `visible` again after.
     fn hold(&mut self, rect: RectPx, corner: f32, t: f32, visible: RectPx) -> i32 {
         let x = rect.x0 + px_width((t.clamp(0.0, 1.0) * f(rect.x1 - rect.x0)).round());
-        let to_go = RectPx { x0: x, ..rect }.intersect(visible);
+        let to_go = self
+            .canvas
+            .placed(RectPx { x0: x, ..rect })
+            .intersect(visible);
         if !to_go.is_empty() {
             self.canvas.set_clip(to_go);
             self.canvas
@@ -580,6 +641,11 @@ fn px_width(w: f32) -> i32 {
 )]
 fn f(v: i32) -> f32 {
     v as f32
+}
+
+/// A scroll offset as a pixel shift; past `i32` it saturates (no content is 2^31 px).
+fn px_offset(v: i64) -> i32 {
+    i32::try_from(v).unwrap_or(i32::MAX)
 }
 
 /// Half of `r`'s shorter side: the radius that rounds it into a circle or a pill.

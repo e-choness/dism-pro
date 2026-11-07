@@ -1,7 +1,7 @@
 //! TD-0009 §7 U2 and U3 on a shell page of 390 to 476 nodes (`fixtures/shell.rs`):
 //! - `interact`, U2: UI-thread work per input event without raster: dispatch → update → view →
 //!   reconcile → layout → damage. Budget: p99 ≤ 2 ms per event (doc 04 §5), moving within a menu
-//!   included (TD-0009 A1.7).
+//!   (TD-0009 A1.7) and a wheel notch over the table (A2, slice 5a) included.
 //! - `paint`, U3 without presenting: the same events with the damage painted into a 1000 × 700
 //!   canvas, and whole-window repaints. Budget: input to visual ≤ 50 ms (doc 04 §2); presenting is
 //!   measured on G1.
@@ -24,7 +24,8 @@ use dpro_ui::{Input, KeyCode, Mods, Point, Size, Theme};
 use shell::{Msg, Run, START, Shell, Step, click, key, popup_key};
 
 /// The session, an unchanged event, a filter keystroke, a resize, a tab picked with the arrow
-/// keys, a progress report, a text size switch and an arrow in a row's menu, on `run`.
+/// keys, a progress report, a text size switch, an arrow in a row's menu and a wheel notch over
+/// the table, on `run`.
 fn events(g: &mut BenchmarkGroup<'_, WallTime>, run: &mut Run) {
     let steps = run.session();
 
@@ -122,6 +123,20 @@ fn events(g: &mut BenchmarkGroup<'_, WallTime>, run: &mut Run) {
         });
     });
     run.step(popup_key(KeyCode::Escape, true, Mods::default()));
+    run.settle();
+
+    // Scrolling (TD-0009 A2, slice 5a): a wheel notch down the table and one back, the pointer
+    // resting on it.
+    run.step(Step::Input(Input::PointerMove(run.center(&Run::TABLE))));
+    run.settle();
+    let (down, up) = (run.table_wheel(-120), run.table_wheel(120));
+    g.bench_function("wheel_notch", |b| {
+        b.iter(|| {
+            run.step(down.clone());
+            run.step(up.clone());
+        });
+    });
+    run.step(Step::Input(Input::PointerLeave));
     run.settle();
 }
 

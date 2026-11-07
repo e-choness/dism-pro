@@ -38,10 +38,20 @@
 //! host's, which owns the open list. Enabled fields take `Focus`, and editable ones `SetValue`,
 //! which replaces the text as a paste would. Disabled nodes are marked so; a disabled menu item
 //! still takes `Focus`.
+//!
+//! Scroll viewports (TD-0009 A2.4) say where they're scrolled, in physical pixels from 0 to the
+//! content less the view, and clip their children. Their content's bounds are where layout put
+//! it, and the viewport's transform moves it by the offset, so a scroll sends the viewport
+//! alone. As AccessKit applies a node's transform to its own bounds too, a viewport's bounds are
+//! moved the other way first. A viewport takes `ScrollUp` and `ScrollDown` (along y) or
+//! `ScrollLeft` and `ScrollRight` (along x), by a line, or a page with no unit as UI
+//! Automation's large increment, and `SetScrollOffset`; one with no tab stop inside takes
+//! `Focus`. Every node in a viewport takes `ScrollIntoView`, which scrolls it wholly into view
+//! and moves no focus.
 
 use accesskit::{
-    Action, ActionData, ActionRequest, Node, NodeId as AkId, Rect as AkRect, Role as AkRole,
-    Toggled, TreeId, TreeInfo, TreeUpdate,
+    Action, ActionData, ActionRequest, Affine, Node, NodeId as AkId, Rect as AkRect,
+    Role as AkRole, ScrollUnit, Toggled, TreeId, TreeInfo, TreeUpdate,
 };
 use dpro_app::table::Tri;
 
@@ -160,6 +170,25 @@ impl<M> Ui<M> {
         }
     }
 
+    /// Node `i`, in a viewport, may have become a tab stop or stopped being one (it was added,
+    /// enabled or disabled, became a viewport or stopped, or goes with its subtree): the nearest
+    /// viewport holding it may have become one with no stop inside, or stopped being one, and
+    /// its `Focus` action goes to a client again. Nested viewports are stops themselves, so only
+    /// the nearest is.
+    pub(crate) fn stop_changed(&mut self, i: u32) {
+        if !self.a11y.active || !self.nodes[i as usize].in_viewport {
+            return;
+        }
+        let mut a = self.nodes[i as usize].parent;
+        while a != NIL {
+            if self.nodes[a as usize].scroll != NIL {
+                self.a11y_touch(a);
+                return;
+            }
+            a = self.nodes[a as usize].parent;
+        }
+    }
+
     fn forget_changes(&mut self) {
         for k in 0..self.a11y.changed.len() {
             let i = self.a11y.changed[k];
@@ -219,13 +248,13 @@ impl<M> Ui<M> {
         let n = &self.nodes[i as usize];
         let role = self.ak_role(i);
         let mut node = Node::new(role);
-        let r = n.rect.snap(self.scale);
-        node.set_bounds(AkRect {
-            x0: f64::from(r.x0),
-            y0: f64::from(r.y0),
-            x1: f64::from(r.x1),
-            y1: f64::from(r.y1),
-        });
+        node.set_bounds(self.ak_bounds(i));
+        if n.scroll != NIL {
+            self.ak_viewport(i, &mut node);
+        }
+        if n.in_viewport {
+            node.add_action(Action::ScrollIntoView);
+        }
         if n.first != NIL {
             node.set_children(
                 self.children_of(i)
@@ -312,6 +341,101 @@ impl<M> Ui<M> {
         }
         node
     }
+
+    /// Node `i`'s bounds: as painted, where layout put it. A viewport's transform moves its own
+    /// bounds too, so they start where they'd be scrolled to 0.
+    fn ak_bounds(&self, i: u32) -> AkRect {
+        let n = &self.nodes[i as usize];
+        let r = n.rect.snap(self.scale);
+        let [ox, oy] = if n.scroll == NIL {
+            [0.0; 2]
+        } else {
+            self.scrolls[n.scroll as usize].offset.map(px_f64)
+        };
+        AkRect {
+            x0: f64::from(r.x0) + ox,
+            y0: f64::from(r.y0) + oy,
+            x1: f64::from(r.x1) + ox,
+            y1: f64::from(r.y1) + oy,
+        }
+    }
+
+    /// Viewport `i`'s scroll state and actions.
+    fn ak_viewport(&self, i: u32, node: &mut Node) {
+        let s = self.nodes[i as usize].scroll;
+        let sc = &self.scrolls[s as usize];
+        let [x, y] = sc.offset.map(px_f64);
+        let [max_x, max_y] = self.max_px(s).map(px_f64);
+        node.set_transform(Affine::translate((-x, -y)));
+        node.set_clips_children();
+        if sc.axes[0] {
+            node.set_scroll_x(x);
+            node.set_scroll_x_min(0.0);
+            node.set_scroll_x_max(max_x);
+            node.add_action(Action::ScrollLeft);
+            node.add_action(Action::ScrollRight);
+        }
+        if sc.axes[1] {
+            node.set_scroll_y(y);
+            node.set_scroll_y_min(0.0);
+            node.set_scroll_y_max(max_y);
+            node.add_action(Action::ScrollUp);
+            node.add_action(Action::ScrollDown);
+        }
+        node.add_action(Action::SetScrollOffset);
+        if self.lone_viewport(i) {
+            node.add_action(Action::Focus);
+        }
+    }
+
+    /// A client's scroll request for node `i`; `None` if it isn't one.
+    fn ak_scroll_action(&mut self, i: u32, request: &ActionRequest) -> Option<bool> {
+        let s = self.nodes[i as usize].scroll;
+        let unit = match &request.data {
+            Some(ActionData::ScrollUnit(ScrollUnit::Item)) => Some(false),
+            // No unit is a page: UI Automation's large increment.
+            Some(ActionData::ScrollUnit(ScrollUnit::Page)) | None => Some(true),
+            _ => None,
+        };
+        let step = |axis: usize, dir: i64| unit.map(|page| (axis, dir, page));
+        let by = match request.action {
+            Action::ScrollIntoView => {
+                return Some(self.nodes[i as usize].in_viewport && self.reveal(i));
+            }
+            Action::SetScrollOffset if s != NIL => {
+                return Some(match &request.data {
+                    Some(ActionData::SetScrollOffset(to)) => {
+                        self.scroll_set(s, [px_i64(to.x), px_i64(to.y)])
+                    }
+                    _ => false,
+                });
+            }
+            Action::ScrollUp if s != NIL => step(1, -1),
+            Action::ScrollDown if s != NIL => step(1, 1),
+            Action::ScrollLeft if s != NIL => step(0, -1),
+            Action::ScrollRight if s != NIL => step(0, 1),
+            _ => return None,
+        };
+        Some(by.is_some_and(|(axis, dir, page)| self.scroll_step(s, axis, dir, page)))
+    }
+}
+
+/// A pixel offset for a client.
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "offsets are exact in f64 below 2^53 px"
+)]
+fn px_f64(v: i64) -> f64 {
+    v as f64
+}
+
+/// A client's offset as whole pixels (NaN is 0; `as` saturates).
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "rounded first; `as` saturates and maps NaN to 0"
+)]
+fn px_i64(v: f64) -> i64 {
+    v.round() as i64
 }
 
 impl<M: Clone> Ui<M> {
@@ -327,9 +451,13 @@ impl<M: Clone> Ui<M> {
         let Some(i) = self.ak_index(request.target_node) else {
             return false;
         };
+        if let Some(applied) = self.ak_scroll_action(i, request) {
+            return applied;
+        }
         let n = &self.nodes[i as usize];
-        // A disabled menu item takes focus only.
-        if !(n.interactive() || n.focusable() && request.action == Action::Focus) {
+        // A disabled menu item takes focus only, as does a viewport that is a tab stop.
+        let focusable = n.focusable() || self.lone_viewport(i);
+        if !(n.interactive() || focusable && request.action == Action::Focus) {
             return false;
         }
         let field = n.role == Role::Field;

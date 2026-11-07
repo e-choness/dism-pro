@@ -259,10 +259,16 @@ impl<P: Model> Host<P> {
         let text_scale = f32::from(env.text_scale) / 100.0;
         self.ui.set_text_scale(text_scale);
         self.ui.set_tooltip_delay(env.tooltip_ms);
+        // High contrast shows the full scroll bar always (TD-0009 A2.10 item 3).
+        let auto_hide = env.auto_hide_scroll_bars && !env.high_contrast;
+        self.ui.set_wheel(env.wheel_lines, env.wheel_chars);
+        self.ui.set_auto_hide_scroll_bars(auto_hide);
         for layer in &mut self.layers {
             layer.ui.set_motion(Motion::system(env.animations));
             layer.ui.set_text_scale(text_scale);
             layer.ui.set_tooltip_delay(env.tooltip_ms);
+            layer.ui.set_wheel(env.wheel_lines, env.wheel_chars);
+            layer.ui.set_auto_hide_scroll_bars(auto_hide);
         }
         self.restyle()
     }
@@ -445,6 +451,22 @@ impl<P: Model> Host<P> {
                 mods: mods_of(mods),
             })),
             Event::ContextMenu(p) => self.input(Input::ContextMenu(p.map(at))),
+            // A wheel over the window closes its menu or list, whose anchor it may scroll away
+            // (TD-0009 A2.4), and scrolls what's under the pointer.
+            Event::Wheel {
+                delta,
+                horizontal,
+                at: p,
+            } => {
+                let open = self.model.popup().is_some();
+                self.close_popup();
+                let used = self.input(Input::Wheel {
+                    at: at(p),
+                    delta,
+                    horizontal,
+                });
+                used || open
+            }
             // Only a popup is dismissed.
             Event::Dismiss => false,
             Event::Presenter(presenter) => {

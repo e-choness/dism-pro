@@ -15,11 +15,13 @@
 //! Damage: a node whose rectangle changed damages where it was and where it is. That covers its
 //! descendants, which paint inside it, so they add nothing more.
 //!
-//! Children that don't fit overflow their parent. Painting clips them; scrolling containers come
-//! with the data table.
+//! Children that don't fit overflow their parent. Painting clips them, and a scroll viewport
+//! (`scroll.rs`) scrolls them: they're laid out as if it weren't scrolled, so a scroll lays out
+//! nothing, and their damage goes where they show, clipped to it. A viewport's content may be
+//! as wide as it likes along an axis it scrolls across.
 
 use crate::{
-    geom::{Rect, Size},
+    geom::{Point, Rect, Size},
     style::{Align, Axis, Dim, Justify, clamp},
     text::{TextSystem, count},
     tree::{NIL, Role},
@@ -30,10 +32,23 @@ impl<M> Ui<M> {
     /// Lays out what changed since the last layout, damaging what moved.
     pub fn layout(&mut self, text: &mut dyn TextSystem) {
         let window = Rect::new(0.0, 0.0, self.viewport.w, self.viewport.h);
+        self.shown = Shown {
+            shift: Point::default(),
+            clip: window,
+        };
         self.arrange(ROOT, window, text, false);
         self.layout_fields(text);
-        // Nodes may have moved, appeared or been enabled under a pointer that stayed still.
-        if let Some(p) = self.pointer {
+        // A node revealed before it was placed: where it is now.
+        let pending = std::mem::replace(&mut self.reveal_after, NIL);
+        if pending != NIL {
+            self.reveal(pending);
+        }
+        // Nodes may have moved, appeared or been enabled under a pointer that stayed still. While
+        // a thumb is dragged the hover stays where it was: the content moving past the pointer
+        // lights nothing (A2.4).
+        if let Some(p) = self.pointer
+            && self.drag.is_none()
+        {
             let hit = self.hit(p);
             self.pointer_over(hit);
         }
@@ -157,7 +172,7 @@ impl<M> Ui<M> {
     }
 
     /// Puts `i` at `rect` and lays out its children. `covered`: an ancestor already damaged both
-    /// its old and new rectangles, which hold this node's.
+    /// its old and new rectangles, which hold this node's. It shows as [`Ui::shown`] says.
     fn arrange(&mut self, i: u32, rect: Rect, text: &mut dyn TextSystem, covered: bool) {
         let (moved, dirty, old) = {
             let n = &self.nodes[i as usize];
@@ -170,27 +185,35 @@ impl<M> Ui<M> {
         if moved {
             self.a11y_touch(i);
             if !covered {
-                self.damage_rect(old);
-                self.damage_rect(rect);
+                let shown = self.shown;
+                self.damage_rect(shown.place(old));
+                self.damage_rect(shown.place(rect));
             }
             covered = true;
         } else if !covered && self.nodes[i as usize].first == NIL {
             // A leaf whose content changed in place (text, style) repaints where it is.
-            self.damage_rect(rect);
+            self.damage_rect(self.shown.place(rect));
         }
         let n = &mut self.nodes[i as usize];
         n.rect = rect;
         n.dirty = false;
         if n.first != NIL {
             self.arrange_children(i, text, covered);
+        } else if n.scroll != NIL {
+            // An empty viewport: nothing to scroll.
+            let s = n.scroll;
+            self.scroll_laid_out(s, Size::ZERO, text);
         }
     }
 
     fn arrange_children(&mut self, i: u32, text: &mut dyn TextSystem, covered: bool) {
-        let (s, inner, first) = {
+        let (s, inner, first, scroll) = {
             let n = &self.nodes[i as usize];
-            (n.style, n.rect.inset(n.style.padding), n.first)
+            (n.style, n.rect.inset(n.style.padding), n.first, n.scroll)
         };
+        // A viewport's children show elsewhere until it's done; nothing else changes it.
+        let outer = (scroll != NIL).then(|| self.enter_viewport(i, s.axis));
+        let across = outer.is_some_and(|(_, across)| across);
         let (inner_main, inner_cross) = along(
             s.axis,
             Size {
@@ -208,7 +231,7 @@ impl<M> Ui<M> {
                 grow += g;
                 self.nodes[c as usize].main = 0.0;
             } else {
-                used += self.child_main(c, s.axis, s.align, inner, text);
+                used += self.child_main(c, s.axis, s.align, inner, across, text);
             }
             len += 1;
             c = self.nodes[c as usize].next;
@@ -243,25 +266,66 @@ impl<M> Ui<M> {
             Justify::Start | Justify::SpaceBetween => {}
         }
 
-        // Pass 2: cross sizes (height for the final width in a row), then place.
+        // Pass 2: cross sizes (height for the final width in a row), then place. A viewport
+        // keeps the content's extent.
+        let (mut end_main, mut end_cross) = (0.0f32, 0.0f32);
         let mut c = first;
         while c != NIL {
             let main = self.nodes[c as usize].main;
-            let cross = self.child_cross(c, s.axis, s.align, main, inner_cross, text);
+            let cross = self.child_cross(c, s.axis, s.align, main, inner_cross, across, text);
             let offset = match s.align {
                 Align::Start | Align::Stretch => 0.0,
-                Align::Center => (inner_cross - cross) / 2.0,
-                Align::End => inner_cross - cross,
+                Align::Center => room(inner_cross - cross, across) / 2.0,
+                Align::End => room(inner_cross - cross, across),
             };
             let rect = match s.axis {
                 Axis::Row => Rect::new(inner.x + at, inner.y + offset, main, cross),
                 Axis::Column => Rect::new(inner.x + offset, inner.y + at, cross, main),
             };
+            if scroll != NIL {
+                end_main = end_main.max(at + main);
+                end_cross = end_cross.max(offset + cross);
+            }
             at += main + between;
             let next = self.nodes[c as usize].next;
             self.arrange(c, rect, text, covered);
             c = next;
         }
+        if let Some((outer, _)) = outer {
+            self.shown = outer;
+            let pad = s.padding;
+            let (width, height) = match s.axis {
+                Axis::Row => (end_main, end_cross),
+                Axis::Column => (end_cross, end_main),
+            };
+            let content = Size {
+                w: width + pad.horizontal(),
+                h: height + pad.vertical(),
+            };
+            self.scroll_laid_out(scroll, content, text);
+        }
+    }
+
+    /// Viewport `i`'s children are next: they show moved by its offset and inside it, which
+    /// [`Ui::shown`] now says. Returns where `i` shows, to put back after them, and whether it
+    /// scrolls across `axis`, which frees its children's cross size.
+    fn enter_viewport(&mut self, i: u32, axis: Axis) -> (Shown, bool) {
+        let outer = self.shown;
+        let n = &self.nodes[i as usize];
+        let by = self.content_shift(n.scroll);
+        let cross = match axis {
+            Axis::Row => 1,
+            Axis::Column => 0,
+        };
+        let across = self.scrolls[n.scroll as usize].axes[cross];
+        self.shown = Shown {
+            shift: Point {
+                x: outer.shift.x + by.x,
+                y: outer.shift.y + by.y,
+            },
+            clip: outer.place(n.rect),
+        };
+        (outer, across)
     }
 
     /// The natural size along the parent's axis of a child that doesn't grow, kept in `main`
@@ -272,13 +336,14 @@ impl<M> Ui<M> {
         axis: Axis,
         align: Align,
         inner: Rect,
+        across: bool,
         text: &mut dyn TextSystem,
     ) -> f32 {
         let main = match axis {
             Axis::Row => self.measure(c, inner.w, text).w,
             Axis::Column => {
                 // Height for the width the child will get across the column.
-                let w = self.cross_width(c, align, inner.w, text);
+                let w = self.cross_width(c, align, inner.w, across, text);
                 self.measure(c, w, text).h
             }
         };
@@ -286,7 +351,12 @@ impl<M> Ui<M> {
         main
     }
 
-    /// A child's size across the parent's axis, given its final `main` size.
+    /// A child's size across the parent's axis, given its final `main` size. `across`: the
+    /// parent is a viewport scrolling across its axis, so the child isn't held to its size.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one child's layout state, passed down rather than kept"
+    )]
     fn child_cross(
         &mut self,
         c: u32,
@@ -294,10 +364,12 @@ impl<M> Ui<M> {
         align: Align,
         main: f32,
         inner_cross: f32,
+        across: bool,
         text: &mut dyn TextSystem,
     ) -> f32 {
         match axis {
-            Axis::Column => self.cross_width(c, align, inner_cross, text),
+            Axis::Column => self.cross_width(c, align, inner_cross, across, text),
+            Axis::Row if across => self.natural_cross(c, axis, align, main, inner_cross, text),
             Axis::Row => {
                 let s = self.nodes[c as usize].style;
                 if align == Align::Stretch && s.height == Dim::Auto {
@@ -309,19 +381,50 @@ impl<M> Ui<M> {
         }
     }
 
-    /// The width a child gets in a column `inner_w` wide.
+    /// The width a child gets in a column `inner_w` wide; with `across` (a viewport scrolling
+    /// across it), its natural width, and at least the column's when it stretches.
     fn cross_width(
         &mut self,
         c: u32,
         align: Align,
         inner_w: f32,
+        across: bool,
         text: &mut dyn TextSystem,
     ) -> f32 {
+        if across {
+            return self.natural_cross(c, Axis::Column, align, f32::INFINITY, inner_w, text);
+        }
         let s = self.nodes[c as usize].style;
         if align == Align::Stretch && s.width == Dim::Auto {
             clamp(inner_w, s.min.w, s.max.w)
         } else {
             self.measure(c, inner_w, text).w.min(inner_w.max(s.min.w))
+        }
+    }
+
+    /// In a viewport scrolling across its `axis`, a child's natural size across it: in a row its
+    /// height at width `main`, in a column its width. A stretching child is at least
+    /// `inner_cross`. Out of line: other parents never come here.
+    #[inline(never)]
+    fn natural_cross(
+        &mut self,
+        c: u32,
+        axis: Axis,
+        align: Align,
+        main: f32,
+        inner_cross: f32,
+        text: &mut dyn TextSystem,
+    ) -> f32 {
+        let s = self.nodes[c as usize].style;
+        let measured = self.measure(c, main, text);
+        let (natural, auto) = match axis {
+            Axis::Row => (measured.h, s.height == Dim::Auto),
+            Axis::Column => (measured.w, s.width == Dim::Auto),
+        };
+        if align == Align::Stretch && auto {
+            natural.max(inner_cross)
+        } else {
+            natural
         }
     }
 }
@@ -330,6 +433,29 @@ fn fixed(d: Dim) -> Option<f32> {
     match d {
         Dim::Auto => None,
         Dim::Fixed(v) => Some(v),
+    }
+}
+
+/// The room a child centered or put at the end has across its parent, `free`. Across an axis
+/// its viewport scrolls, a child wider than the view starts at the view's start: no offset
+/// reaches content before it (CSS's `safe` alignment).
+fn room(free: f32, across: bool) -> f32 {
+    if across { free.max(0.0) } else { free }
+}
+
+/// Where a subtree shows: moved by the viewports above it, and inside them.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Shown {
+    /// What its viewports' offsets move it by (logical).
+    shift: Point,
+    /// What of the window shows it.
+    clip: Rect,
+}
+
+impl Shown {
+    /// Where `r`, as layout placed it, shows: moved, and clipped.
+    fn place(self, r: Rect) -> Rect {
+        Rect::new(r.x + self.shift.x, r.y + self.shift.y, r.w, r.h).intersect(self.clip)
     }
 }
 

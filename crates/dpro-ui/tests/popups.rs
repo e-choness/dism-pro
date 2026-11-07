@@ -15,7 +15,8 @@
 //!   focus, hidden by a press or any key, and the reshow delay.
 //! - **Accessibility:** roles, names, values, states and descriptions in both trees.
 //! - **Paint damage** of a menu's focus move, **24 × 24 targets**, and **no clipping at 225 %**.
-//! - **The anchor going away** closes its popup (A1.8).
+//! - **The anchor going away** closes its popup (A1.8), and so does **a wheel over the window**
+//!   (A2.4: it may move the anchor).
 
 #![expect(
     clippy::expect_used,
@@ -316,6 +317,30 @@ fn the_menu_closes_when_its_row_goes_away() {
         "a popup whose anchor went away closes (A1.8)"
     );
     assert_eq!(run.shell.popup(), None);
+}
+
+#[test]
+fn a_wheel_over_the_window_closes_the_menu_and_scrolls() {
+    let mut run = menu_from_keyboard();
+    let table = run.ui.find(&Run::TABLE).expect("the table");
+    let before = run
+        .ui
+        .info(table)
+        .and_then(|n| n.scroll)
+        .expect("it scrolls")
+        .offset;
+    let step = run.table_wheel(-120);
+    run.step(step);
+    assert!(!run.popup_open, "the wheel closed the menu");
+    assert_eq!(run.shell.popup(), None);
+    assert_eq!(run.shell.done(), None, "and invoked nothing");
+    let after = run
+        .ui
+        .info(table)
+        .and_then(|n| n.scroll)
+        .expect("it scrolls")
+        .offset;
+    assert!(after.y > before.y, "the wheel scrolled the table too");
 }
 
 #[test]

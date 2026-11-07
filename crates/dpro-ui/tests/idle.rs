@@ -16,6 +16,9 @@
 //!
 //! Popups (TD-0009 A1.7): a pending tooltip is one wake and no frames, a showing one the wake that
 //! hides it; an open menu asks for nothing.
+//!
+//! Scrolling (A2, slice 5a): a scroll is done when its event is, with no smooth scrolling and no
+//! fading bar, so a wheel notch, a thumb drag and its release each settle like any other input.
 
 #[path = "../benches/fixtures/shell.rs"]
 mod shell;
@@ -216,4 +219,29 @@ fn a_hold_asks_for_frames_only_while_it_runs() {
     settle(&mut run, "held, let go", max_ticks());
     assert_idle(&mut run, "held, let go");
     assert_eq!(run.shell.applies(), 1, "letting go applied again");
+}
+
+/// A2, slice 5a: a wheel notch scrolls at once, and a thumb drag asks for nothing while it's held
+/// still, nor after it's let go.
+#[test]
+fn a_scroll_and_a_thumb_drag_ask_for_nothing_after() {
+    let mut run = Run::accessible(Shell::new()).over_table();
+    let step = run.table_wheel(-120);
+    run.step(step);
+    // Rows moved under the resting pointer, so a hover may fade: no more than that.
+    settle(&mut run, "a notch down", max_ticks());
+    assert_idle(&mut run, "a notch down");
+    assert!(run.wake().is_none(), "a notch armed a wake");
+
+    let mut run = run.thumb_grabbed();
+    assert_idle(&mut run, "the thumb pressed");
+    let step = run.thumb_moved(40.0);
+    run.step(step);
+    settle(&mut run, "the thumb dragged", max_ticks());
+    assert_idle(&mut run, "the thumb dragged, held still");
+    let at = run.table_bar().expect("the table overflows").thumb.center();
+    run.step(Step::Input(Input::PointerUp(at)));
+    settle(&mut run, "the thumb let go", max_ticks());
+    assert_idle(&mut run, "the thumb let go");
+    assert!(run.wake().is_none(), "the drag armed a wake");
 }
