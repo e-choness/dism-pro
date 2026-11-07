@@ -241,6 +241,7 @@ fn session((mut run, steps): (Run, Vec<Step>)) -> (Run, Vec<Step>) {
 #[bench::column_drag(args = (30.0), setup = divider_with)]
 #[bench::column_fit(args = (Step::Update(Msg::Table(TableEvent::Fit(Some(ColumnId(1)))))), setup = warm_with)]
 #[bench::column_menu(args = (Step::Input(Input::ContextMenu(None))), setup = header_with)]
+#[bench::formats_change(args = (Step::Decimal(",")), setup = warm_with)]
 fn event((mut run, step): (Run, Step)) -> Run {
     run.step(black_box(step));
     run

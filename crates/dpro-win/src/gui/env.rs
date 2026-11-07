@@ -448,4 +448,14 @@ mod tests {
         println!("drag distance {} px", env.drag_px);
         assert_eq!(env.drag_px, 4);
     }
+
+    /// T2/T3 (TD-0009 A2.5, slice 5b3): the user's formats and time zone, as a stamp that a new
+    /// format changes. Reading them twice gives the same stamp, so a burst of `WM_SETTINGCHANGE`
+    /// re-formats nothing.
+    #[test]
+    fn the_locale_stamp_reads_the_same_twice() {
+        let env = Env::read();
+        assert_ne!(env.locale, 0);
+        assert_eq!(Env::read().locale, env.locale);
+    }
 }
