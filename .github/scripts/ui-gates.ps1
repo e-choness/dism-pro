@@ -61,7 +61,9 @@ raw-API baseline, measured in this job, so it holds on whatever machine the runn
   Scrolling (TD-0009 A2, slice 5a): the shell's table, 40 rows taller than its viewport. A wheel
       notch through SendInput at its center moves the rows up, and a notch back puts them where
       they were; with a row focused, Ctrl+End shows the last row and Ctrl+Home the first again;
-      UIA's SetFocus on the last row, out of view, scrolls it into view. Each is read back as
+      UIA's SetFocus on a row out of view scrolls it into view. UIA sees only the rows in view
+      and one past each end: AccessKit leaves out the children a viewport clips, but for those
+      next to one it shows (accesskit_consumer's common_filter), so they can be scrolled to. Each is read back as
       the rows' BoundingRectangle within 2 s; the times are advisory (U3: 50 ms), and Windows'
       wheel lines are reported. So is "Automatically hide scroll bars", for A2.3's verify:
       DynamicScrollbars, which the shell reads, beside UISettings.AutoHideScrollBars, with the
@@ -298,7 +300,9 @@ try {
     $rows = @(Find-Elements $root $types::Group 'Programs' | ForEach-Object { Find-Elements $_ $types::ListItem })
     $boxes = @(Find-Elements $root $types::CheckBox | ForEach-Object { $_.Current.Name })
     $checks['12 pages, Overview first'] = $pages.Count -eq 12 -and $pages[0].Current.Name -eq 'Overview'
-    $checks['40 named rows'] = $rows.Count -eq 40 -and @($rows | Where-Object { $_.Current.Name }).Count -eq 40
+    # The table's 40 rows overflow it: UIA sees those in view and the one past its end, as AccessKit
+    # leaves out what a viewport clips but for the children next to those it shows.
+    $checks['the rows in view and one more, each named'] = $rows.Count -ge 10 -and $rows.Count -lt 40 -and @($rows | Where-Object { $_.Current.Name }).Count -eq $rows.Count
     $checks['4 check boxes'] = ($boxes -join ',') -eq 'Apps,Games,Tools,System'
     $lines += "pages $($pages.Count), rows $($rows.Count) (first '$(if ($rows) { $rows[0].Current.Name })'), check boxes: $($boxes -join ', ')"
 
@@ -1394,7 +1398,8 @@ try {
     $first = $rows[0]
     $last = $rows[$rows.Count - 1]
     $y0 = $first.Current.BoundingRectangle.Y
-    $checks['the table overflows: its last row is out of view'] = $rows.Count -eq 40 -and -not (Test-Inside $last.Current.BoundingRectangle $view)
+    # UIA sees the rows in view and the one past its end (AccessKit's filter, see U12).
+    $checks['the table overflows: the last row UIA sees is out of view'] = $rows.Count -gt 1 -and -not (Test-Inside $last.Current.BoundingRectangle $view)
     $lines += 'table {0:N0}x{1:N0} at {2:N0},{3:N0}; {4} rows; Windows scrolls {5} lines a notch' -f $view.Width, $view.Height, $view.X, $view.Y, $rows.Count, [ScrollGateWin32]::WheelLines()
     $checks['the window is active'] = [GlassGateWin32]::Activate($hwnd)
 
@@ -1414,7 +1419,11 @@ try {
     $focused = Wait-Until { $first.Current.HasKeyboardFocus } 2000
     $sw.Restart()
     Send-Chord 0x11 0x23
-    $end = $focused -and (Wait-Until { Test-Inside $last.Current.BoundingRectangle $view } 2000)
+    # At the end there's no row past the view, so the last row UIA sees is wholly in it.
+    $end = $focused -and (Wait-Until {
+        $tail = @(Find-Elements $table $types::ListItem) | Select-Object -Last 1
+        $null -ne $tail -and $tail.Current.Name -ne $last.Current.Name -and (Test-Inside $tail.Current.BoundingRectangle $view)
+    } 2000)
     $ms = $sw.Elapsed.TotalMilliseconds
     $checks['Ctrl+End shows the last row'] = $end
     $lines += '{0,-12} {1,7:N1} ms' -f 'Ctrl+End', $ms
