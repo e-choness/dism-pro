@@ -19,20 +19,28 @@
 //! - `a11y`: U12 with a client listening, as in `a11y.rs`: the whole tree (the shell's, and an open
 //!   menu's), and one frame's update for an unchanged event, another row selected, a page switch
 //!   each way, and a progress report.
+//! - `fling` (U1): the first 60 frames of S-01's fling script on a 100k-row, 8-column table, and
+//!   30 of its thumb drag, each built, laid out and painted whole (TD-0009 A2.7). The table's
+//!   events join `interact`: Down on the last row in view (which scrolls), Space checking the
+//!   focused row, a header's sort (750 rows, inline), and a far row realized for a client with
+//!   its update made. `a11y` adds the 100k-row table's first tree.
 //!
 //! C1: `docker compose run --rm bench-gate`.
 
 #![allow(missing_docs)]
 
+#[path = "fixtures/fling.rs"]
+mod fling;
 #[path = "fixtures/shell.rs"]
 mod shell;
 
 use std::hint::black_box;
 
 use dpro_ui::{
-    Canvas, FakeText, Input, KeyCode, Mods, Motion, Point, Size, Theme, Ui, accesskit::TreeUpdate,
-    tokens,
+    Canvas, ColumnId, FakeText, Input, KeyCode, Mods, Motion, Point, Size, TableEvent, Theme, Ui,
+    accesskit::TreeUpdate, tokens,
 };
+use fling::Fling;
 use gungraun::{
     Callgrind, LibraryBenchmarkConfig, library_benchmark, library_benchmark_group, main,
 };
@@ -161,6 +169,16 @@ fn thumb_with(dy: f32) -> (Run, Step) {
     (run, step)
 }
 
+/// Warm, the last row wholly in view current and focused, then `step` (A2, slice 5b1).
+fn bottom_row_with(step: Step) -> (Run, Step) {
+    (warm().0.bottom_row_current(), step)
+}
+
+/// Warm with a client listening, then `step`: its frame makes the update (A2.5's realizer).
+fn accessible_with(step: Step) -> (Run, Step) {
+    (warm_accessible(), step)
+}
+
 fn warm_painted_150() -> (Run, Vec<Step>) {
     warmed(Run::painted(Shell::new(), 1.5, Theme::DARK))
 }
@@ -197,6 +215,10 @@ fn session((mut run, steps): (Run, Vec<Step>)) -> (Run, Vec<Step>) {
 #[bench::tooltip_due(args = (Step::Tick(u64::from(tokens::popup::TIP_DELAY_MS))), setup = tip_with)]
 #[bench::wheel_notch(args = (-120), setup = table_with)]
 #[bench::thumb_drag(args = (40.0), setup = thumb_with)]
+#[bench::row_down(args = (key(KeyCode::Down, true, Mods::default())), setup = bottom_row_with)]
+#[bench::check_space(args = (key(KeyCode::Space, true, Mods::default())), setup = row_with)]
+#[bench::header_sort(args = (Step::Update(Msg::Table(TableEvent::Sort(ColumnId(0))))), setup = warm_with)]
+#[bench::realize(args = (Step::Realize(700)), setup = accessible_with)]
 fn event((mut run, step): (Run, Step)) -> Run {
     run.step(black_box(step));
     run
@@ -295,6 +317,27 @@ fn open(shell: Shell) -> (Ui<Msg>, Vec<u32>, Shell) {
 
 library_benchmark_group!(name = popup, benchmarks = [open]);
 
+/// The fling's table at scale 1, its first frame painted, and the frames counted: the script's
+/// first 60 (its first fling) and 30 of its 90-frame thumb drag.
+fn fling_frames() -> (Box<Fling>, Vec<f32>) {
+    let f = Fling::new(1.0);
+    let script = f.script();
+    let mut frames: Vec<f32> = script.frames.iter().take(60).copied().collect();
+    frames.extend(script.frames.iter().skip(script.drag).take(30));
+    (Box::new(f), frames)
+}
+
+#[library_benchmark]
+#[bench::frames(setup = fling_frames)]
+fn fling((mut f, frames): (Box<Fling>, Vec<f32>)) -> (Box<Fling>, Vec<f32>) {
+    for &offset in &frames {
+        f.frame(black_box(offset));
+    }
+    (f, frames)
+}
+
+library_benchmark_group!(name = table, benchmarks = [fling]);
+
 /// An accessible run after one full session, with row 2 selected.
 fn warm_accessible() -> Run {
     let mut run = Run::accessible(Shell::new());
@@ -327,6 +370,17 @@ fn accessible_scroll() -> Box<Run> {
     run.take_a11y = false;
     run.step(step);
     Box::new(run)
+}
+
+/// The fling's 100k-row table, for its first tree.
+fn table_tree() -> Box<Fling> {
+    Box::new(Fling::new(1.0))
+}
+
+#[library_benchmark]
+#[bench::table(setup = table_tree)]
+fn a11y_table_tree(mut f: Box<Fling>) -> (TreeUpdate, Box<Fling>) {
+    (f.a11y_tree(), f)
 }
 
 /// [`warm_accessible`], for the shell's whole tree.
@@ -362,10 +416,13 @@ fn a11y_update(mut run: Box<Run>) -> (Option<TreeUpdate>, Box<Run>) {
     (run.a11y_update(), run)
 }
 
-library_benchmark_group!(name = a11y, benchmarks = [a11y_tree, a11y_update]);
+library_benchmark_group!(
+    name = a11y,
+    benchmarks = [a11y_tree, a11y_table_tree, a11y_update]
+);
 
 main!(
     // Instruction counts only: the cache simulation would slow every run for metrics nothing gates.
     config = LibraryBenchmarkConfig::default().tool(Callgrind::with_args(["--cache-sim=no"]));
-    library_benchmark_groups = interact, paint, popup, a11y
+    library_benchmark_groups = interact, paint, popup, table, a11y
 );

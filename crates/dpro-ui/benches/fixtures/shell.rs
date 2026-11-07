@@ -1,9 +1,10 @@
 //! A synthetic shell page for TD-0009 §7 U2, U3, U8 and U12, and S-01's scripted session.
 //!
 //! A header, a rail of 12 pages, a toolbar (the filter, two tabs and 4 category check boxes), and
-//! a table of 40 rows × 8 cells over 1,000 data rows; the drawer adds 20 rows, a progress bar and
-//! its actions, Hold to apply among them. The table scrolls (TD-0009 A2, slice 5a): its 40 rows of
-//! 32 px are taller than the window. §7 estimates a real page at about 600 nodes. Pages 1 to 10
+//! a data table (TD-0009 A2, slice 5b1) of 8 columns over 1,000 data rows, 750 on the first tab;
+//! the drawer adds 20 rows, a progress bar and its actions, Hold to apply among them. The table
+//! builds the rows in view and half a view either side. §7 estimates a real page at about 600
+//! nodes. Pages 1 to 10
 //! show 8 summary cards instead of the toolbar and table, so switching pages replaces the content,
 //! and Settings (the last) shows a radio group and the Start page dropdown.
 //!
@@ -21,16 +22,15 @@
 use std::sync::OnceLock;
 
 use dpro_ui::{
-    Align, Axes, Axis, Canvas, ClipboardRequest, Cx, Dim, Element, FakeText, Input, Insets,
-    Justify, Key, KeyCode, KeyEvent, Look, Mods, Motion, Point, Popup, PopupKind, Radius,
-    ScrollBar, Size, Style, TextEdit, TextStyle, Theme, Tone, Tri, Ui, accesskit::TreeUpdate,
-    tokens,
+    Align, Axis, Canvas, Cells, ClipboardRequest, Column, ColumnId, Cx, Dim, Element, FakeText,
+    Input, Insets, Justify, Key, KeyCode, KeyEvent, Look, Mods, Motion, Order, Point, Popup,
+    PopupKind, Radius, Row, RowKey, ScrollBar, Size, Status, Style, TABLE_BODY, Table, TableEvent,
+    TextEdit, TextStyle, Theme, Tone, Track, Tri, Ui, accesskit::TreeUpdate, tokens,
 };
 
 const RAIL: u8 = 12;
 /// The last page: a radio group instead of summary cards.
 pub(crate) const SETTINGS: u8 = RAIL - 1;
-const ROWS: usize = 40;
 const CELLS: usize = 8;
 pub(crate) const DRAWER_ROWS: u64 = 20;
 const CATEGORIES: u8 = 4;
@@ -58,6 +58,43 @@ pub(crate) const ROW_MENU: [(&str, bool); 5] = [
 ];
 /// What the toolbar says after the row menu's item `i` (the first opens the drawer instead).
 const DONE: [&str; 5] = ["", "Opened file location", "Copied name", "Copied ID", ""];
+/// The table's columns, one per cell: the fixed widths, then shares of what they leave.
+const COLUMNS: [Column<'static>; CELLS] = [
+    column_of(0, "Name", Track::Share(2.0), Some(Order::Ascending)),
+    column_of(1, "Publisher", Track::Share(1.0), Some(Order::Ascending)),
+    Column {
+        mono: true,
+        ..column_of(2, "Version", Track::Fixed(96.0), None)
+    },
+    Column {
+        align: Align::End,
+        ..column_of(3, "Size", Track::Fixed(80.0), Some(Order::Descending))
+    },
+    column_of(4, "Installed", Track::Fixed(96.0), Some(Order::Descending)),
+    column_of(5, "Status", Track::Fixed(80.0), None),
+    column_of(6, "Location", Track::Share(1.0), None),
+    Column {
+        mono: true,
+        ..column_of(7, "ID", Track::Fixed(300.0), None)
+    },
+];
+
+const fn column_of(
+    id: u16,
+    header: &'static str,
+    width: Track,
+    sort: Option<Order>,
+) -> Column<'static> {
+    Column {
+        id: ColumnId(id),
+        header,
+        width,
+        min: 64.0,
+        align: Align::Start,
+        mono: false,
+        sort,
+    }
+}
 /// Why Properties is disabled: its tooltip.
 pub(crate) const PROPERTIES_TIP: &str = "Not available for this program";
 /// The header's drawer button's tooltip.
@@ -87,7 +124,10 @@ pub(crate) enum Msg {
     Page(u8),
     Category(u8),
     Drawer,
+    /// Data row `r` becomes the table's current row.
     Row(u32),
+    /// What the table's keys, clicks and client actions ask for.
+    Table(TableEvent),
     /// The filter field changed.
     Filter(TextEdit),
     /// Clears the filter, as Esc in the field would (the app's accelerator, not the field's).
@@ -129,7 +169,14 @@ enum Open {
 /// The page's view-model.
 pub(crate) struct Shell {
     page: u8,
+    /// The current data row, and its place in the table.
     selected: Option<u32>,
+    current: Option<u32>,
+    /// The checked data rows, and how many.
+    checked: Vec<bool>,
+    checked_count: usize,
+    /// The table's sort: the rows in data order, or reversed by the column's header.
+    sorted: Option<(ColumnId, Order)>,
     categories: [bool; CATEGORIES as usize],
     drawer: bool,
     filter: String,
@@ -148,8 +195,7 @@ pub(crate) struct Shell {
     start_page: u8,
     /// Column 0 is the name the filter searches.
     cells: Vec<[String; CELLS]>,
-    /// Data rows on the tab and matching the filter, in order; the table shows the first
-    /// [`ROWS`].
+    /// Data rows on the tab and matching the filter, in the table's order.
     visible: Vec<u32>,
 }
 
@@ -174,6 +220,10 @@ impl Shell {
         let mut s = Self {
             page: 0,
             selected: None,
+            current: None,
+            checked: vec![false; DATA],
+            checked_count: 0,
+            sorted: None,
             categories: [false; CATEGORIES as usize],
             drawer: false,
             // Room for the typed text, so typing doesn't allocate (U8).
@@ -206,7 +256,8 @@ impl Shell {
                 self.drawer = !self.drawer;
                 self.confirming = false;
             }
-            Msg::Row(r) => self.selected = Some(r),
+            Msg::Row(r) => self.select(Some(r)),
+            Msg::Table(e) => self.table(e),
             Msg::Filter(edit) => {
                 if edit.apply(&mut self.filter) {
                     self.refilter();
@@ -232,7 +283,7 @@ impl Shell {
             }
             Msg::ConfirmApply => self.confirming = true,
             Msg::RowMenu(r) => {
-                self.selected = Some(r);
+                self.select(Some(r));
                 self.open = Open::RowMenu(r);
             }
             // A danger item opens the drawer: a menu never applies (A1.10 item 3).
@@ -297,7 +348,6 @@ impl Shell {
     pub(crate) fn context_menu(&self, key: Key) -> Option<Msg> {
         self.visible
             .iter()
-            .take(ROWS)
             .find(|&&r| Key::index(u64::from(r)) == key)
             .map(|&r| Msg::RowMenu(r))
     }
@@ -311,6 +361,69 @@ impl Shell {
                 .filter(|(i, c)| (i % 4 == 3) == store && contains_folded(&c[0], filter))
                 .map(|(i, _)| i),
         );
+        if self.sorted.is_some_and(|(_, o)| o == Order::Descending) {
+            self.visible.reverse();
+        }
+        self.select(self.selected);
+    }
+
+    /// Data row `r` (or none) becomes current, at its place in the table if it's there.
+    fn select(&mut self, r: Option<u32>) {
+        self.selected = r;
+        self.current = r
+            .and_then(|r| self.visible.iter().position(|&v| v == r))
+            .and_then(|at| u32::try_from(at).ok());
+    }
+
+    /// The table's event: the fixture's checks toggle (Shift's range is the model's, not
+    /// measured here), and a sort reverses the rows.
+    fn table(&mut self, e: TableEvent) {
+        let row = |at: u32| self.visible.get(at as usize).copied();
+        match e {
+            TableEvent::Current(at) => self.select(row(at)),
+            TableEvent::Check(at, _) => {
+                if let Some(r) = row(at) {
+                    let on = &mut self.checked[r as usize];
+                    *on = !*on;
+                    if *on {
+                        self.checked_count += 1;
+                    } else {
+                        self.checked_count -= 1;
+                    }
+                    self.select(Some(r));
+                }
+            }
+            TableEvent::CheckAll => {
+                let on = self.checked_count < DATA;
+                self.checked.fill(on);
+                self.checked_count = if on { DATA } else { 0 };
+            }
+            TableEvent::Activate(at) => {
+                self.select(row(at));
+                self.drawer = true;
+            }
+            TableEvent::Sort(col) => {
+                let order = match self.sorted {
+                    Some((c, Order::Ascending)) if c == col => Order::Descending,
+                    _ => Order::Ascending,
+                };
+                let reversed = self.sorted.is_some_and(|(_, o)| o == Order::Descending);
+                if reversed != (order == Order::Descending) {
+                    self.visible.reverse();
+                }
+                self.sorted = Some((col, order));
+                self.select(self.selected);
+            }
+        }
+    }
+
+    /// The check column header's box.
+    fn all_checked(&self) -> Tri {
+        match self.checked_count {
+            0 => Tri::Off,
+            DATA => Tri::On,
+            _ => Tri::Mixed,
+        }
     }
 }
 
@@ -544,49 +657,41 @@ fn content(s: &Shell, cx: &mut Cx<'_, Msg>) {
             cx.add_with(Element::stack(Key::name("toolbar")).style(row(8.0)), |cx| {
                 toolbar(s, cx);
             });
-            cx.add_with(
-                Element::scroll(Key::name("table"), Axes::Y)
+            let table = Table {
+                rows: u32::try_from(s.visible.len()).unwrap_or(u32::MAX),
+                columns: &COLUMNS,
+                sorted: s.sorted,
+                checks: Some(("Select", s.all_checked())),
+                current: s.current,
+                status: s.visible.is_empty().then_some(Status {
+                    text: "No programs match the filter",
+                    action: Some(("Clear filter", Msg::ClearFilter)),
+                }),
+                context: true,
+                on: Msg::Table,
+            };
+            cx.table(
+                Element::table(Key::name("table"))
                     .style(Style {
                         grow: 1.0,
-                        padding: Insets::all(4.0),
-                        align: Align::Stretch,
                         ..column(0.0)
                     })
                     .look(card(Radius::Card))
                     .name("Programs"),
-                |cx| {
-                    for &r in s.visible.iter().take(ROWS) {
-                        let cells = &s.cells[r as usize];
-                        let selected = s.selected == Some(r);
-                        cx.add_with(
-                            Element::button(Key::index(u64::from(r)), &cells[0], Msg::Row(r))
-                                .style(Style {
-                                    min: at_least(32.0),
-                                    padding: Insets::xy(8.0, 0.0),
-                                    ..row(12.0)
-                                })
-                                .look(control(selected.then_some(Tone::Selected)))
-                                .selected(selected)
-                                .context(),
-                            |cx| {
-                                for (c, text) in (0..).zip(cells) {
-                                    let (style, tone) = match c {
-                                        0 => (BODY, Tone::Text),
-                                        2 | 7 => (MONO, Tone::TextSecondary),
-                                        _ => (BODY, Tone::TextSecondary),
-                                    };
-                                    cx.add(
-                                        Element::text(Key::index(c), text)
-                                            .text_style(style)
-                                            .style(Style {
-                                                grow: 1.0,
-                                                ..Style::default()
-                                            })
-                                            .look(ink(tone)),
-                                    );
-                                }
-                            },
-                        );
+                &table,
+                |at, cells: &mut Cells<'_>| {
+                    let r = s.visible[at as usize];
+                    for text in &s.cells[r as usize] {
+                        cells.push(text);
+                    }
+                    Row {
+                        key: RowKey(u64::from(r)),
+                        check: Some(if s.checked[r as usize] {
+                            Tri::On
+                        } else {
+                            Tri::Off
+                        }),
+                        locked: "",
                     }
                 },
             );
@@ -824,6 +929,9 @@ pub(crate) enum Step {
     /// Input to the open popup's window (a menu or the dropdown's list), as the platform routes
     /// it there.
     Popup(Input),
+    /// The table's row at this place built and scrolled into view, as UI Automation's realizer
+    /// asks for it (TD-0009 A2.5).
+    Realize(u32),
 }
 
 /// A key pressed with `mods`, as a step.
@@ -963,6 +1071,11 @@ impl Run {
                 self.popup.set_text_scale(t);
             }
             Step::Popup(input) => self.popup_input(input),
+            Step::Realize(at) => {
+                if let Some(table) = self.ui.find(&Self::TABLE) {
+                    self.ui.realize(table, at);
+                }
+            }
         }
         for m in self.msgs.drain(..) {
             self.shell.update(m);
@@ -1096,10 +1209,17 @@ impl Run {
         }
     }
 
+    /// The view built and laid out, and again if the table asks: its first build guesses its
+    /// rows' view, and a reveal or a scroll may bring other rows into it (TD-0009 A2.5).
     fn build(&mut self) {
         let shell = &self.shell;
-        self.ui.build(|cx| view(shell, cx));
-        self.ui.layout(&mut self.text);
+        for _ in 0..2 {
+            self.ui.build(|cx| view(shell, cx));
+            self.ui.layout(&mut self.text);
+            if !self.ui.wants_build() {
+                break;
+            }
+        }
     }
 
     /// Opens, rebuilds or hides the popup to match the shell's, as the platform does: a new one
@@ -1206,16 +1326,25 @@ impl Run {
     /// The header's drawer button's path from the root.
     pub(crate) const DRAWER_BUTTON: [Key; 2] = [Key::name("header"), Key::name("drawer")];
 
-    /// The table's path from the root, on the first page: a scroll viewport.
+    /// The table's path from the root, on the first page: the grid.
     pub(crate) const TABLE: [Key; 3] =
         [Key::name("body"), Key::name("content"), Key::name("table")];
 
-    /// Data row `r`'s path from the root, while it's shown on the first page.
-    pub(crate) fn row(r: u64) -> [Key; 4] {
+    /// The table's rows' scroll viewport.
+    pub(crate) const TABLE_ROWS: [Key; 4] = [
+        Key::name("body"),
+        Key::name("content"),
+        Key::name("table"),
+        TABLE_BODY,
+    ];
+
+    /// Data row `r`'s path from the root, while it's built on the first page.
+    pub(crate) fn row(r: u64) -> [Key; 5] {
         [
             Key::name("body"),
             Key::name("content"),
             Key::name("table"),
+            TABLE_BODY,
             Key::index(r),
         ]
     }
@@ -1267,6 +1396,30 @@ impl Run {
     pub(crate) fn row_focused(mut self) -> Self {
         let row = self.ui.find(&Self::row(4));
         self.ui.set_focus(row);
+        self
+    }
+
+    /// The last row wholly in the table's view current and focused, as the keyboard leaves it:
+    /// Down from it scrolls.
+    pub(crate) fn bottom_row_current(mut self) -> Self {
+        let Some(body) = self.ui.find(&Self::TABLE_ROWS) else {
+            return self;
+        };
+        let end = self.ui.info(body).map_or(0.0, |n| n.rect.bottom());
+        let last = self
+            .ui
+            .children(body)
+            .filter(|&id| self.ui.info(id).is_some_and(|n| n.rect.bottom() <= end))
+            .last();
+        let key = last.and_then(|id| self.ui.info(id)).map(|n| n.key);
+        let row = (0u32..)
+            .take(DATA)
+            .find(|&r| Some(Key::index(u64::from(r))) == key);
+        if let Some(r) = row {
+            self.step(Step::Update(Msg::Row(r)));
+            let id = self.ui.find(&Self::row(u64::from(r)));
+            self.ui.set_focus(id);
+        }
         self
     }
 
@@ -1322,7 +1475,7 @@ impl Run {
 
     /// The table's vertical bar, if its content overflows.
     pub(crate) fn table_bar(&self) -> Option<ScrollBar> {
-        let id = self.ui.find(&Self::TABLE)?;
+        let id = self.ui.find(&Self::TABLE_ROWS)?;
         self.ui.info(id)?.scroll?.bar_y
     }
 

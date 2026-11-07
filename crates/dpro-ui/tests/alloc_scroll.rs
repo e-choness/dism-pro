@@ -4,8 +4,12 @@
 //! The shell runs its scripted session twice to warm up, then scrolls its table back and forth
 //! twice: wheel notches down and up (half notches among them), a thumb drag down and back, and
 //! Ctrl+End and Ctrl+Home with row 4 focused. Doing all of it a third time must neither allocate
-//! nor reallocate, through every stage of a frame, painting included. Slice 5b's table adds its
-//! rows entering and leaving the realized range to the same script.
+//! nor reallocate, through every stage of a frame, painting included.
+//!
+//! The table (slice 5b1) builds only the rows in view and half a view either side, so rows enter
+//! and leave it on every step. On the focused row, Ctrl+End and Ctrl+Home move the current row to
+//! the ends, which realizes the rows there; then Down and Up move it, and Space twice checks it
+//! and clears it.
 //!
 //! Its own file: the counting allocator is global, `cargo test` runs tests on threads, and
 //! `alloc_per_frame.rs` holds one test.
@@ -17,14 +21,14 @@ mod shell;
 
 use std::alloc::System;
 
-use dpro_ui::{Input, KeyCode, Point, ScrollBar, Theme};
+use dpro_ui::{Input, KeyCode, Mods, Point, ScrollBar, Theme};
 use shell::{CTRL, Run, Shell, Step, key};
 use stats_alloc::{INSTRUMENTED_SYSTEM, Region, StatsAlloc};
 
 #[global_allocator]
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
-/// The scroll script, from the table's top with the pointer resting on it and row 4 focused.
+/// The scroll script, from the table's top with the pointer resting on it and a row focused.
 fn script(run: &Run, bar: ScrollBar) -> Vec<Step> {
     let mut steps = Vec::new();
     for delta in [-120, -120, -120, -60, -60, 120, 120, 120, 120] {
@@ -44,6 +48,10 @@ fn script(run: &Run, bar: ScrollBar) -> Vec<Step> {
     steps.push(key(KeyCode::End, false, CTRL));
     steps.push(key(KeyCode::Home, true, CTRL));
     steps.push(key(KeyCode::Home, false, CTRL));
+    for k in [KeyCode::Down, KeyCode::Up, KeyCode::Space, KeyCode::Space] {
+        steps.push(key(k, true, Mods::default()));
+        steps.push(key(k, false, Mods::default()));
+    }
     steps
 }
 

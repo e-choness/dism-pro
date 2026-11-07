@@ -138,6 +138,24 @@ fn events(g: &mut BenchmarkGroup<'_, WallTime>, run: &mut Run) {
     });
     run.step(Step::Input(Input::PointerLeave));
     run.settle();
+
+    // The table (TD-0009 A2, slice 5b1): Down on the focused current row and Up back, each a
+    // message that moves the current row, the focus following it.
+    run.step(Step::Update(Msg::Row(4)));
+    let row = run.ui.find(&Run::row(4));
+    run.ui.set_focus(row);
+    let (down, up) = (
+        key(KeyCode::Down, true, Mods::default()),
+        key(KeyCode::Up, true, Mods::default()),
+    );
+    g.bench_function("row_down", |b| {
+        b.iter(|| {
+            run.step(down.clone());
+            run.step(up.clone());
+        });
+    });
+    run.ui.set_focus(None);
+    run.settle();
 }
 
 fn interact(c: &mut Criterion) {

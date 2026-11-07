@@ -2135,4 +2135,57 @@ mod tests {
         // SAFETY: msg is a live local; PM_REMOVE takes the message.
         while unsafe { PeekMessageW(&raw mut msg, null_mut(), 0, 0, PM_REMOVE) } != 0 {}
     }
+
+    /// TD-0009 A2.4, slice 5b1: a press carries the Shift and Ctrl that Windows sends with it
+    /// (`MK_SHIFT`, `MK_CONTROL`), and a second press within the double-click rectangle and time
+    /// is a double-click; a third starts over, as Windows counts them. The window has no
+    /// `CS_DBLCLKS`, so a popup's watch for presses outside it sees every press as a button-down.
+    ///
+    /// The presses are sent, not posted, so they all share the last queued message's time.
+    #[test]
+    fn a_press_carries_its_modifiers_and_a_quick_second_one_is_a_double_click() {
+        const MK_SHIFT: WPARAM = 0x0004;
+        const MK_CONTROL: WPARAM = 0x0008;
+        let (window, events, _) = open(0);
+        let press = |x: u16, y: u16, keys: WPARAM| {
+            let lp = (LPARAM::from(y) << 16) | LPARAM::from(x);
+            // SAFETY: messages sent to this test's live window, on its thread.
+            unsafe {
+                SendMessageW(window.hwnd, WM_LBUTTONDOWN, keys, lp);
+                SendMessageW(window.hwnd, WM_LBUTTONUP, 0, lp);
+            }
+        };
+        events.borrow_mut().clear();
+        press(10, 10, MK_CONTROL);
+        press(11, 10, MK_SHIFT);
+        press(11, 10, 0);
+        press(200, 10, 0);
+        press(10, 10, MK_SHIFT | MK_CONTROL);
+        let presses: Vec<(i32, bool, bool, bool)> = events
+            .borrow()
+            .iter()
+            .filter_map(|e| match *e {
+                Event::PointerDown { at, mods, double } => {
+                    Some((at.x, mods.shift, mods.ctrl, double))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            presses,
+            [
+                (10, false, true, false),
+                (11, true, false, true),
+                (11, false, false, false),
+                (200, false, false, false),
+                (10, true, true, false),
+            ],
+            "the last is too far from the one before"
+        );
+        drop(window);
+        // SAFETY: plain data; all-zero is a valid value.
+        let mut msg: MSG = unsafe { std::mem::zeroed() };
+        // SAFETY: msg is a live local; PM_REMOVE takes the message.
+        while unsafe { PeekMessageW(&raw mut msg, null_mut(), 0, 0, PM_REMOVE) } != 0 {}
+    }
 }

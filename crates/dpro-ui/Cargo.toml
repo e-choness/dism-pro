@@ -30,6 +30,11 @@ harness = false
 name = "a11y"
 harness = false
 
+# TD-0009 §7 U1: S-01's fling script on a 100k-row table, its frame times (A2.7).
+[[bench]]
+name = "fling"
+harness = false
+
 # U2 as instruction counts, for `docker compose run --rm bench-gate` (doc 04 §3).
 [[bench]]
 name = "ir"

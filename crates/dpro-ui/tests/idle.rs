@@ -19,18 +19,21 @@
 //!
 //! Scrolling (A2, slice 5a): a scroll is done when its event is, with no smooth scrolling and no
 //! fading bar, so a wheel notch, a thumb drag and its release each settle like any other input.
+//!
+//! The table (A2, slice 5b1): an idle frame doesn't ask for another build, and moving the current
+//! row, checking it, sorting and realizing a far row each settle at once.
 
 #[path = "../benches/fixtures/shell.rs"]
 mod shell;
 
 use dpro_ui::{
-    Caret, FakeText, Input,
+    Caret, ColumnId, FakeText, Input, KeyCode, Mods, TableEvent,
     tokens::{
         motion::{HOLD_MS, HOVER_MS},
         popup::{TIP_DELAY_MS, TIP_SHOWS_FOR},
     },
 };
-use shell::{FRAME_MS, Run, Shell, Step, popup_view, view};
+use shell::{FRAME_MS, Msg, Run, Shell, Step, key, popup_view, view};
 
 /// Frames until the animations stop: the first tick starts them, and they end once a whole
 /// duration has passed.
@@ -77,6 +80,7 @@ fn settle_caret(run: &mut Run, when: &str) -> u64 {
 /// A frame nobody asked for finds nothing to do.
 fn assert_idle(run: &mut Run, when: &str) {
     assert!(!run.ui.wants_frame(), "{when}: still asks for frames");
+    assert!(!run.ui.wants_build(), "{when}: the table asks for a build");
     assert_eq!(run.caret_wake(), None, "{when}: still asks for caret wakes");
     run.ui.build(|cx| view(&run.shell, cx));
     run.ui.layout(&mut FakeText);
@@ -93,6 +97,10 @@ fn assert_idle(run: &mut Run, when: &str) {
     assert!(
         !run.ui.wants_frame(),
         "{when}: an idle frame asked for another"
+    );
+    assert!(
+        !run.ui.wants_build(),
+        "{when}: an idle frame asked for another build"
     );
     assert_eq!(
         run.caret_wake(),
@@ -244,4 +252,29 @@ fn a_scroll_and_a_thumb_drag_ask_for_nothing_after() {
     settle(&mut run, "the thumb let go", max_ticks());
     assert_idle(&mut run, "the thumb let go");
     assert!(run.wake().is_none(), "the drag armed a wake");
+}
+
+/// A2, slice 5b1: the table's keys, a sort and a realized row each settle at once.
+#[test]
+fn the_table_settles_after_each_change() {
+    let mut run = Run::accessible(Shell::new()).bottom_row_current();
+    assert_idle(&mut run, "the bottom row current");
+    let plain = Mods::default();
+    for (step, when) in [
+        (key(KeyCode::Down, true, plain), "Down past the view's end"),
+        (key(KeyCode::Down, false, plain), "Down let go"),
+        (key(KeyCode::Space, true, plain), "Space checking the row"),
+        (key(KeyCode::Space, false, plain), "Space let go"),
+        (
+            Step::Update(Msg::Table(TableEvent::Sort(ColumnId(0)))),
+            "a sort",
+        ),
+        (Step::Realize(700), "a far row realized"),
+        (key(KeyCode::End, true, plain), "End"),
+    ] {
+        run.step(step);
+        settle(&mut run, when, max_ticks());
+        assert_idle(&mut run, when);
+        assert!(run.wake().is_none(), "{when} armed a wake");
+    }
 }
