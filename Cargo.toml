@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = ["crates/*", "xtask"]
+# Vendored crates keep upstream's code and lints: they're dependencies, patched in below.
+exclude = ["vendor"]
 
 [workspace.package]
 version = "0.1.0"
@@ -81,7 +83,7 @@ serde_json = "1.0.154"
 # accesskit_windows serves to UI Automation. MIT OR Apache-2.0. Exact: the version S-01 built.
 accesskit = "=0.25.2"
 # Serves that tree to UI Automation (TD-0009 §5.5), from dpro-win's GUI. Uses `windows` 0.62, the
-# release dpro-win names. MIT OR Apache-2.0. Exact: the version S-01 built.
+# release dpro-win names. MIT OR Apache-2.0. Exact: the version S-01 built, vendored (below).
 accesskit_windows = "=0.35.2"
 # Dev/bench only.
 criterion = "0.8.2"
@@ -115,6 +117,12 @@ dbg_macro = "deny"
 print_stdout = "deny"
 undocumented_unsafe_blocks = "deny"
 cast_possible_truncation = "deny"
+
+# The Windows adapter, vendored to add the UI Automation patterns AccessKit lacks (TD-0009 A2.5,
+# ADR-0002's amendment). vendor/accesskit_windows/PATCHES.md lists the changes. accesskit and
+# accesskit_consumer stay on crates.io at their exact pins.
+[patch.crates-io]
+accesskit_windows = { path = "vendor/accesskit_windows" }
 
 [profile.release]
 # A panic is a bug that produces a minidump (coding standards §3).
