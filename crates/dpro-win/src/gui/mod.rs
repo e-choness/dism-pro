@@ -49,6 +49,7 @@ mod a11y;
 mod clipboard;
 mod compose;
 pub mod env;
+pub mod locale;
 mod lru;
 pub mod probe;
 pub mod text;

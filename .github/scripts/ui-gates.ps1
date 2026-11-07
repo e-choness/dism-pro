@@ -82,6 +82,12 @@ raw-API baseline, measured in this job, so it holds on whatever machine the runn
       its HeaderItem away, focus going to Version's; Shift+F10 there and Invoke on Reset columns
       brings it back at its first width. Each is read back through UIA within 2 s; the drag's time
       is advisory (U3: 50 ms).
+  Value cells (TD-0009 A2.5, slice 5b3): the shell's sizes and days in the runner's formats. A
+      row's Size cell reads with the user's decimal separator (GetLocaleInfoEx) and its Installed
+      cell as GetDateFormatEx writes the day. The decimal separator and the short date are then
+      changed with SetLocaleInfoW and WM_SETTINGCHANGE "intl" broadcast, as Settings does; the
+      cells follow, and follow back when the old values are put back (always, in a finally). Each
+      is read back through UIA within 2 s; the time is advisory (U3: 50 ms).
 
 The probe target is dpro-ui's `shell` example until roadmap 3.2 gives dismpro.exe its shell.
 Results go to annotations and the job summary; the raw reports and screenshots go to -Out, which
@@ -1601,6 +1607,110 @@ try {
 foreach ($k in $checks.Keys) { $lines += '{0,-50} {1}' -f $k, (Format-Verdict $checks[$k]) }
 $ok = $checks.Count -gt 0 -and -not ($checks.Values -contains $false)
 Publish 'Columns' $lines $ok
+if (-not $ok) { $failed++ }
+
+# Value cells (TD-0009 A2.5, slice 5b3) -------------------------------------------------------------
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class ValuesGateWin32 {
+    [StructLayout(LayoutKind.Sequential)]
+    struct SYSTEMTIME { public ushort Year, Month, DayOfWeek, Day, Hour, Minute, Second, Milliseconds; }
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    static extern int GetLocaleInfoEx(string locale, uint type, StringBuilder data, int size);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    static extern int GetDateFormatEx(string locale, uint flags, ref SYSTEMTIME date, string format, StringBuilder data, int size, string calendar);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool SetLocaleInfoW(uint lcid, uint type, string data);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    static extern IntPtr SendMessageTimeoutW(IntPtr hwnd, uint msg, UIntPtr wp, string lp, uint flags, uint ms, out UIntPtr result);
+    public const uint Decimal = 0x000E;   // LOCALE_SDECIMAL
+    public const uint ShortDate = 0x001F; // LOCALE_SSHORTDATE
+    // The user's value of `type`, as the shell reads it.
+    public static string Get(uint type) {
+        var b = new StringBuilder(128);
+        return GetLocaleInfoEx(null, type, b, b.Capacity) > 0 ? b.ToString() : null;
+    }
+    // The user's short date of a day, as the shell writes it.
+    public static string Date(int y, int m, int d) {
+        var t = new SYSTEMTIME { Year = (ushort) y, Month = (ushort) m, Day = (ushort) d };
+        var b = new StringBuilder(128);
+        return GetDateFormatEx(null, 1 /* DATE_SHORTDATE */, ref t, null, b, b.Capacity, null) > 0 ? b.ToString() : null;
+    }
+    // Sets the user's `type` (LOCALE_USER_DEFAULT) and tells every window, as Settings does.
+    public static bool Set(uint type, string value) {
+        if (!SetLocaleInfoW(0x0400, type, value)) { return false; }
+        UIntPtr r;
+        // HWND_BROADCAST, WM_SETTINGCHANGE "intl", SMTO_ABORTIFHUNG, 5 s.
+        return SendMessageTimeoutW(new IntPtr(0xFFFF), 0x001A, UIntPtr.Zero, "intl", 0x0002, 5000, out r) != IntPtr.Zero;
+    }
+}
+'@
+# The names of the cells of the row named `$Name`, or @() if it isn't built.
+function Get-CellNames($Root, [string] $Name) {
+    $row = Get-Rows $Root | Where-Object { $_.Current.Name -eq $Name } | Select-Object -First 1
+    if ($null -eq $row) { return , @() }
+    , @($row.FindAll([Windows.Automation.TreeScope]::Children, [Windows.Automation.Condition]::TrueCondition) | ForEach-Object { $_.Current.Name })
+}
+
+# Row 1 of the shell's data: 37 MiB and 7,919 bytes, installed on 2026-01-02.
+$valueRow = 'Fabrikam Updater Pro 1'
+$lines = @("Value cells in the shell at $Size (the checks are gates, each read back through UIA within 2 s; the times are advisory, U3: 50 ms)")
+$checks = [ordered]@{}
+$hwnd = [IntPtr]::Zero
+$oldDecimal = [ValuesGateWin32]::Get([ValuesGateWin32]::Decimal)
+$oldDate = [ValuesGateWin32]::Get([ValuesGateWin32]::ShortDate)
+$changed = $false
+$p = Start-Process -FilePath $exe.shell -ArgumentList @('--size', $Size) -PassThru
+$null = $p.Handle
+try {
+    $shown = Wait-Until {
+        $script:hwnd = [UiaGateWin32]::FindWindowW('dismpro.window', 'DISM Pro shell probe')
+        $script:hwnd -ne [IntPtr]::Zero -and [UiaGateWin32]::IsWindowVisible($script:hwnd)
+    } 30000
+    if (-not $shown) { throw "the shell showed no window in 30 s (exited: $($p.HasExited))" }
+    $root = $ae::FromHandle($hwnd)
+    $size = "37${oldDecimal}0 MB"
+    $day = [ValuesGateWin32]::Date(2026, 1, 2)
+    $lines += "the runner's formats: decimal '$oldDecimal', short date '$oldDate' ($day)"
+    $names = @()
+    $read = Wait-Until { $script:names = Get-CellNames $root $valueRow; $script:names.Count -gt 0 } 10000
+    if (-not $read) { throw "no row ""$valueRow"" in 10 s" }
+    $lines += "  $valueRow`: $($names -join ' | ')"
+    $checks['a size reads in the user''s decimal separator'] = $names -contains $size
+    $checks['a day reads in the user''s short date'] = $names -contains $day
+
+    # New formats, as Settings › Time & language › Region writes them.
+    $decimal = if ($oldDecimal -eq ',') { '.' } else { ',' }
+    $changed = $true
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    $set = [ValuesGateWin32]::Set([ValuesGateWin32]::Decimal, $decimal) -and [ValuesGateWin32]::Set([ValuesGateWin32]::ShortDate, 'yyyy-MM-dd')
+    if (-not $set) { throw "SetLocaleInfoW or the broadcast failed ($([Runtime.InteropServices.Marshal]::GetLastWin32Error()))" }
+    $followed = Wait-Until { $n = Get-CellNames $root $valueRow; ($n -contains "37${decimal}0 MB") -and ($n -contains '2026-01-02') } 2000
+    $lines += '{0,-12} {1}' -f 'new formats', (Format-Ms $sw.Elapsed.TotalMilliseconds 50)
+    $lines += "  $valueRow`: $((Get-CellNames $root $valueRow) -join ' | ')"
+    $checks['new formats show in the cells (WM_SETTINGCHANGE "intl")'] = $followed
+
+    $restored = [ValuesGateWin32]::Set([ValuesGateWin32]::Decimal, $oldDecimal) -and [ValuesGateWin32]::Set([ValuesGateWin32]::ShortDate, $oldDate)
+    $changed = -not $restored
+    $checks['the old formats come back'] = $restored -and (Wait-Until { $n = Get-CellNames $root $valueRow; ($n -contains $size) -and ($n -contains $day) } 2000)
+} catch {
+    $lines += "value cells FAILED: $($_.Exception.Message)"
+    $checks['client'] = $false
+} finally {
+    if ($changed) {
+        [void][ValuesGateWin32]::Set([ValuesGateWin32]::Decimal, $oldDecimal)
+        [void][ValuesGateWin32]::Set([ValuesGateWin32]::ShortDate, $oldDate)
+    }
+    if (-not $p.HasExited) {
+        if ($hwnd -ne [IntPtr]::Zero) { [void][UiaGateWin32]::PostMessageW($hwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) } # WM_CLOSE
+        if (-not $p.WaitForExit(5000)) { $p.Kill(); $lines += 'the shell did not close on WM_CLOSE'; $checks['closes'] = $false }
+    }
+}
+foreach ($k in $checks.Keys) { $lines += '{0,-50} {1}' -f $k, (Format-Verdict $checks[$k]) }
+$ok = $checks.Count -gt 0 -and -not ($checks.Values -contains $false)
+Publish 'Value cells' $lines $ok
 if (-not $ok) { $failed++ }
 
 exit $failed

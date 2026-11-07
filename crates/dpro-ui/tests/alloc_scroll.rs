@@ -14,6 +14,9 @@
 //! The columns (slice 5b2): Publisher's divider dragged 120 px right in 12 frames and let go, a
 //! fit of every column, which the table measures and sends back, then the columns reset.
 //!
+//! The value cells (slice 5b3): each row's size and install day are formatted by the window's
+//! formats once, and kept, so rows coming back into view format nothing and allocate nothing.
+//!
 //! Its own file: the counting allocator is global, `cargo test` runs tests on threads, and
 //! `alloc_per_frame.rs` holds one test.
 

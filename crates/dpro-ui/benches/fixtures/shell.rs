@@ -22,11 +22,11 @@
 use std::sync::OnceLock;
 
 use dpro_ui::{
-    Align, Axis, Canvas, Cells, ClipboardRequest, Column, ColumnId, ColumnLayout, ColumnMenuLabels,
-    Cx, Dim, Element, FakeText, Input, Insets, Justify, Key, KeyCode, KeyEvent, Look, Mods, Motion,
-    Order, Point, Popup, PopupKind, Radius, Row, RowKey, ScrollBar, Size, Status, Style,
-    TABLE_BODY, TABLE_HEADER, Table, TableEvent, TextEdit, TextStyle, Theme, Tone, Track, Tri, Ui,
-    accesskit::TreeUpdate, tokens,
+    Align, Axis, Bytes, Canvas, Cells, ClipboardRequest, Column, ColumnId, ColumnLayout,
+    ColumnMenuLabels, Cx, Dim, Element, FakeText, Input, Insets, InvariantFormats, Justify, Key,
+    KeyCode, KeyEvent, Look, Mods, Motion, Order, Point, Popup, PopupKind, Radius, Row, RowKey,
+    ScrollBar, Size, SizeUnits, Status, Style, TABLE_BODY, TABLE_HEADER, Table, TableEvent,
+    TextEdit, TextStyle, Theme, Tone, Track, Tri, Ui, UnixMillis, accesskit::TreeUpdate, tokens,
 };
 
 const RAIL: u8 = 12;
@@ -101,6 +101,17 @@ const fn column_of(
         hideable: true,
     }
 }
+/// The size units' labels, as the app's catalog gives them (TD-0009 A2.5, slice 5b3).
+pub(crate) const UNITS: [&str; 7] = ["{} B", "{} KB", "{} MB", "{} GB", "{} TB", "{} PB", "{} EB"];
+
+pub(crate) fn units() -> SizeUnits {
+    SizeUnits::new(UNITS)
+}
+
+/// 2026-01-01, the day the first program was installed; one a day after it, for 336 days.
+const FIRST_DAY: u64 = 1_767_225_600_000;
+const DAY_MS: u64 = 86_400_000;
+
 /// The column menu's labels.
 const COLUMN_MENU: ColumnMenuLabels<'static> = ColumnMenuLabels {
     name: "Columns",
@@ -210,8 +221,11 @@ pub(crate) struct Shell {
     done: Option<u8>,
     /// Settings' Start page, in [`START_PAGES`].
     start_page: u8,
-    /// Column 0 is the name the filter searches.
+    /// Column 0 is the name the filter searches. The table shows columns 3 and 4 from `sizes`
+    /// and `days`.
     cells: Vec<[String; CELLS]>,
+    sizes: Vec<Bytes>,
+    days: Vec<UnixMillis>,
     /// Data rows on the tab and matching the filter, in the table's order.
     visible: Vec<u32>,
 }
@@ -233,6 +247,13 @@ impl Shell {
                     format!("{{{i:08X}-0000-0000-0000-000000000000}}"),
                 ]
             })
+            .collect();
+        // About the megabytes the text says, and a few more bytes, so every digit varies.
+        let sizes = (0..DATA as u64)
+            .map(|i| Bytes(((i * 37) % 4096) * 1_048_576 + (i * 7_919) % 1_048_576))
+            .collect();
+        let days = (0..DATA as u64)
+            .map(|i| UnixMillis(FIRST_DAY + (i % 336) * DAY_MS))
             .collect();
         let mut s = Self {
             page: 0,
@@ -256,6 +277,8 @@ impl Shell {
             done: None,
             start_page: 0,
             cells,
+            sizes,
+            days,
             visible: Vec::with_capacity(DATA),
         };
         s.refilter();
@@ -720,8 +743,15 @@ fn content(s: &Shell, cx: &mut Cx<'_, Msg>) {
                 &table,
                 |at, cells: &mut Cells<'_>| {
                     let r = s.visible[at as usize];
-                    for text in &s.cells[r as usize] {
-                        cells.push(text);
+                    let i = r as usize;
+                    let text = &s.cells[i];
+                    for t in &text[..3] {
+                        cells.push(t);
+                    }
+                    cells.size(s.sizes[i]);
+                    cells.date(s.days[i]);
+                    for t in &text[5..] {
+                        cells.push(t);
                     }
                     Row {
                         key: RowKey(u64::from(r)),
@@ -973,6 +1003,9 @@ pub(crate) enum Step {
     /// The table's row at this place built and scrolled into view, as UI Automation's realizer
     /// asks for it (TD-0009 A2.5).
     Realize(u32),
+    /// The user's formats changed (Settings › Time & language › Region): sizes' decimal
+    /// separator is now this (A2.5, slice 5b3).
+    Decimal(&'static str),
 }
 
 /// A key pressed with `mods`, as a step.
@@ -1070,6 +1103,7 @@ impl Run {
         };
         // The window has keyboard focus, as a window the user works in does.
         run.ui.set_active(true);
+        run.ui.set_formats(InvariantFormats::new(units()));
         run.ui.set_text_scale(text_scale);
         run.popup.set_text_scale(text_scale);
         run.frame();
@@ -1111,6 +1145,9 @@ impl Run {
                 self.ui.set_text_scale(t);
                 self.popup.set_text_scale(t);
             }
+            Step::Decimal(d) => self
+                .ui
+                .set_formats(InvariantFormats::new(units()).with_decimal(d)),
             Step::Popup(input) => self.popup_input(input),
             Step::Realize(at) => {
                 if let Some(table) = self.ui.find(&Self::TABLE) {

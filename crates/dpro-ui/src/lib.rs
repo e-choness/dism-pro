@@ -72,11 +72,13 @@ mod theme;
 mod tooltip;
 mod tree;
 mod ui;
+mod values;
 
 pub use accesskit;
 pub use build::Cx;
 pub use canvas::Canvas;
 pub use dpro_app::table::{ColumnId, ColumnLayout, Order, Pick, RowKey, Tri, Width};
+pub use dpro_core::units::{Bytes, UnixMillis};
 pub use field::{Caret, ClipboardRequest, Cursor, FieldInfo, Insert, MAX_FIELD_LEN, TextEdit};
 pub use geom::{Insets, Point, Rect, RectPx, Size};
 pub use input::{Input, KeyCode, KeyEvent, Mods};
@@ -91,3 +93,4 @@ pub use text::{CaretStop, FakeText, GlyphSink, Icon, TextMetrics, TextStyle, Tex
 pub use theme::{Color, Scheme, SysColors, Theme, Tone, tokens};
 pub use tree::{Element, Group, Key, Look, NodeId, NodeInfo, Radius, Role};
 pub use ui::{MAX_TEXT_SCALE, Motion, Ui};
+pub use values::{Formats, InvariantFormats, SizeUnits, format_size};

@@ -17,9 +17,9 @@
 )]
 
 use dpro_ui::{
-    Align, Canvas, Cells, Column, ColumnId, Cx, Dim, Element, FakeText, Key, Motion, NodeId, Order,
-    Row, RowKey, Size, Style, TABLE_BODY, Table, TableEvent, Theme, Track, Tri, Ui,
-    accesskit::TreeUpdate,
+    Align, Bytes, Canvas, Cells, Column, ColumnId, Cx, Dim, Element, FakeText, InvariantFormats,
+    Key, Motion, NodeId, Order, Row, RowKey, Size, SizeUnits, Style, TABLE_BODY, Table, TableEvent,
+    Theme, Track, Tri, Ui, UnixMillis, accesskit::TreeUpdate,
 };
 
 /// U1's table.
@@ -29,7 +29,14 @@ pub(crate) const WINDOW: Size = Size {
     h: 700.0,
 };
 const CELLS: usize = 8;
+/// The text columns: all but Size and Installed, whose values the table formats (slice 5b3).
+const TEXT: usize = CELLS - 2;
 const KEY: Key = Key::name("table");
+/// The size units' labels, as the app's catalog gives them.
+const UNITS: [&str; 7] = ["{} B", "{} KB", "{} MB", "{} GB", "{} TB", "{} PB", "{} EB"];
+/// 2026-01-01; row `i` was installed `i % 336` days after it.
+const FIRST_DAY: u64 = 1_767_225_600_000;
+const DAY_MS: u64 = 86_400_000;
 
 /// Per-frame velocity decay of a fling, close to Windows' inertia.
 const FRICTION: f32 = 0.95;
@@ -69,9 +76,11 @@ const fn column(
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Msg(pub(crate) TableEvent);
 
-/// The rows' text, made once.
+/// The rows' text and values, made once.
 pub(crate) struct Data {
-    cells: Vec<[String; CELLS]>,
+    cells: Vec<[String; TEXT]>,
+    sizes: Vec<Bytes>,
+    days: Vec<UnixMillis>,
     checked: Vec<bool>,
 }
 
@@ -87,13 +96,17 @@ impl Data {
                         format!("{} {} {i}", VENDORS[i % 4], PRODUCTS[(i / 4) % 4]),
                         format!("{} Corporation", VENDORS[i % 4]),
                         format!("{}.{}.{}", i % 13, i % 100, i % 997),
-                        format!("{} MB", (i * 37) % 4096),
-                        format!("2026-{:02}-{:02}", i % 12 + 1, i % 28 + 1),
                         "Installed".to_owned(),
                         format!("C:\\Program Files\\App {i}"),
                         format!("{{{i:08X}-0000-0000-0000-000000000000}}"),
                     ]
                 })
+                .collect(),
+            sizes: (0..n as u64)
+                .map(|i| Bytes(((i * 37) % 4096) * 1_048_576 + (i * 7_919) % 1_048_576))
+                .collect(),
+            days: (0..n as u64)
+                .map(|i| UnixMillis(FIRST_DAY + (i % 336) * DAY_MS))
                 .collect(),
             checked: (0..n).map(|i| i % 7 == 0).collect(),
         }
@@ -123,8 +136,14 @@ fn view(data: &Data, cx: &mut Cx<'_, Msg>) {
         &table,
         |at, cells: &mut Cells<'_>| {
             let i = at as usize;
-            for text in &data.cells[i] {
-                cells.push(text);
+            let text = &data.cells[i];
+            for t in &text[..3] {
+                cells.push(t);
+            }
+            cells.size(data.sizes[i]);
+            cells.date(data.days[i]);
+            for t in &text[3..] {
+                cells.push(t);
             }
             Row {
                 key: RowKey(u64::from(at)),
@@ -181,6 +200,7 @@ impl Fling {
             scale,
         };
         f.ui.set_active(true);
+        f.ui.set_formats(InvariantFormats::new(SizeUnits::new(UNITS)));
         let (w, h) = f.ui.pixel_size();
         f.pixels = vec![0; usize::try_from(u64::from(w) * u64::from(h)).unwrap_or(0)];
         f.frame(0.0);
