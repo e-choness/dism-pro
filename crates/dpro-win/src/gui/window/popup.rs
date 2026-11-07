@@ -712,6 +712,9 @@ impl State {
 /// A new popup window of `kind` owned by `owner`, hidden, at `rect`, with a state that routes to
 /// its owner's handler. `None` if it can't be made.
 fn create(owner: HWND, kind: PopupKind, rect: RectPx, gpu: Option<&Gpu>) -> Option<Window> {
+    // Tests: its owner's thread holds the lock already (`Window`).
+    #[cfg(test)]
+    let serial = super::serial::Serial::take();
     // SAFETY: no preconditions; a null name means this executable.
     let instance = unsafe { GetModuleHandleW(null()) };
     register_class(instance, POPUP_CLASS, CS_DROPSHADOW).ok()?;
@@ -771,7 +774,12 @@ fn create(owner: HWND, kind: PopupKind, rect: RectPx, gpu: Option<&Gpu>) -> Opti
         }
         return None;
     }
-    Some(Window { hwnd, life })
+    Some(Window {
+        hwnd,
+        life,
+        #[cfg(test)]
+        _serial: serial,
+    })
 }
 
 /// The release of the button whose press is the mouse message `down`, or 0. Neither class asks
