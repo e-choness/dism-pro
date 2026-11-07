@@ -82,8 +82,9 @@ use windows_sys::{
                 WM_MBUTTONDOWN, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE,
                 WM_NCDESTROY, WM_PAINT, WM_POWERBROADCAST, WM_RBUTTONDOWN, WM_SETCURSOR,
                 WM_SETFOCUS, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_SYSKEYDOWN,
-                WM_SYSKEYUP, WM_THEMECHANGED, WM_TIMER, WM_WTSSESSION_CHANGE, WM_XBUTTONDOWN,
-                WNDCLASS_STYLES, WNDCLASSEXW, WS_EX_NOREDIRECTIONBITMAP, WS_OVERLAPPEDWINDOW,
+                WM_SYSKEYUP, WM_THEMECHANGED, WM_TIMECHANGE, WM_TIMER, WM_WTSSESSION_CHANGE,
+                WM_XBUTTONDOWN, WNDCLASS_STYLES, WNDCLASSEXW, WS_EX_NOREDIRECTIONBITMAP,
+                WS_OVERLAPPEDWINDOW,
             },
         },
     },
@@ -740,8 +741,10 @@ impl State {
                 }
                 self.send(hwnd, Event::Dpi(self.dpi.get()));
             }
-            // Broadcast to every top-level window: theme, colors, accessibility settings.
-            WM_SETTINGCHANGE | WM_SYSCOLORCHANGE | WM_THEMECHANGED | WM_WTSSESSION_CHANGE => {
+            // Broadcast to every top-level window: theme, colors, accessibility settings, the
+            // user's formats, the clock's time and zone.
+            WM_SETTINGCHANGE | WM_SYSCOLORCHANGE | WM_THEMECHANGED | WM_WTSSESSION_CHANGE
+            | WM_TIMECHANGE => {
                 self.env_changed(hwnd);
                 return None;
             }

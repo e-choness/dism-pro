@@ -35,6 +35,9 @@
 //!   `WM_SETTINGCHANGE`.)*
 //! - **drag distance:** `GetSystemMetricsForDpi(SM_CXDRAG, 96)`, how far the pointer moves at
 //!   100 % before a press becomes a drag, as the common controls take it (4 by default).
+//! - **formats:** [`locale::stamp`](super::locale::stamp), a hash of the user's date, time and
+//!   number formats and the time zone. Changing a format in Settings broadcasts
+//!   `WM_SETTINGCHANGE` ("intl"); changing the zone, `WM_TIMECHANGE`. *(verify the latter on G1.)*
 //! - **winpe:** `HKLM\SYSTEM\CurrentControlSet\Control\MiniNT` exists; **build:**
 //!   `CurrentBuildNumber`. Neither changes while the process runs, so they're read once.
 
@@ -144,6 +147,9 @@ pub struct Env {
     /// How far the pointer moves, in pixels at 100 %, before a press becomes a drag. `Env`'s
     /// default, 0, is taken as Windows' default, 4.
     pub drag_px: u32,
+    /// The user's formats and time zone, as a stamp that changes when they do (never 0 when
+    /// read). A table formats its sizes, days and moments again when it changes.
+    pub locale: u64,
 }
 
 impl Env {
@@ -177,6 +183,7 @@ impl Env {
             wheel_chars: wheel(SPI_GETWHEELSCROLLCHARS),
             auto_hide_scroll_bars: auto_hide_scroll_bars(),
             drag_px: drag_px(),
+            locale: super::locale::stamp(),
         }
     }
 }

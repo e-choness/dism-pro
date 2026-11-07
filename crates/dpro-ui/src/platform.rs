@@ -40,9 +40,10 @@ use dpro_win::gui::{
 };
 
 use crate::{
-    Canvas, Caret, CaretStop, ClipboardRequest, Color, Cursor, Cx, GlyphSink, Icon, Input, Key,
-    KeyCode, KeyEvent, MAX_FIELD_LEN, Mods, Motion, NodeId, Point, Popup, Rect, Scheme, Size,
-    SysColors, TextMetrics, TextStyle, TextSystem, Theme, Ui,
+    Bytes, Canvas, Caret, CaretStop, ClipboardRequest, Color, Cursor, Cx, Formats, GlyphSink, Icon,
+    Input, Key, KeyCode, KeyEvent, MAX_FIELD_LEN, Mods, Motion, NodeId, Point, Popup, Rect, Scheme,
+    Size, SizeUnits, SysColors, TextMetrics, TextStyle, TextSystem, Theme, Ui, UnixMillis,
+    format_size,
     materials::{
         Environment, GLASS_BUILD, GlassPref, Materials, PresenterKind, SolidReason, materials,
     },
@@ -155,6 +156,33 @@ pub trait Model {
     fn context_menu(&self, _key: Key) -> Option<Self::Msg> {
         None
     }
+
+    /// The size units' labels, from the app's catalog (TD-0009 A2.5): a table's sizes read
+    /// with them. By default, the number alone.
+    fn size_units(&self) -> SizeUnits {
+        SizeUnits::default()
+    }
+}
+
+/// The user's formats (TD-0009 A2.5): Windows' days, moments and decimal separator, with the
+/// app's unit labels.
+struct UserFormats {
+    locale: gui::locale::Locale,
+    units: SizeUnits,
+}
+
+impl Formats for UserFormats {
+    fn size(&self, bytes: Bytes, out: &mut String) {
+        format_size(bytes, self.locale.decimal(), &self.units, out);
+    }
+
+    fn date(&self, day: UnixMillis, out: &mut String) {
+        self.locale.date(day, out);
+    }
+
+    fn time(&self, t: UnixMillis, out: &mut String) {
+        self.locale.time(t, out);
+    }
 }
 
 /// A window's [`Handler`]: the [`Ui`] of a [`Model`], with its text system, theme and materials.
@@ -249,6 +277,13 @@ impl<P: Model> Host<P> {
     /// Windows' settings changed (or arrived): the motion, the caret and the text size follow,
     /// and the look.
     fn set_env(&mut self, env: gui::env::Env) -> Restyle {
+        if self.env.map(|e| e.locale) != Some(env.locale) {
+            // The user's formats, read now; every value cell is formatted again.
+            self.ui.set_formats(UserFormats {
+                locale: gui::locale::Locale::user(),
+                units: self.model.size_units(),
+            });
+        }
         self.env = Some(env);
         self.ui.set_motion(Motion::system(env.animations));
         self.ui.set_caret(Caret {
@@ -1127,5 +1162,105 @@ mod tests {
                 assert_eq!(compose_for(&env, pref), Compose::Never);
             }
         }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    struct SizesMsg(crate::TableEvent);
+
+    /// A table of one program: its size and the day it was installed (2026-11-06).
+    struct Sizes;
+
+    const DAY: UnixMillis = UnixMillis(1_793_923_200_000);
+
+    const SIZE_COLUMNS: [crate::Column<'static>; 2] =
+        [sizes_column(0, "Size"), sizes_column(1, "Installed")];
+
+    const fn sizes_column(id: u16, header: &'static str) -> crate::Column<'static> {
+        crate::Column {
+            id: crate::ColumnId(id),
+            header,
+            width: crate::Track::Fixed(120.0),
+            min: 64.0,
+            align: crate::Align::Start,
+            mono: false,
+            sort: None,
+            hideable: true,
+        }
+    }
+
+    impl Model for Sizes {
+        type Msg = SizesMsg;
+
+        fn view(&self, cx: &mut Cx<'_, SizesMsg>) {
+            let table = crate::Table {
+                rows: 1,
+                columns: &SIZE_COLUMNS,
+                widths: &[],
+                hidden: &[],
+                sorted: None,
+                checks: None,
+                current: None,
+                status: None,
+                context: false,
+                on: SizesMsg,
+            };
+            cx.table(
+                Element::table(Key::name("t")).style(crate::Style {
+                    height: crate::Dim::Fixed(150.0),
+                    ..crate::Style::default()
+                }),
+                &table,
+                |_, cells| {
+                    cells.size(Bytes(1_536));
+                    cells.date(DAY);
+                    crate::Row {
+                        key: crate::RowKey(0),
+                        check: None,
+                        locked: "",
+                    }
+                },
+            );
+        }
+
+        fn update(&mut self, _: SizesMsg) {}
+
+        fn size_units(&self) -> SizeUnits {
+            SizeUnits::new(["{} B", "{} KB", "{} MB", "{} GB", "{} TB", "{} PB", "{} EB"])
+        }
+    }
+
+    /// T2/T3 (TD-0009 A2.5, slice 5b3): a table's values read in the user's formats from the
+    /// first settings, with the app's unit labels; the formats are read again only when their
+    /// stamp changes.
+    #[test]
+    fn a_table_s_values_read_in_the_user_s_formats() {
+        let mut host = Host::new(Sizes, Box::new(FakeText), GlassPref::Auto);
+        host.ui.set_viewport(Size { w: 400.0, h: 200.0 });
+        let env = gui::env::Env {
+            locale: 1,
+            ..gui::env::Env::default()
+        };
+        host.set_env(env);
+        host.build();
+        let cell = |host: &Host<Sizes>, col: u64| {
+            let path = [
+                Key::name("t"),
+                crate::TABLE_BODY,
+                Key::index(0),
+                Key::index(col),
+            ];
+            let id = host.ui.find(&path).expect("a cell");
+            host.ui.info(id).expect("live").text.to_owned()
+        };
+        let user = gui::locale::Locale::user();
+        let mut day = String::new();
+        user.date(DAY, &mut day);
+        assert_eq!(cell(&host, 0), format!("1{}50 KB", user.decimal()));
+        assert_eq!(cell(&host, 1), day);
+        let generation = host.ui.formats_generation;
+        host.set_env(env);
+        assert_eq!(host.ui.formats_generation, generation, "the same formats");
+        host.set_env(gui::env::Env { locale: 2, ..env });
+        assert_ne!(host.ui.formats_generation, generation, "new formats");
     }
 }

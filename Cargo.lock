@@ -472,6 +472,7 @@ dependencies = [
  "accesskit",
  "criterion",
  "dpro-app",
+ "dpro-core",
  "dpro-win",
  "gungraun",
  "stats_alloc",

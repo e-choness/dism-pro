@@ -18,8 +18,8 @@
 
 use dpro_ui::{
     Align, Bytes, Canvas, Cells, Column, ColumnId, Cx, Dim, Element, FakeText, InvariantFormats,
-    Key, Motion, NodeId, Order, Row, RowKey, Size, SizeUnits, Style, TABLE_BODY, Table,
-    TableEvent, Theme, Track, Tri, Ui, UnixMillis, accesskit::TreeUpdate,
+    Key, Motion, NodeId, Order, Row, RowKey, Size, SizeUnits, Style, TABLE_BODY, Table, TableEvent,
+    Theme, Track, Tri, Ui, UnixMillis, accesskit::TreeUpdate,
 };
 
 /// U1's table.

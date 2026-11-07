@@ -23,10 +23,11 @@
 //!   without a check box (a locked one, whose tooltip says why) takes Space and Ctrl+click as
 //!   moves only; a Shift range passes over it, as the model never checks a locked row.
 
-use std::mem;
+use std::{fmt, mem, rc::Rc};
 
 use accesskit::Action;
 use dpro_app::table::{ColumnId, Order, Pick, RowKey, Tri, Width};
+use dpro_core::units::{Bytes, UnixMillis};
 
 use crate::{
     build::Cx,
@@ -41,6 +42,7 @@ use crate::{
     },
     tree::{Element, Extra, Group, Key, Look, NIL, Node, NodeId, Role, rare},
     ui::Ui,
+    values::{Formats, Value, ValueCache},
 };
 
 /// The header's key under the table, for [`Ui::find`].
@@ -156,11 +158,13 @@ pub struct Row<'s> {
     pub locked: &'s str,
 }
 
-/// A row's cells, as the view gives them to [`Cx::table`]: each column's text, in order.
-#[derive(Debug)]
+/// A row's cells, as the view gives them to [`Cx::table`]: each column's text or value, in
+/// order.
 pub struct Cells<'b> {
     text: &'b mut String,
     ends: &'b mut Vec<usize>,
+    values: &'b mut ValueCache,
+    formats: &'b dyn Formats,
 }
 
 impl Cells<'_> {
@@ -168,6 +172,40 @@ impl Cells<'_> {
     pub fn push(&mut self, text: &str) {
         self.text.push_str(text);
         self.ends.push(self.text.len());
+    }
+
+    /// The next column's size, in the window's [`Formats`].
+    #[inline]
+    pub fn size(&mut self, bytes: Bytes) {
+        self.value(Value::Size(bytes.0));
+    }
+
+    /// The next column's calendar day (its midnight UTC), in the window's [`Formats`].
+    #[inline]
+    pub fn date(&mut self, day: UnixMillis) {
+        self.value(Value::Date(day.0));
+    }
+
+    /// The next column's moment, in local time, in the window's [`Formats`].
+    #[inline]
+    pub fn time(&mut self, t: UnixMillis) {
+        self.value(Value::Time(t.0));
+    }
+
+    /// A value's text, kept from an earlier build or formatted now.
+    #[inline]
+    fn value(&mut self, v: Value) {
+        self.values.push(v, self.formats, self.text);
+        self.ends.push(self.text.len());
+    }
+}
+
+impl fmt::Debug for Cells<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Cells")
+            .field("text", &self.text)
+            .field("ends", &self.ends)
+            .finish_non_exhaustive()
     }
 }
 
@@ -281,6 +319,8 @@ pub(crate) struct TableState<M> {
     current_key: Option<Key>,
     /// A row to scroll into view at the next build, once the view is known.
     reveal: Option<u32>,
+    /// The text of the values its cells showed.
+    values: ValueCache,
 }
 
 impl<M> TableState<M> {
@@ -310,6 +350,7 @@ impl<M> TableState<M> {
             current: None,
             current_key: None,
             reveal: None,
+            values: ValueCache::default(),
         }
     }
 }
@@ -411,6 +452,14 @@ impl<M: Clone> Cx<'_, M> {
         let mut ends = mem::take(&mut cx.ui.cell_ends);
         text.clear();
         ends.clear();
+        // The table's kept text, and the window's formats for what it hasn't kept.
+        let mut values = if t == NIL {
+            ValueCache::default()
+        } else {
+            mem::take(&mut cx.ui.tables[t as usize].values)
+        };
+        values.begin(cx.ui.formats_generation);
+        let formats = Rc::clone(&cx.ui.formats.0);
         // The current row first: whether its key changed says whether it's another row.
         let current = table.current.filter(|&c| c < table.rows);
         let cur = current.map(|c| {
@@ -419,6 +468,8 @@ impl<M: Clone> Cx<'_, M> {
                 &mut Cells {
                     text: &mut text,
                     ends: &mut ends,
+                    values: &mut values,
+                    formats: &*formats,
                 },
             )
         });
@@ -450,6 +501,8 @@ impl<M: Clone> Cx<'_, M> {
                             &mut Cells {
                                 text: &mut text,
                                 ends: &mut ends,
+                                values: &mut values,
+                                formats: &*formats,
                             },
                         );
                         (r, kept_ends..ends.len(), kept_text)
@@ -471,6 +524,9 @@ impl<M: Clone> Cx<'_, M> {
         ends.clear();
         cx.ui.cell_text = text;
         cx.ui.cell_ends = ends;
+        if t != NIL {
+            cx.ui.tables[t as usize].values = values;
+        }
         if let Some(plan) = plan {
             cx.ui.table_built(t, plan);
         }

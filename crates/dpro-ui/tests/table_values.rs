@@ -22,9 +22,9 @@
 use std::{cell::Cell, rc::Rc};
 
 use dpro_ui::{
-    Align, Bytes, Cells, Column, ColumnId, Cx, Element, FakeText, Formats, Input, InvariantFormats,
-    Key, Motion, NodeId, Order, Point, Row, RowKey, Size, SizeUnits, TABLE_BODY, Table, TableEvent,
-    Track, UnixMillis, Ui, accesskit, format_size,
+    Align, Bytes, Cells, Column, ColumnId, Cx, Dim, Element, FakeText, Formats, Input,
+    InvariantFormats, Key, Motion, NodeId, Order, Point, Row, RowKey, Size, SizeUnits, Style,
+    TABLE_BODY, Table, TableEvent, Track, Ui, UnixMillis, accesskit, format_size,
 };
 
 const NAME: ColumnId = ColumnId(0);
@@ -138,7 +138,10 @@ fn the_invariant_formats_read_iso_days_and_utc_times() {
     assert_eq!(text(&|o| f.date(UnixMillis(0), o)), "1970-01-01");
     assert_eq!(text(&|o| f.time(UnixMillis(0), o)), "1970-01-01 00:00");
     assert_eq!(text(&|o| f.date(UnixMillis(NOV_6), o)), "2026-11-06");
-    assert_eq!(text(&|o| f.time(UnixMillis(NOV_6_1504), o)), "2026-11-06 15:04");
+    assert_eq!(
+        text(&|o| f.time(UnixMillis(NOV_6_1504), o)),
+        "2026-11-06 15:04"
+    );
     // The last millisecond of a leap day.
     assert_eq!(
         text(&|o| f.time(UnixMillis(951_868_799_999), o)),
@@ -148,7 +151,7 @@ fn the_invariant_formats_read_iso_days_and_utc_times() {
     let comma = InvariantFormats::new(units()).with_decimal(",");
     assert_eq!(text(&|o| comma.size(Bytes(1_536), o)), "1,50 KB");
     // The far future still reads as something.
-    assert!(!text(&|o| f.time(UnixMillis(u64::MAX), o)).is_empty());
+    assert_ne!(text(&|o| f.time(UnixMillis(u64::MAX), o)).len(), 0);
 }
 
 #[test]
@@ -174,7 +177,7 @@ fn a_frame_that_changes_nothing_formats_nothing() {
     let mut run = Run::new(1_000);
     let built = run.calls.get();
     // Every value cell of the rows built, once: three per row.
-    assert!(built > 0 && built % 3 == 0, "{built}");
+    assert!(built > 0 && built.is_multiple_of(3), "{built}");
     run.frame();
     run.send(Input::PointerMove(Point { x: 5.0, y: 5.0 }));
     run.frame();
@@ -226,14 +229,21 @@ fn new_formats_show_in_every_value_cell_at_the_next_frame() {
     assert_eq!(node(&update, &run.ui, id).label(), Some("1,50 KB"));
 }
 
+/// Text too long to keep is formatted at each build, and shown in full.
 #[test]
 fn a_value_too_long_to_keep_is_still_shown_in_full() {
     let mut run = Run::new(5);
-    run.ui.set_formats(Long);
+    let calls = Rc::new(Cell::new(0));
+    run.ui.set_formats(Long {
+        calls: Rc::clone(&calls),
+    });
     run.frame();
+    let before = calls.get();
+    assert!(before > 0);
     run.frame();
     assert_eq!(run.text(0, MODIFIED), LONG);
     assert_eq!(run.text(1, MODIFIED), LONG);
+    assert!(calls.get() > before, "long text isn't kept");
 }
 
 // ---- the page ------------------------------------------------------------------------------
@@ -264,11 +274,14 @@ impl Formats for Counting {
     }
 }
 
-/// A moment's text longer than any formats' cache keeps.
-const LONG: &str = "Friday, the sixth of November, two thousand and twenty-six, at four minutes past three";
+/// A moment's text longer than any formats' cache keeps (128 bytes).
+const LONG: &str = "Friday, the sixth of November, two thousand and twenty-six, at four minutes \
+                    past three in the afternoon, Coordinated Universal Time, as the clock read";
 
-/// Formats whose moments read as [`LONG`].
-struct Long;
+/// Formats whose moments read as [`LONG`], counting them.
+struct Long {
+    calls: Rc<Cell<u32>>,
+}
 
 impl Formats for Long {
     fn size(&self, bytes: Bytes, out: &mut String) {
@@ -278,6 +291,7 @@ impl Formats for Long {
         out.push('-');
     }
     fn time(&self, _: UnixMillis, out: &mut String) {
+        self.calls.set(self.calls.get() + 1);
         out.push_str(LONG);
     }
 }
@@ -318,7 +332,12 @@ impl Page {
             on: Msg::Table,
         };
         cx.table(
-            Element::table(TABLE).name("Programs"),
+            Element::table(TABLE)
+                .style(Style {
+                    height: Dim::Fixed(WINDOW.h),
+                    ..Style::default()
+                })
+                .name("Programs"),
             &table,
             |at, cells: &mut Cells<'_>| {
                 let i = at as usize;
@@ -382,10 +401,7 @@ impl Run {
 
     /// A wheel notch (`delta` 120 is up) over the rows.
     fn wheel(&mut self, delta: i32) {
-        let body = self
-            .ui
-            .find(&[TABLE, TABLE_BODY])
-            .expect("the rows' view");
+        let body = self.ui.find(&[TABLE, TABLE_BODY]).expect("the rows' view");
         let r = self.ui.info(body).expect("live").rect;
         let at = Point {
             x: r.x + r.w / 2.0,
@@ -401,7 +417,12 @@ impl Run {
 
     fn cell(&self, row: u64, col: ColumnId) -> NodeId {
         self.ui
-            .find(&[TABLE, TABLE_BODY, Key::index(row), Key::index(u64::from(col.0))])
+            .find(&[
+                TABLE,
+                TABLE_BODY,
+                Key::index(row),
+                Key::index(u64::from(col.0)),
+            ])
             .expect("the cell")
     }
 

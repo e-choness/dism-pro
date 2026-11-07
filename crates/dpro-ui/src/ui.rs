@@ -4,6 +4,8 @@
 //! Input goes through `dispatch`, and animations through `tick` (`input.rs`). Damage collects in
 //! physical pixels until the presenter takes it.
 
+use std::rc::Rc;
+
 use crate::{
     a11y::A11y,
     damage::Damage,
@@ -15,6 +17,7 @@ use crate::{
     table::{DRAG_DISTANCE, Divider, Press, TableState},
     tooltip::Tip,
     tree::{Key, NIL, Node, NodeId, NodeInfo, Role},
+    values::{Formats, InvariantFormats, Shared},
 };
 
 /// Motion settings, from the theme's motion tokens (doc 05 §4). Durations of 0 turn animation off
@@ -135,6 +138,10 @@ pub struct Ui<M> {
     /// where each ends. Kept, so a warm table builds without allocating.
     pub(crate) cell_text: String,
     pub(crate) cell_ends: Vec<usize>,
+    /// How value cells read (`values.rs`), and its generation: new formats drop every table's
+    /// kept text.
+    pub(crate) formats: Shared,
+    pub(crate) formats_generation: u32,
     /// The last press: where, with which modifiers, and whether it was a double-click's second.
     pub(crate) press: Press,
     /// A table column's divider being dragged (`table.rs`).
@@ -244,6 +251,8 @@ impl<M> Ui<M> {
             free_tables: Vec::new(),
             cell_text: String::new(),
             cell_ends: Vec::new(),
+            formats: Shared(Rc::new(InvariantFormats::default())),
+            formats_generation: 0,
             press: Press::default(),
             divider: None,
             drag_distance: DRAG_DISTANCE,
@@ -286,6 +295,14 @@ impl<M> Ui<M> {
             self.text_scale = text_scale;
             self.damage_all();
         }
+    }
+
+    /// How tables show sizes, days and moments from the next build: the user's formats, which
+    /// the host reads at start and when Windows says they changed (TD-0009 A2.5). Every value
+    /// cell is formatted again.
+    pub fn set_formats(&mut self, formats: impl Formats + 'static) {
+        self.formats = Shared(Rc::new(formats));
+        self.formats_generation = self.formats_generation.wrapping_add(1);
     }
 
     /// Windows' text size, as a factor.

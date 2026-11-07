@@ -10,6 +10,7 @@ publish.workspace = true
 [dependencies]
 accesskit.workspace = true
 dpro-app.workspace = true
+dpro-core.workspace = true
 
 # The Win32 platform the `platform` module adapts (TD-0009 §5.1).
 [target.'cfg(windows)'.dependencies]
