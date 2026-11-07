@@ -118,10 +118,16 @@ pub struct ColumnLayout {
 }
 
 impl ColumnLayout {
-    /// The page's columns, each with whether it starts hidden, at their own widths.
+    /// The page's columns, each with whether it starts hidden, at their own widths. A table
+    /// needs a column, so if the page hides every one, the first shows.
     #[must_use]
     pub fn new(columns: &[(ColumnId, bool)]) -> Self {
-        let hidden_at_first: Vec<bool> = columns.iter().map(|&(_, h)| h).collect();
+        let mut hidden_at_first: Vec<bool> = columns.iter().map(|&(_, h)| h).collect();
+        if hidden_at_first.iter().all(|&h| h)
+            && let Some(first) = hidden_at_first.first_mut()
+        {
+            *first = false;
+        }
         Self {
             ids: columns.iter().map(|&(id, _)| id).collect(),
             widths: vec![Width::Auto; columns.len()],

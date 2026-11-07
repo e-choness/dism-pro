@@ -262,6 +262,7 @@ impl<P: Model> Host<P> {
         // High contrast shows the full scroll bar always (TD-0009 A2.10 item 3).
         let auto_hide = env.auto_hide_scroll_bars && !env.high_contrast;
         self.ui.set_wheel(env.wheel_lines, env.wheel_chars);
+        self.ui.set_drag_distance(env.drag_px);
         self.ui.set_auto_hide_scroll_bars(auto_hide);
         for layer in &mut self.layers {
             layer.ui.set_motion(Motion::system(env.animations));

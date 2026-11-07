@@ -298,8 +298,14 @@ impl<M> Ui<M> {
         n.group = group;
         n.value = value;
         n.special = group.is_some() || invoke.is_some() || value.to_bits() != 0;
+        // A menu item became or stopped being a check item: every label in its menu moves past
+        // the checks' gutter or back, so the menu is laid out again.
+        let rechecked = revalued && n.role == Role::MenuItem;
         if n.hold || invoke.is_some() {
             self.update_hold(i, invoke);
+        }
+        if rechecked {
+            self.mark_dirty(i);
         }
         (regrouped || revalued, revalued)
     }

@@ -209,7 +209,8 @@ impl<M: Clone> Ui<M> {
                 let scrolled = self.wheel(at, delta, horizontal);
                 // The content moved under the pointer: the hover follows it, but for a press's
                 // or a drag's.
-                if scrolled && self.pressed == NIL && self.drag.is_none() {
+                if scrolled && self.pressed == NIL && self.drag.is_none() && self.divider.is_none()
+                {
                     let hit = self.hit(at);
                     self.pointer_over(hit);
                 }

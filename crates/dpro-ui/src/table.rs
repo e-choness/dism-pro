@@ -61,6 +61,8 @@ const BASE_ROWS: u32 = 1024;
 /// A line's height over its text size, for the guess a build makes before layout has measured:
 /// Segoe UI's is about this.
 const LINE_GUESS: f32 = 1.25;
+/// Windows' default drag distance (`SM_CXDRAG`) at 100 %, until the host sets the system's.
+pub(crate) const DRAG_DISTANCE: f32 = 4.0;
 
 /// How wide a column is.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -233,6 +235,8 @@ pub(crate) struct Divider {
     min: f32,
     /// A double-click's second press: its release asks to fit the column, unless it's resized.
     double: bool,
+    /// The pointer has gone the drag distance from the press: a drag, not a click.
+    moved: bool,
 }
 
 /// A table's state, in the Ui's table table, reached from its rows' viewport's scroll slot.
@@ -497,13 +501,13 @@ impl<M: Clone> Cx<'_, M> {
         if let Some(k) = focused
             && self.ui.focus == NIL
         {
+            // None if every column went and there's no check column.
             let mut to = self.ui.nodes[header as usize].first;
             for _ in 0..k {
-                let next = self.ui.nodes[to as usize].next;
-                if next == NIL {
+                if to == NIL || self.ui.nodes[to as usize].next == NIL {
                     break;
                 }
-                to = next;
+                to = self.ui.nodes[to as usize].next;
             }
             if to != NIL {
                 self.ui.focus_node(to);
@@ -719,6 +723,22 @@ fn col_of<M>(table: &Table<'_, M>, j: usize, c: &Column<'_>, old: &[Col]) -> Col
         }
     }
     col
+}
+
+impl<M> Ui<M> {
+    /// Sends `i`'s children from the `from`th on to a client again: what it learns from their
+    /// places changed.
+    fn a11y_touch_children(&mut self, i: u32, from: usize) {
+        let mut c = self.nodes[i as usize].first;
+        let mut k = 0;
+        while c != NIL {
+            if k >= from {
+                self.a11y_touch(c);
+            }
+            k += 1;
+            c = self.nodes[c as usize].next;
+        }
+    }
 }
 
 /// Whether `table`'s column `j` is hidden (a column past the end of `hidden` shows).
@@ -987,11 +1007,7 @@ impl<M> Ui<M> {
             for k in 0..self.tables[t as usize].built.len() {
                 let (node, _) = self.tables[t as usize].built[k];
                 self.a11y_touch(node);
-                let mut c = self.nodes[node as usize].first;
-                while c != NIL {
-                    self.a11y_touch(c);
-                    c = self.nodes[c as usize].next;
-                }
+                self.a11y_touch_children(node, 0);
             }
         }
         Plan {
@@ -1034,22 +1050,47 @@ impl<M> Ui<M> {
             k += 1;
             eq
         }) && k == st.columns.len();
+        // The first shown column whose place changed: the headers and cells from it on have new
+        // indices. A width that changed moves none.
+        let mut moved_from = None;
         if !same {
             let mut next = mem::take(&mut st.cols_next);
             next.clear();
             next.extend(shown(table).map(|(j, c)| col_of(table, j, c, &st.columns)));
             mem::swap(&mut st.columns, &mut next);
+            let kept = next.len().min(st.columns.len());
+            let first = (next.iter().zip(&st.columns))
+                .position(|(old, new)| old.id != new.id)
+                .unwrap_or(kept);
+            if first < next.len().max(st.columns.len()) {
+                moved_from = Some(first + usize::from(st.checks));
+            }
             seen = true;
             relayout = true;
-            // A drag ends if its column went or moved (the view changed the columns under it).
-            if let Some((k, _)) = st.drag
-                && next.get(k).map(|c| c.id) != st.columns.get(k).map(|c| c.id)
-            {
-                st.drag = None;
-            }
             st.cols_next = next;
         }
-        let grid = st.grid;
+        // A fit waits for the rows to settle. Until it's measured, each build lays the grid out:
+        // the build that settles them may change nothing else in it.
+        relayout |= st.columns.iter().any(|c| c.fit && !c.fitted);
+        let (grid, header) = (st.grid, st.header);
+        if !same {
+            // The view changed the columns under a drag: it ends, with nothing sent. The columns
+            // it held may have moved.
+            if self.tables[t as usize].drag.take().is_some()
+                && self.divider.is_some_and(|d| d.t == t)
+            {
+                self.divider = None;
+            }
+        }
+        if let Some(from) = moved_from {
+            // A column that came or went moves the ones after it, which may keep their places on
+            // the screen: a client learns their new indices from their headers and cells.
+            self.a11y_touch_children(header, from);
+            for k in 0..self.tables[t as usize].built.len() {
+                let (node, _) = self.tables[t as usize].built[k];
+                self.a11y_touch_children(node, from);
+            }
+        }
         if renamed {
             // Every check cell is named as the column is.
             for k in 0..self.tables[t as usize].built.len() {
@@ -1709,6 +1750,17 @@ impl<M> Ui<M> {
         out.append(&mut self.queued);
     }
 
+    /// Windows' drag distance (`SM_CXDRAG`), in pixels at 100 %: how far the pointer moves before
+    /// a press on a divider becomes a drag, so a click's or a double-click's wobble resizes
+    /// nothing. 0 is taken as Windows' default, 4. The host sets it from the system's.
+    pub fn set_drag_distance(&mut self, px: u32) {
+        self.drag_distance = match u16::try_from(px) {
+            Ok(0) => DRAG_DISTANCE,
+            Ok(px) => f32::from(px),
+            Err(_) => f32::from(u16::MAX),
+        };
+    }
+
     /// The table slot and shown column whose divider is under `p`: the strip
     /// [`DIVIDER`](tok::DIVIDER) wide centred on a column header's right edge (the check column
     /// has none), the nearer edge where two strips meet. Only where the header shows and nothing
@@ -1756,6 +1808,8 @@ impl<M> Ui<M> {
     /// A press at `p` on a divider: its column's drag begins, the columns left of it holding
     /// their widths. Returns whether there was one.
     pub(crate) fn divider_press(&mut self, p: Point, double: bool) -> bool {
+        // A drag whose release never came (the window dropped it) ends first.
+        self.cancel_divider();
         let Some((t, col)) = self.divider_at(p) else {
             return false;
         };
@@ -1776,6 +1830,7 @@ impl<M> Ui<M> {
             start_w,
             min: c.min,
             double,
+            moved: false,
         });
         true
     }
@@ -1783,10 +1838,19 @@ impl<M> Ui<M> {
     /// The pointer at `p` while a divider is dragged: its column follows, at least its minimum,
     /// and nothing is sent until the release. Returns whether a drag took it.
     pub(crate) fn divider_move(&mut self, p: Point) -> bool {
-        let Some(d) = self.divider else {
+        let Some(mut d) = self.divider else {
             return false;
         };
-        let w = (d.start_w + (p.x - d.press_x)).max(d.min);
+        let dx = p.x - d.press_x;
+        if !d.moved {
+            // A click until the pointer goes the drag distance; then the edge goes to it.
+            if dx.abs() < self.drag_distance {
+                return true;
+            }
+            d.moved = true;
+            self.divider = Some(d);
+        }
+        let w = (d.start_w + dx).max(d.min);
         let st = &mut self.tables[d.t as usize];
         match st.drag {
             // The column went (hidden, or the view rebuilt the table): the drag ends.
@@ -1803,15 +1867,22 @@ impl<M> Ui<M> {
         true
     }
 
-    /// The release at `p` of a divider's drag: if its column's width changed, the view is sent
-    /// the widths the shared columns left of it held, then its own, so nothing moves when the
-    /// view answers; if not, a double-click's second press asks to fit it. Returns whether a drag
-    /// took it.
+    /// The release at `p` of a press on a divider. A drag that changed its column's width sends
+    /// the view the widths the shared columns left of it held, then its own, so nothing moves
+    /// when the view answers. A click (the pointer never went the drag distance) sends nothing,
+    /// or asks to fit the column if it's a double-click's second press. Returns whether a press
+    /// on a divider took it.
     pub(crate) fn divider_release(&mut self, p: Point, out: &mut Vec<M>) -> bool {
         let Some(d) = self.divider.take() else {
             return false;
         };
-        let w = (d.start_w + (p.x - d.press_x)).max(d.min);
+        let dx = p.x - d.press_x;
+        let moved = d.moved || dx.abs() >= self.drag_distance;
+        let w = if moved {
+            (d.start_w + dx).max(d.min)
+        } else {
+            d.start_w
+        };
         let st = &mut self.tables[d.t as usize];
         let live = st.drag.take().is_some();
         let grid = st.grid;
@@ -1822,10 +1893,13 @@ impl<M> Ui<M> {
         let (Some(on), true, Some(c)) = (st.on, live, st.columns.get(d.col)) else {
             return true;
         };
-        if w.to_bits() == d.start_w.to_bits() {
+        if !moved {
             if d.double {
                 out.push(on(TableEvent::Fit(Some(c.id))));
             }
+            return true;
+        }
+        if w.to_bits() == d.start_w.to_bits() {
             return true;
         }
         for (k, left) in st.columns.iter().enumerate().take(d.col) {

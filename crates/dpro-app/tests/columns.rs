@@ -118,3 +118,14 @@ fn reset_brings_back_every_width_and_the_page_s_columns() {
     assert!(l.reset());
     assert_eq!(l, layout());
 }
+
+#[test]
+fn a_page_that_hides_every_column_at_first_still_shows_its_first() {
+    // Found in review: the table needs a column, and reset brought back none.
+    let mut l = ColumnLayout::new(&[(NAME, true), (VERSION, true)]);
+    assert_eq!(l.hidden(), &[false, true]);
+    assert!(l.set_hidden(VERSION, false));
+    assert!(l.set_hidden(NAME, true));
+    assert!(l.reset());
+    assert_eq!(l.hidden(), &[false, true], "reset shows one too");
+}

@@ -12,7 +12,7 @@ use crate::{
     layout::Shown,
     pool::TextPool,
     scroll::{Drag, Scroll},
-    table::{Divider, Press, TableState},
+    table::{DRAG_DISTANCE, Divider, Press, TableState},
     tooltip::Tip,
     tree::{Key, NIL, Node, NodeId, NodeInfo, Role},
 };
@@ -139,6 +139,8 @@ pub struct Ui<M> {
     pub(crate) press: Press,
     /// A table column's divider being dragged (`table.rs`).
     pub(crate) divider: Option<Divider>,
+    /// How far the pointer moves, in logical pixels, before a press becomes a drag.
+    pub(crate) drag_distance: f32,
     /// Messages layout made (a column's fit), for the host to take ([`Ui::take_messages`]).
     pub(crate) queued: Vec<M>,
 }
@@ -244,6 +246,7 @@ impl<M> Ui<M> {
             cell_ends: Vec::new(),
             press: Press::default(),
             divider: None,
+            drag_distance: DRAG_DISTANCE,
             queued: Vec::new(),
         };
         ui.damage_all();

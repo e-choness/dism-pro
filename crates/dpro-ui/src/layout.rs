@@ -79,8 +79,13 @@ impl<M> Ui<M> {
     /// The natural outer size of `i` when `avail` logical pixels of width are available.
     pub(crate) fn measure(&mut self, i: u32, avail: f32, text: &mut dyn TextSystem) -> Size {
         {
+            // A menu item's size depends on its siblings (the checks' gutter), which its cache
+            // doesn't see: menus are a few items, measured when their menu is.
             let n = &self.nodes[i as usize];
-            if n.cache_valid && n.measured_for.to_bits() == avail.to_bits() {
+            if n.cache_valid
+                && n.measured_for.to_bits() == avail.to_bits()
+                && n.role != Role::MenuItem
+            {
                 return n.measured;
             }
         }

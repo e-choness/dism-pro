@@ -33,6 +33,8 @@
 //!   behind *Automatically hide scroll bars* (Settings › Accessibility › Visual effects); 0 keeps
 //!   them shown, and missing is Windows' default, hidden. *(verify that switching it broadcasts
 //!   `WM_SETTINGCHANGE`.)*
+//! - **drag distance:** `GetSystemMetricsForDpi(SM_CXDRAG, 96)`, how far the pointer moves at
+//!   100 % before a press becomes a drag, as the common controls take it (4 by default).
 //! - **winpe:** `HKLM\SYSTEM\CurrentControlSet\Control\MiniNT` exists; **build:**
 //!   `CurrentBuildNumber`. Neither changes while the process runs, so they're read once.
 
@@ -50,11 +52,13 @@ use windows_sys::{
             COLOR_HOTLIGHT, COLOR_WINDOW, COLOR_WINDOWTEXT, GetSysColor, SYS_COLOR_INDEX,
         },
         System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS},
+        UI::HiDpi::GetSystemMetricsForDpi,
         UI::Input::KeyboardAndMouse::GetDoubleClickTime,
         UI::WindowsAndMessaging::{
-            GetCaretBlinkTime, GetSystemMetrics, PostMessageW, SM_REMOTESESSION, SPI_GETCARETWIDTH,
-            SPI_GETCLIENTAREAANIMATION, SPI_GETHIGHCONTRAST, SPI_GETWHEELSCROLLCHARS,
-            SPI_GETWHEELSCROLLLINES, SYSTEM_PARAMETERS_INFO_ACTION, SystemParametersInfoW, WM_APP,
+            GetCaretBlinkTime, GetSystemMetrics, PostMessageW, SM_CXDRAG, SM_REMOTESESSION,
+            SPI_GETCARETWIDTH, SPI_GETCLIENTAREAANIMATION, SPI_GETHIGHCONTRAST,
+            SPI_GETWHEELSCROLLCHARS, SPI_GETWHEELSCROLLLINES, SYSTEM_PARAMETERS_INFO_ACTION,
+            SystemParametersInfoW, WM_APP,
         },
     },
     core::{BOOL, GUID},
@@ -137,6 +141,9 @@ pub struct Env {
     pub wheel_chars: u32,
     /// *Automatically hide scroll bars*: a scroll bar is an indicator until the pointer is on it.
     pub auto_hide_scroll_bars: bool,
+    /// How far the pointer moves, in pixels at 100 %, before a press becomes a drag. `Env`'s
+    /// default, 0, is taken as Windows' default, 4.
+    pub drag_px: u32,
 }
 
 impl Env {
@@ -169,8 +176,16 @@ impl Env {
             wheel_lines: wheel(SPI_GETWHEELSCROLLLINES),
             wheel_chars: wheel(SPI_GETWHEELSCROLLCHARS),
             auto_hide_scroll_bars: auto_hide_scroll_bars(),
+            drag_px: drag_px(),
         }
     }
+}
+
+/// `SM_CXDRAG` at 100 %; 4, Windows' default, if it can't be read.
+fn drag_px() -> u32 {
+    // SAFETY: no preconditions.
+    let px = unsafe { GetSystemMetricsForDpi(SM_CXDRAG, 96) };
+    u32::try_from(px).ok().filter(|&px| px > 0).unwrap_or(4)
 }
 
 /// `TextScaleFactor`, clamped to Windows' range; 100 if it's missing or not a `DWORD`.
@@ -423,5 +438,14 @@ mod tests {
         );
         assert_eq!((env.wheel_lines, env.wheel_chars), (3, 3));
         assert!(env.auto_hide_scroll_bars);
+    }
+
+    /// T2/T3 (TD-0009 A2.4, slice 5b2): the drag distance a press on a column's divider goes
+    /// before it resizes. The test runners keep Windows' default, 4 px at 100 %.
+    #[test]
+    fn the_drag_distance_reads_as_windows_default() {
+        let env = Env::read();
+        println!("drag distance {} px", env.drag_px);
+        assert_eq!(env.drag_px, 4);
     }
 }

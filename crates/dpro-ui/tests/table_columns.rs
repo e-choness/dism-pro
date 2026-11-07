@@ -143,6 +143,10 @@ struct Page {
     sizes: Vec<String>,
     /// The page ignores the widths the table sends, so a fit stays a fit.
     keep_fit: bool,
+    /// The table has a check column.
+    checks: bool,
+    /// The view hides every column, which the menu never would (a page may).
+    hide_all: bool,
 }
 
 impl Page {
@@ -162,6 +166,8 @@ impl Page {
                 .map(|r| format!("{} MB", (r * 37) % 1000))
                 .collect(),
             keep_fit: false,
+            checks: true,
+            hide_all: false,
         }
     }
 
@@ -190,9 +196,13 @@ impl Page {
             rows: u32::try_from(self.model.view().len()).expect("rows"),
             columns: self.defs,
             widths: self.columns.widths(),
-            hidden: self.columns.hidden(),
+            hidden: if self.hide_all {
+                &[true; 3]
+            } else {
+                self.columns.hidden()
+            },
             sorted: self.model.sort(),
-            checks: Some(("Select", Tri::Off)),
+            checks: self.checks.then_some(("Select", Tri::Off)),
             current: self.model.current_view(),
             status: None,
             context: true,
@@ -626,6 +636,138 @@ fn the_pointer_shows_the_left_right_arrows_over_a_divider_and_while_dragging() {
     assert_eq!(run.ui.cursor(), Cursor::Arrow);
 }
 
+// Found in review: a 1 px wobble made a click a resize, which pinned the shared columns left of
+// the divider, and made a double-click's second press a resize instead of a fit. A press becomes
+// a drag past Windows' drag distance (SM_CXDRAG: 4 px at 100 %), as the common controls' do.
+#[test]
+fn a_press_that_moves_less_than_the_drag_distance_resizes_nothing() {
+    let mut run = Run::new(100);
+    let at = run.divider(VERSION);
+    let near = at_x(at, 3.0);
+    assert_eq!(
+        run.send_all(&[
+            Input::PointerMove(at),
+            Input::PointerDown(at),
+            Input::PointerMove(near)
+        ]),
+        []
+    );
+    assert_eq!(run.widths(), [CHECK, 402.0, 80.0, 90.0], "not a drag yet");
+    assert_eq!(run.send(Input::PointerUp(near)), []);
+    assert_eq!(run.page.columns.widths(), &[Width::Auto; 3]);
+    let press = |double| Input::Press {
+        at,
+        mods: Mods::default(),
+        double,
+    };
+    let wobble = at_x(at, -2.0);
+    let out = run.send_all(&[
+        press(false),
+        Input::PointerUp(at),
+        press(true),
+        Input::PointerMove(wobble),
+        Input::PointerUp(wobble),
+    ]);
+    assert_eq!(out, [ev(TableEvent::Fit(Some(VERSION)))]);
+}
+
+#[test]
+fn past_the_drag_distance_the_edge_follows_the_pointer_and_a_drag_back_sends_nothing() {
+    let mut run = Run::new(100);
+    let at = run.divider(VERSION);
+    run.send_all(&[Input::PointerMove(at), Input::PointerDown(at)]);
+    run.send(Input::PointerMove(at_x(at, 5.0)));
+    assert_eq!(
+        run.widths(),
+        [CHECK, 402.0, 85.0, 90.0],
+        "the edge goes to the pointer"
+    );
+    run.send(Input::PointerMove(at_x(at, 2.0)));
+    assert_eq!(
+        run.widths(),
+        [CHECK, 402.0, 82.0, 90.0],
+        "a drag now, however near"
+    );
+    assert_eq!(run.send(Input::PointerUp(at)), [], "back where it started");
+    // A double-click's second press dragged out and back is a drag that changed nothing, not a
+    // fit.
+    let out = run.send_all(&[
+        Input::Press {
+            at,
+            mods: Mods::default(),
+            double: true,
+        },
+        Input::PointerMove(at_x(at, 20.0)),
+        Input::PointerMove(at),
+        Input::PointerUp(at),
+    ]);
+    assert_eq!(out, []);
+}
+
+#[test]
+fn the_drag_distance_is_the_system_s() {
+    let mut run = Run::new(100);
+    run.ui.set_drag_distance(10);
+    let at = run.divider(VERSION);
+    let to = at_x(at, 8.0);
+    assert_eq!(run.drag(at, to), [], "8 px is less than 10");
+    run.ui.set_drag_distance(0);
+    assert_eq!(
+        run.drag(at, at_x(at, 4.0)),
+        [
+            ev(TableEvent::Resize(NAME, 402.0)),
+            ev(TableEvent::Resize(VERSION, 84.0))
+        ],
+        "0 is Windows' default, 4"
+    );
+}
+
+// Found in review: the drag outlived its column. Its pointer shape stayed, the next Esc was taken
+// for it, and a column moved to its left was held at another's width.
+#[test]
+fn columns_the_view_changes_mid_drag_end_it() {
+    let mut run = Run::new(100);
+    let at = run.divider(VERSION);
+    let to = at_x(at, 30.0);
+    run.send_all(&[
+        Input::PointerMove(at),
+        Input::PointerDown(at),
+        Input::PointerMove(to),
+    ]);
+    assert_eq!(run.widths(), [CHECK, 402.0, 110.0, 90.0]);
+    // Even a column right of it: the rule is simple, and the view rarely does it.
+    run.page.columns.set_hidden(SIZE, true);
+    run.frame();
+    assert_eq!(
+        run.ui.cursor(),
+        Cursor::Arrow,
+        "no divider under the pointer"
+    );
+    assert_eq!(run.send(Input::PointerMove(at_x(at, 60.0))), []);
+    assert_eq!(run.widths(), [CHECK, 492.0, 80.0], "the drag is over");
+    assert_eq!(run.send(Input::PointerUp(at_x(at, 60.0))), []);
+    assert_eq!(run.page.columns.widths(), &[Width::Auto; 3]);
+}
+
+// Found in review: the wheel moved the hover during a divider's drag, which holds it still as a
+// thumb's drag does.
+#[test]
+fn the_wheel_leaves_the_hover_alone_during_a_drag() {
+    let mut run = Run::new(100);
+    let at = run.divider(VERSION);
+    run.send_all(&[Input::PointerMove(at), Input::PointerDown(at)]);
+    let below = Point { y: 200.0, ..at };
+    run.send(Input::PointerMove(below));
+    let hover = run.ui.hover();
+    run.send(Input::Wheel {
+        at: below,
+        delta: -120,
+        horizontal: false,
+    });
+    assert_eq!(run.ui.hover(), hover);
+    run.send(Input::PointerUp(below));
+}
+
 // ---- fit -------------------------------------------------------------------------------------
 
 #[test]
@@ -664,6 +806,18 @@ fn a_column_to_fit_is_laid_out_at_its_fit_at_once_and_sent_once() {
     run.frame();
     assert_eq!(run.fits, [], "the view still says fit: it was measured");
     assert_eq!(run.widths(), [CHECK, 416.0, 66.0, 90.0]);
+}
+
+// Found in review: a fit asked for with a text-size change waits for the rows to settle at the new
+// size. The build that settles them, every row built already, changed nothing in the grid, so the
+// fit waited for something else to lay the table out.
+#[test]
+fn a_fit_asked_for_before_the_rows_settle_is_measured_when_they_do() {
+    let mut run = Run::new(3);
+    run.page.columns.fit(Some(VERSION));
+    run.ui.set_text_scale(1.25);
+    run.frame();
+    assert_eq!(run.fits.len(), 1, "{:?}", run.fits);
 }
 
 #[test]
@@ -728,6 +882,56 @@ fn hidden_columns_leave_the_header_the_rows_and_the_grid() {
     run.page.columns.set_hidden(VERSION, false);
     run.frame();
     assert_eq!(run.widths(), [CHECK, 402.0, 80.0, 90.0]);
+}
+
+#[test]
+fn hiding_or_showing_a_column_tells_a_client_the_column_indices_that_moved() {
+    // Found in review: Size kept its place on the screen (Name took up Version's room) and its
+    // index changed, so nothing sent its header or its cells again.
+    let mut run = Run::new(100);
+    drop(run.ui.a11y_tree());
+    run.page.columns.set_hidden(VERSION, true);
+    run.frame();
+    let update = run.ui.a11y_update().expect("an update");
+    assert_eq!(node(&update, &run.ui, run.table()).column_count(), Some(3));
+    for id in [run.header(Some(SIZE)), run.cell(0, SIZE), run.cell(9, SIZE)] {
+        assert_eq!(node(&update, &run.ui, id).column_index(), Some(2));
+    }
+    // Only those: the check column's header kept its place and its index.
+    let check = run.header(None);
+    assert!(!sent(&update, &run.ui, check));
+    run.page.columns.set_hidden(VERSION, false);
+    run.frame();
+    let update = run.ui.a11y_update().expect("an update");
+    for id in [run.header(Some(SIZE)), run.cell(0, SIZE), run.cell(9, SIZE)] {
+        assert_eq!(node(&update, &run.ui, id).column_index(), Some(3));
+    }
+    // A width that changed moves no index.
+    run.page.columns.resize(SIZE, 70.0);
+    run.frame();
+    let update = run.ui.a11y_update().expect("an update");
+    assert!(!sent(&update, &run.ui, run.header(None)));
+}
+
+/// Whether `update` sends node `id`.
+fn sent(update: &accesskit::TreeUpdate, ui: &Ui<Msg>, id: NodeId) -> bool {
+    update
+        .nodes
+        .iter()
+        .any(|(k, _)| ui.a11y_node(*k) == Some(id))
+}
+
+#[test]
+fn focus_on_a_column_header_when_every_column_goes_goes_with_them() {
+    // Found in review: with no check column, the header left empty, focus mended from nothing.
+    let mut page = Page::new(100);
+    page.checks = false;
+    let mut run = Run::with(page);
+    run.ui.set_focus(Some(run.header(Some(SIZE))));
+    run.page.hide_all = true;
+    run.frame();
+    assert_eq!(run.keys(run.header_node()), []);
+    assert_eq!(run.ui.focus(), None);
 }
 
 #[test]
@@ -949,6 +1153,59 @@ fn check_items_show_a_check_beside_a_shown_column_and_every_label_lines_up() {
     let plain = first_ink(&pixels, w, rect(COLUMN_FIT)).expect("a label");
     assert!(shown < hidden, "the check comes before the label");
     assert_eq!(hidden, plain, "labels line up, checks or not");
+}
+
+/// A menu of two items, Alpha a check item if `check`, sized to it and laid out.
+fn two_items(ui: &mut Ui<Msg>, check: bool, alpha: &str) -> Size {
+    let msg = ev(TableEvent::ResetColumns);
+    ui.build(|cx| {
+        cx.add_with(Element::menu(MENU), |cx| {
+            cx.add(if check {
+                Element::menu_check(Key::name("alpha"), alpha, true, msg)
+            } else {
+                Element::menu_item(Key::name("alpha"), alpha, msg)
+            });
+            cx.add(Element::menu_item(Key::name("beta"), "Beta", msg));
+        });
+    });
+    let size = ui.natural_size(&mut FakeText, WINDOW.w);
+    ui.set_viewport(size);
+    ui.layout(&mut FakeText);
+    size
+}
+
+fn menu_ui() -> Ui<Msg> {
+    let mut ui = Ui::new(Size { w: 0.0, h: 0.0 }, 1.0, Motion::REDUCED);
+    ui.set_active(true);
+    ui
+}
+
+// Found in review: an item's labels are measured past the gutter only in a menu with a check item,
+// and nothing measured the others again when one became or stopped being one.
+#[test]
+fn a_menu_that_gains_or_loses_a_check_item_is_measured_again() {
+    let mut ui = menu_ui();
+    let plain = two_items(&mut ui, false, "Alpha");
+    let checked = two_items(&mut ui, true, "Alpha");
+    assert_eq!(checked, two_items(&mut menu_ui(), true, "Alpha"));
+    assert!(checked.w > plain.w, "{checked:?} past {plain:?}");
+    assert_eq!(two_items(&mut ui, false, "Alpha"), plain);
+}
+
+// Found in review: a check item without a label never showed its check.
+#[test]
+fn a_check_item_without_a_label_shows_its_check() {
+    let mut ui = menu_ui();
+    two_items(&mut ui, true, "");
+    let (w, h) = ui.pixel_size();
+    let mut pixels = vec![0; usize::try_from(u64::from(w) * u64::from(h)).expect("pixels")];
+    {
+        let mut canvas = Canvas::new(&mut pixels, w, h).expect("a canvas");
+        ui.paint(&mut canvas, &mut FakeText, &Theme::LIGHT);
+    }
+    let id = ui.find(&[MENU, Key::name("alpha")]).expect("an item");
+    let rect = ui.info(id).expect("an item").rect;
+    assert!(first_ink(&pixels, w, rect).is_some(), "a check");
 }
 
 // ---- accessibility helpers -------------------------------------------------------------------

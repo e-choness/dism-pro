@@ -185,7 +185,9 @@ impl<M> Ui<M> {
                     p.text(node, content, button, ink);
                 }
             }
-            Role::MenuItem | Role::Tooltip if node.first == NIL && !node.text.is_empty() => {
+            Role::MenuItem | Role::Tooltip
+                if node.first == NIL && (!node.text.is_empty() || node.is_check_item()) =>
+            {
                 let mut content = node.rect.inset(node.style.padding);
                 if self.in_check_menu(i) {
                     content = p.menu_check(node, content, ink);
