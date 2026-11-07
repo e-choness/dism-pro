@@ -433,6 +433,8 @@ impl<M> Ui<M> {
                 };
                 let st = &self.tables[t as usize];
                 node.set_row_count(st.rows as usize);
+                // AccessKit computes neither a set's size nor a member's place (A2.3).
+                node.set_size_of_set(st.rows as usize);
                 node.set_column_count(st.columns.len() + usize::from(st.checks));
                 let s = self.grid_rows_slot(i);
                 if s != NIL {
@@ -442,6 +444,7 @@ impl<M> Ui<M> {
             Role::Row => {
                 if let Some((_, at)) = self.row_place(i) {
                     node.set_row_index(at as usize);
+                    node.set_position_in_set(at as usize);
                 }
             }
             Role::Cell => {

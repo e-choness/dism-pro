@@ -74,7 +74,7 @@ impl<M> Ui<M> {
             // The content can't change the size; `arrange` measures it when placing it.
             Size::ZERO
         } else if let Some(size) = (n.role == Role::Grid)
-            .then(|| self.grid_natural(i))
+            .then(|| self.grid_natural(i, text))
             .flatten()
         {
             size

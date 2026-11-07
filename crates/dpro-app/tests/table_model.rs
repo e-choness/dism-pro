@@ -265,3 +265,86 @@ fn duplicate_keys_map_to_their_first_row() {
         (Some(0), Some(2), None)
     );
 }
+
+/// An anchor the filter hides can't start a range: the current row does, and becomes the anchor,
+/// so the range grows from it as Shift moves on.
+#[test]
+fn extending_past_an_anchor_the_filter_hides_grows_from_the_current_row() {
+    let mut m = model(&[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    m.set_current(0); // the anchor, about to be hidden
+    m.extend_to(2);
+    assert_eq!(checked(&m), [0, 1, 2]);
+    let g = m.begin_filter();
+    assert!(m.finish_filter(g, Query::new("x"), (1..10).collect()));
+    assert_eq!(m.current_view(), Some(1));
+    m.extend_to(2); // row 3
+    assert_eq!(checked(&m), [2, 3]);
+    m.extend_to(4); // row 5
+    assert_eq!(checked(&m), [2, 3, 4, 5], "from row 2, the new anchor");
+}
+
+/// Rows named by their keys, some locked.
+struct Locked {
+    keys: Vec<u64>,
+    locked: Vec<u64>,
+}
+
+impl RowSource for Locked {
+    fn len(&self) -> u32 {
+        u32::try_from(self.keys.len()).unwrap_or(u32::MAX)
+    }
+    fn key(&self, row: u32) -> RowKey {
+        RowKey(self.keys[row as usize])
+    }
+    fn cell(&self, _row: u32, _col: ColumnId) -> Cell<'_> {
+        Cell::Empty
+    }
+    fn locked(&self, row: u32) -> bool {
+        self.locked.contains(&self.keys[row as usize])
+    }
+}
+
+/// TD-0009 A2.5: a locked row can be current, but nothing checks it: a toggle, a Shift range
+/// over it, check-all, or a refresh that locks a checked row.
+#[test]
+fn a_locked_row_is_never_checked() {
+    let old = Locked {
+        keys: vec![10, 11, 12, 13, 14],
+        locked: vec![12],
+    };
+    let mut m = TableModel::with_keys(RowMap::build(&old));
+    assert!(m.is_locked(2) && !m.is_locked(1));
+    m.pick(2, Pick::Toggle);
+    assert_eq!(m.selected_count(), 0);
+    m.set_current(2);
+    assert_eq!(m.current(), Some(2), "it can be current");
+    m.set_current(0);
+    m.extend_to(4);
+    assert_eq!(checked(&m), [0, 1, 3, 4]);
+    m.select_all();
+    assert_eq!(m.selected_count(), 4);
+    // 10, checked, comes back locked: its check goes. 12 is no longer locked.
+    let new = Locked {
+        keys: vec![12, 10, 11, 16],
+        locked: vec![10, 16],
+    };
+    m.refresh(&new);
+    assert_eq!(checked_keys(&m, &new.keys), [11]);
+    assert_eq!(
+        (0..4).map(|r| m.is_locked(r)).collect::<Vec<_>>(),
+        [false, true, false, true]
+    );
+    // Locking by hand unchecks; unlocking lets it be checked again.
+    m.set_locked(2, true);
+    assert_eq!(m.selected_count(), 0);
+    m.set_locked(2, false);
+    let at = m.position(2).expect("11 is in view");
+    m.pick(at, Pick::Toggle);
+    assert_eq!(checked_keys(&m, &new.keys), [11]);
+    // A model without keys takes locks by hand, and ignores rows past the end.
+    let mut m = TableModel::new(3);
+    m.set_locked(1, true);
+    m.set_locked(7, true);
+    m.select_all();
+    assert_eq!(checked(&m), [0, 2]);
+}

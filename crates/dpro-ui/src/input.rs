@@ -233,8 +233,15 @@ impl<M: Clone> Ui<M> {
             return false;
         }
         self.pressed = hit;
-        // Focus from the pointer scrolls nothing: the node stays under the pointer.
-        self.focus_node(hit);
+        // Focus from the pointer scrolls nothing: the node stays under the pointer. A press on a
+        // table's row focuses its current row, which the keys act on: the click makes the
+        // pressed row current, and focus follows it then; a press that ends elsewhere leaves
+        // both where they were.
+        let to = self
+            .row_place(hit)
+            .and_then(|(t, _)| self.current_row_node(t))
+            .unwrap_or(hit);
+        self.focus_node(to);
         if self.is_field(hit) {
             self.field_pointer(hit, p, false);
         } else {
@@ -673,8 +680,12 @@ impl<M> Ui<M> {
         }
     }
 
-    /// Where Tab lands in group `g`: its picked item, else its first (`forward`) or last.
+    /// Where Tab lands in group `g`: its picked item, else its first (`forward`) or last. A
+    /// table's rows are built half a view past it: there it's [`Ui::table_entry`].
     fn group_entry(&self, g: u32, forward: bool) -> u32 {
+        if let Some(row) = self.table_entry(g) {
+            return row;
+        }
         let mut c = self.nodes[g as usize].first;
         while c != NIL {
             let n = &self.nodes[c as usize];

@@ -79,11 +79,11 @@ use windows_sys::{
                 TranslateMessage, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_CREATE, WM_DESTROY,
                 WM_DPICHANGED, WM_DWMCOMPOSITIONCHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO,
                 WM_GETOBJECT, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP,
-                WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_PAINT,
-                WM_POWERBROADCAST, WM_SETCURSOR, WM_SETFOCUS, WM_SETTINGCHANGE, WM_SIZE,
-                WM_SYSCOLORCHANGE, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_THEMECHANGED, WM_TIMER,
-                WM_WTSSESSION_CHANGE, WNDCLASS_STYLES, WNDCLASSEXW, WS_EX_NOREDIRECTIONBITMAP,
-                WS_OVERLAPPEDWINDOW,
+                WM_MBUTTONDOWN, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE,
+                WM_NCDESTROY, WM_PAINT, WM_POWERBROADCAST, WM_RBUTTONDOWN, WM_SETCURSOR,
+                WM_SETFOCUS, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_SYSKEYDOWN,
+                WM_SYSKEYUP, WM_THEMECHANGED, WM_TIMER, WM_WTSSESSION_CHANGE, WM_XBUTTONDOWN,
+                WNDCLASS_STYLES, WNDCLASSEXW, WS_EX_NOREDIRECTIONBITMAP, WS_OVERLAPPEDWINDOW,
             },
         },
     },
@@ -554,9 +554,6 @@ struct State {
     tracking: Cell<bool>,
     /// The primary button is down, and the window holds the pointer.
     pressed: Cell<bool>,
-    /// The last press that could begin a double-click: where, and its message time. A
-    /// double-click's second press clears it, so a third begins anew.
-    last_press: Cell<Option<(PointPx, i32)>>,
     /// Serves the handler's tree to UI Automation; made once the window exists.
     a11y: RefCell<Option<Adapter>>,
     /// Clients' requests, queued on UI Automation's threads.
@@ -701,7 +698,6 @@ impl State {
             close: Cell::new(false),
             tracking: Cell::new(false),
             pressed: Cell::new(false),
-            last_press: Cell::new(None),
             a11y: RefCell::new(None),
             requests: Arc::new(Requests::default()),
             a11y_whole: Cell::new(false),
@@ -930,7 +926,7 @@ impl State {
                 // SAFETY: hwnd is live; WM_CAPTURECHANGED goes to the window losing the capture.
                 unsafe { SetCapture(hwnd) };
                 let at = point(lp);
-                let double = self.double_click(at);
+                let double = double_click(hwnd, WM_LBUTTONDOWN, at);
                 let held = mods();
                 let mods = Mods {
                     shift: wp & MK_SHIFT != 0,
@@ -946,6 +942,12 @@ impl State {
                     unsafe { ReleaseCapture() };
                 }
                 self.send(hwnd, Event::PointerUp(point(lp)));
+            }
+            // The other buttons go the default way, but end a double-click: left, right, left is
+            // two clicks, not a double-click.
+            WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_XBUTTONDOWN => {
+                double_click(hwnd, msg, point(lp));
+                return None;
             }
             WM_CAPTURECHANGED => {
                 // Another window took the pointer mid-press: the press is cancelled.
@@ -1676,29 +1678,56 @@ fn signed(word: u32) -> i32 {
 const MK_SHIFT: WPARAM = 0x0004;
 const MK_CONTROL: WPARAM = 0x0008;
 
-impl State {
-    /// Whether a press at `at`, now (the message's time), is a double-click's second: within
-    /// `GetDoubleClickTime` of the last press that could begin one, and within the double-click
-    /// rectangle (`SM_CXDOUBLECLK` by `SM_CYDOUBLECLK`) centered on it.
-    fn double_click(&self, at: PointPx) -> bool {
-        // SAFETY: no preconditions; the time of the message being handled.
-        let now = unsafe { GetMessageTime() };
-        // SAFETY: no preconditions.
-        let (limit, w, h) = unsafe {
-            (
-                GetDoubleClickTime(),
-                GetSystemMetrics(SM_CXDOUBLECLK),
-                GetSystemMetrics(SM_CYDOUBLECLK),
-            )
-        };
-        let double = self.last_press.get().is_some_and(|(p, then)| {
+/// A button press that could begin a double-click.
+#[derive(Clone, Copy)]
+struct Press {
+    hwnd: HWND,
+    /// Its message: `WM_LBUTTONDOWN`, `WM_RBUTTONDOWN`, ...
+    button: u32,
+    at: PointPx,
+    /// Its message time.
+    time: i32,
+}
+
+thread_local! {
+    /// The last press on any of this thread's windows (the main window and its popups). A
+    /// double-click's second press clears it, so a third begins anew.
+    static LAST_PRESS: Cell<Option<Press>> = const { Cell::new(None) };
+}
+
+/// Whether `button` pressed at `at` on `hwnd`, now (the message's time), is a double-click's
+/// second, as Windows counts them: the same button on the same window as the last press on any
+/// of the thread's windows, within `GetDoubleClickTime` of it, and within the double-click
+/// rectangle (`SM_CXDOUBLECLK` by `SM_CYDOUBLECLK`) centered on it.
+fn double_click(hwnd: HWND, button: u32, at: PointPx) -> bool {
+    // SAFETY: no preconditions; the time of the message being handled.
+    let now = unsafe { GetMessageTime() };
+    // SAFETY: no preconditions.
+    let (limit, w, h) = unsafe {
+        (
+            GetDoubleClickTime(),
+            GetSystemMetrics(SM_CXDOUBLECLK),
+            GetSystemMetrics(SM_CYDOUBLECLK),
+        )
+    };
+    LAST_PRESS.with(|last| {
+        let double = last.get().is_some_and(|p| {
             // Message times wrap after 49.7 days; the difference doesn't.
-            let elapsed = now.wrapping_sub(then).unsigned_abs();
-            elapsed <= limit && 2 * (at.x - p.x).abs() <= w && 2 * (at.y - p.y).abs() <= h
+            let elapsed = now.wrapping_sub(p.time).unsigned_abs();
+            p.hwnd == hwnd
+                && p.button == button
+                && elapsed <= limit
+                && 2 * (at.x - p.at.x).abs() <= w
+                && 2 * (at.y - p.at.y).abs() <= h
         });
-        self.last_press.set((!double).then_some((at, now)));
+        last.set((!double).then_some(Press {
+            hwnd,
+            button,
+            at,
+            time: now,
+        }));
         double
-    }
+    })
 }
 
 fn point(lp: LPARAM) -> PointPx {
@@ -2223,6 +2252,46 @@ mod tests {
                 (10, true, true, false),
             ],
             "the last is too far from the one before"
+        );
+        drop(window);
+        // SAFETY: plain data; all-zero is a valid value.
+        let mut msg: MSG = unsafe { std::mem::zeroed() };
+        // SAFETY: msg is a live local; PM_REMOVE takes the message.
+        while unsafe { PeekMessageW(&raw mut msg, null_mut(), 0, 0, PM_REMOVE) } != 0 {}
+    }
+
+    /// Windows counts a double-click on one button: a right-click between two quick left ones,
+    /// on the same spot, makes them two clicks. (A left click on a row, a right-click for its
+    /// menu, and a left click to dismiss it mustn't open the row.)
+    #[test]
+    fn another_button_between_two_presses_ends_a_double_click() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::WM_RBUTTONUP;
+        let (window, events, _) = open(0);
+        let lp: LPARAM = (LPARAM::from(10_i16) << 16) | LPARAM::from(10_i16);
+        events.borrow_mut().clear();
+        // SAFETY: messages sent to this test's live window, on its thread.
+        unsafe {
+            SendMessageW(window.hwnd, WM_LBUTTONDOWN, 0, lp);
+            SendMessageW(window.hwnd, WM_LBUTTONUP, 0, lp);
+            SendMessageW(window.hwnd, WM_RBUTTONDOWN, 0, lp);
+            SendMessageW(window.hwnd, WM_RBUTTONUP, 0, lp);
+            SendMessageW(window.hwnd, WM_LBUTTONDOWN, 0, lp);
+            SendMessageW(window.hwnd, WM_LBUTTONUP, 0, lp);
+            SendMessageW(window.hwnd, WM_LBUTTONDOWN, 0, lp);
+            SendMessageW(window.hwnd, WM_LBUTTONUP, 0, lp);
+        }
+        let doubles: Vec<bool> = events
+            .borrow()
+            .iter()
+            .filter_map(|e| match *e {
+                Event::PointerDown { double, .. } => Some(double),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            doubles,
+            [false, false, true],
+            "the third is the second's double"
         );
         drop(window);
         // SAFETY: plain data; all-zero is a valid value.

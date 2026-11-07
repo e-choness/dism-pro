@@ -20,7 +20,8 @@
 //!   it to another index, not another row, so nothing scrolls. Its key tells which.
 //! - **Checks** are the view's too: Space, Ctrl+click and a click on a row's check box toggle a
 //!   row, Shift extends from the anchor, Ctrl+A and the check column's header check all. A row
-//!   without a check box (a locked one, whose tooltip says why) takes the moves only.
+//!   without a check box (a locked one, whose tooltip says why) takes Space and Ctrl+click as
+//!   moves only; a Shift range passes over it, as the model never checks a locked row.
 
 use std::mem;
 
@@ -29,7 +30,7 @@ use dpro_app::table::{ColumnId, Order, Pick, RowKey, Tri};
 
 use crate::{
     build::Cx,
-    geom::{Insets, Point, Rect, RectPx, Size},
+    geom::{Insets, Point, Rect, Size},
     input::{KeyCode, KeyEvent, Mods},
     scroll::{to_logical, to_px},
     style::{Align, Axis, Justify, Style},
@@ -185,7 +186,8 @@ pub(crate) struct TableState<M> {
     pub(crate) check_label: String,
     /// Each column's start and width (logical), the check column first: from layout.
     tracks: Vec<(f32, f32)>,
-    content_w: f32,
+    /// The columns' width (logical): their tracks' sum, from layout.
+    pub(crate) content_w: f32,
     /// A row's height in whole physical pixels, from layout; 0 until it has measured.
     pub(crate) row_px: i64,
     /// A row's height in logical pixels, before rounding: for a new scale.
@@ -243,6 +245,8 @@ struct Plan {
     extra: Option<u32>,
     /// Focus goes to the current row once it's built.
     follow: bool,
+    /// Focus was on one of the rows: if the build drops that row, focus stays in the table.
+    focused: bool,
 }
 
 /// A column header's sort as its node's value: 0 none, 1 ascending, 2 descending.
@@ -354,10 +358,12 @@ impl<M: Clone> Cx<'_, M> {
                 let before = plan.extra.filter(|&c| c < plan.from);
                 let after = plan.extra.filter(|&c| c >= plan.to);
                 for at in before.into_iter().chain(plan.from..plan.to).chain(after) {
-                    let (r, first, start) = if let Some(r) = cur
+                    // Each row's cells end where its own pushes did: the current row's before
+                    // `kept_ends`, so a row built after it can't lend it cells it didn't give.
+                    let (r, cell_ends, start) = if let Some(r) = cur
                         && current == Some(at)
                     {
-                        (r, 0, 0)
+                        (r, 0..kept_ends, 0)
                     } else {
                         text.truncate(kept_text);
                         ends.truncate(kept_ends);
@@ -368,11 +374,11 @@ impl<M: Clone> Cx<'_, M> {
                                 ends: &mut ends,
                             },
                         );
-                        (r, kept_ends, kept_text)
+                        (r, kept_ends..ends.len(), kept_text)
                     };
                     let cells = CellText {
                         text: &text,
-                        ends: &ends[first..],
+                        ends: &ends[cell_ends],
                         start,
                     };
                     let node = bx.table_row(table, at, current == Some(at), r, &cells);
@@ -388,7 +394,7 @@ impl<M: Clone> Cx<'_, M> {
         cx.ui.cell_text = text;
         cx.ui.cell_ends = ends;
         if let Some(plan) = plan {
-            cx.ui.table_built(t, plan.follow);
+            cx.ui.table_built(t, plan);
         }
         cx.finish();
         self.id(grid)
@@ -774,6 +780,7 @@ impl<M> Ui<M> {
             to,
             extra: current.filter(|&c| c < from || c >= to),
             follow,
+            focused: focus_here,
         }
     }
 
@@ -837,22 +844,70 @@ impl<M> Ui<M> {
 
     /// The rows built for slot `t` are its scratch list: layout places them again if they
     /// changed, and focus follows the current row if it should.
-    fn table_built(&mut self, t: u32, follow: bool) {
+    fn table_built(&mut self, t: u32, plan: Plan) {
         let st = &mut self.tables[t as usize];
         let changed = st.scratch != st.built;
         mem::swap(&mut st.built, &mut st.scratch);
         st.scratch.clear();
         let body = st.body;
-        let node = st
-            .current
-            .and_then(|c| st.built.iter().find(|&&(_, at)| at == c))
-            .map(|&(node, _)| node);
         if changed {
             self.mark_dirty(body);
         }
-        if follow && let Some(node) = node {
-            self.focus_node(node);
+        // A focused row the build dropped (scrolled away from, or gone with a refresh) took focus
+        // with it: it comes back to the current row, else the first row in view, so the keyboard
+        // and a client's cursor stay in the table.
+        let dropped = plan.focused && self.focus == NIL;
+        if plan.follow || dropped {
+            let to = self.current_row_node(t).or_else(|| {
+                let at = self.first_row_in_view(t)?;
+                self.built_node(t, at)
+            });
+            if let Some(node) = to {
+                self.focus_node(node);
+            }
         }
+    }
+
+    /// The node of table `t`'s row `at`, if it's built.
+    fn built_node(&self, t: u32, at: u32) -> Option<u32> {
+        let st = &self.tables[t as usize];
+        st.built
+            .iter()
+            .find(|&&(_, a)| a == at)
+            .map(|&(node, _)| node)
+    }
+
+    /// Table `t`'s current row's node, if it has a current row (it's always built).
+    pub(crate) fn current_row_node(&self, t: u32) -> Option<u32> {
+        self.built_node(t, self.tables[t as usize].current?)
+    }
+
+    /// Table `t`'s first row wholly in view, or the one partly in view if none is wholly (a view
+    /// lower than a row). `None` if it has no rows or hasn't been laid out.
+    fn first_row_in_view(&self, t: u32) -> Option<u32> {
+        let st = &self.tables[t as usize];
+        let (rows, rp, view) = (st.rows, st.built_px, st.view_px);
+        if rows == 0 || rp <= 0 || view <= 0 {
+            return None;
+        }
+        let s = self.nodes[st.body as usize].scroll;
+        let off = self.scrolls[s as usize].offset[1];
+        let whole = off.saturating_add(rp - 1) / rp;
+        let at = if whole.saturating_add(1).saturating_mul(rp) <= off.saturating_add(view) {
+            whole
+        } else {
+            off / rp
+        };
+        Some(u32::try_from(at).unwrap_or(u32::MAX).min(rows - 1))
+    }
+
+    /// Where Tab lands in table body `body`, either way: its current row, else its first row
+    /// wholly in view (the rows are built half a view past it, so not the first built). `None`
+    /// if `body` isn't a table's.
+    pub(crate) fn table_entry(&self, body: u32) -> Option<u32> {
+        let t = self.table_of_body(body)?;
+        self.current_row_node(t)
+            .or_else(|| self.built_node(t, self.first_row_in_view(t)?))
     }
 
     // ---- lookups -----------------------------------------------------------------------------
@@ -955,9 +1010,11 @@ impl<M> Ui<M> {
         }
     }
 
-    /// Row node `i`'s rectangle in its viewport's content as painted, exactly: its index times
-    /// the row height from the base, however far down. `None` if it isn't a table's row.
-    pub(crate) fn row_rect_px(&self, i: u32) -> Option<RectPx> {
+    /// Row node `i`'s rectangle in its viewport's content as painted, exactly, as `[x0, y0, x1,
+    /// y1]`: its index times the row height from the base, however far down. In `i64`: the
+    /// current row, built wherever it is, can be past `i32` pixels from the base. `None` if it
+    /// isn't a table's row.
+    pub(crate) fn row_rect_px(&self, i: u32) -> Option<[i64; 4]> {
         let (t, at) = self.row_place(i)?;
         let st = &self.tables[t as usize];
         let rp = if st.row_px > 0 {
@@ -971,26 +1028,29 @@ impl<M> Ui<M> {
         let body = self.nodes[st.body as usize].rect.snap(self.scale);
         let r = self.nodes[i as usize].rect.snap(self.scale);
         let y0 = i64::from(body.y0) + (i64::from(at) - i64::from(st.base_row)) * rp;
-        let px = |v: i64| i32::try_from(v).unwrap_or(if v < 0 { i32::MIN } else { i32::MAX });
-        Some(RectPx {
-            y0: px(y0),
-            y1: px(y0 + rp),
-            ..r
-        })
+        Some([i64::from(r.x0), y0, i64::from(r.x1), y0 + rp])
     }
 
     // ---- layout ------------------------------------------------------------------------------
 
+    /// Table `t`'s row height, logical and in whole physical pixels: its body text's line and the
+    /// row padding above and below, at least the row token.
+    fn row_height(&self, t: u32, text: &mut dyn TextSystem) -> (f32, i64) {
+        let body = self.tables[t as usize].body;
+        let style = self.nodes[body as usize].text_style;
+        let line = text.measure("", &style, f32::INFINITY).height;
+        let row_h = (line + 2.0 * tok::ROW_PAD_Y).max(tok::ROW);
+        (row_h, to_px(row_h, self.scale).max(1))
+    }
+
     /// A grid's natural size: its columns' least widths, and a row for the header and each row
     /// (or the status line). `None` if it isn't a table.
-    pub(crate) fn grid_natural(&self, i: u32) -> Option<Size> {
+    pub(crate) fn grid_natural(&self, i: u32, text: &mut dyn TextSystem) -> Option<Size> {
         let t = self.table_of_grid(i)?;
+        // Measured now, not the last layout's: after a text size change, the grid is measured
+        // before it's arranged.
+        let (_, rp) = self.row_height(t, text);
         let st = &self.tables[t as usize];
-        let rp = if st.row_px > 0 {
-            st.row_px
-        } else {
-            st.built_px
-        };
         let row = to_logical(rp, self.scale);
         let w = if st.checks { tok::CHECK_COL } else { 0.0 }
             + st.columns
@@ -1083,10 +1143,7 @@ impl<M> Ui<M> {
             let st = &self.tables[t as usize];
             (st.header, st.body)
         };
-        let style = self.nodes[body as usize].text_style;
-        let line = text.measure("", &style, f32::INFINITY).height;
-        let row_h = (line + 2.0 * tok::ROW_PAD_Y).max(tok::ROW);
-        let rp = to_px(row_h, scale).max(1);
+        let (row_h, rp) = self.row_height(t, text);
         self.tables[t as usize].row_h = row_h;
         let old = self.tables[t as usize].row_px;
         if rp != old {
@@ -1157,13 +1214,39 @@ impl<M> Ui<M> {
                 Track::Share(s) => (fixed, shares + s.max(0.0)),
             },
         );
+        // A shared column whose share falls below its minimum takes the minimum, and the others
+        // share what's left. Each one pinned lowers the rate the others get, so pinning only
+        // grows: repeat until no more fall below, at most once per column.
         let rest = (width - fixed).max(0.0);
+        let mut rate = if shares > 0.0 { rest / shares } else { 0.0 };
+        let mut pinned = 0;
+        loop {
+            let (mut mins, mut held, mut count) = (0.0f32, 0.0f32, 0);
+            for c in columns.iter() {
+                if let Track::Share(s) = c.width
+                    && s.max(0.0) * rate < c.min
+                {
+                    mins += c.min;
+                    held += s.max(0.0);
+                    count += 1;
+                }
+            }
+            let left = shares - held;
+            let next = if left > 0.0 {
+                (rest - mins).max(0.0) / left
+            } else {
+                0.0
+            };
+            if count == pinned {
+                break;
+            }
+            (pinned, rate) = (count, next);
+        }
         let widths = check
             .into_iter()
             .chain(columns.iter().map(|c| match c.width {
                 Track::Fixed(w) => w.max(c.min),
-                Track::Share(s) if shares > 0.0 => (rest * s.max(0.0) / shares).max(c.min),
-                Track::Share(_) => c.min,
+                Track::Share(s) => (s.max(0.0) * rate).max(c.min),
             }));
         // In place: a layout that changes nothing allocates nothing.
         let mut changed = false;
@@ -1328,7 +1411,8 @@ impl<M> Ui<M> {
             TableEvent::Activate(at)
         } else if p.mods.ctrl && checkable {
             TableEvent::Check(at, Pick::Toggle)
-        } else if p.mods.shift && checkable {
+        } else if p.mods.shift && self.tables[t as usize].checks {
+            // Onto a locked row too: the anchor stays, and the model skips the row.
             TableEvent::Check(at, Pick::Extend)
         } else {
             TableEvent::Current(at)
@@ -1404,7 +1488,8 @@ impl<M> Ui<M> {
         };
         self.show_focus_ring();
         if to != at {
-            out.push(on(if shift && self.row_checkable(t, to) {
+            // Shift extends onto a locked row too, so the anchor stays; the model skips the row.
+            out.push(on(if shift && self.tables[t as usize].checks {
                 TableEvent::Check(to, Pick::Extend)
             } else {
                 TableEvent::Current(to)

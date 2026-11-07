@@ -41,6 +41,10 @@ use crate::{
     ui::{ROOT, Ui},
 };
 
+/// How far past its view content still fits, in logical pixels: float error in a sum of widths,
+/// far below a pixel at any scale.
+const FIT_SLACK: f32 = 0.01;
+
 /// Which ways a [scroll viewport](crate::Element::scroll) scrolls.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Axes {
@@ -535,9 +539,25 @@ impl<M> Ui<M> {
             text.measure("", &style, f32::INFINITY).height,
         ];
         let mut content = content;
-        let mut content_px = [to_px(content.w, self.scale), to_px(content.h, self.scale)];
-        // A table's rows: their height exactly, past what `f32` counts.
         let t = self.scrolls[s as usize].table;
+        // An empty table's status line is as wide as its columns, so its header, which follows
+        // it, still scrolls to the columns past the view.
+        if t != NIL && self.tables[t as usize].rows == 0 {
+            content.w = content.w.max(self.tables[t as usize].content_w);
+        }
+        let mut content_px = [to_px(content.w, self.scale), to_px(content.h, self.scale)];
+        // Content that fits its view fits: rounding its size and the view's edges apart mustn't
+        // leave a pixel to scroll (a table's columns share its width exactly).
+        let (rect, view) = (self.nodes[i as usize].rect, self.view_px(s));
+        for (a, (c, v)) in [(content.w, rect.w), (content.h, rect.h)]
+            .into_iter()
+            .enumerate()
+        {
+            if c <= v + FIT_SLACK {
+                content_px[a] = content_px[a].min(view[a]);
+            }
+        }
+        // A table's rows: their height exactly, past what `f32` counts.
         if t != NIL {
             let st = &self.tables[t as usize];
             if st.rows > 0 && st.row_px > 0 {
@@ -851,9 +871,10 @@ impl<M> Ui<M> {
         }
         // The node where it shows in each viewport's content, viewport by viewport outward: a
         // table's row exactly, however far down.
-        let mut target = self
-            .row_rect_px(i)
-            .unwrap_or_else(|| self.nodes[i as usize].rect.snap(self.scale));
+        let mut target = self.row_rect_px(i).unwrap_or_else(|| {
+            let r = self.nodes[i as usize].rect.snap(self.scale);
+            [r.x0, r.y0, r.x1, r.y1].map(i64::from)
+        });
         let mut found = false;
         // A table's row comes into view down its rows, where it already spans them across.
         let mut row = self.nodes[i as usize].role == Role::Row;
@@ -867,8 +888,8 @@ impl<M> Ui<M> {
                 let base = sc.base;
                 let mut to = sc.offset;
                 for (k, (t0, t1, v0, v1)) in [
-                    (target.x0, target.x1, view.x0, view.x1),
-                    (target.y0, target.y1, view.y0, view.y1),
+                    (target[0], target[2], view.x0, view.x1),
+                    (target[1], target[3], view.y0, view.y1),
                 ]
                 .into_iter()
                 .enumerate()
@@ -876,8 +897,7 @@ impl<M> Ui<M> {
                     if !sc.axes[k] || (row && k == 0) {
                         continue;
                     }
-                    let (t0, t1, v0, v1) =
-                        (i64::from(t0), i64::from(t1), i64::from(v0), i64::from(v1));
+                    let (v0, v1) = (i64::from(v0), i64::from(v1));
                     // Shown from `o`: [v0 + o, v1 + o) of what layout placed.
                     let o = to[k] - base[k];
                     if t1 - t0 > v1 - v0 || t0 < v0 + o {
@@ -893,15 +913,14 @@ impl<M> Ui<M> {
                 }
                 self.scroll_axis(by, 0, to[0]);
                 row = false;
-                let off = self.shift_px(s);
+                let [dx, dy] = self.shift_px(s);
                 // Where it now shows in this viewport's parent's content.
-                let (dx, dy) = (px_i32(off[0]), px_i32(off[1]));
-                target = crate::geom::RectPx {
-                    x0: target.x0 - dx,
-                    y0: target.y0 - dy,
-                    x1: target.x1 - dx,
-                    y1: target.y1 - dy,
-                };
+                target = [
+                    target[0].saturating_sub(dx),
+                    target[1].saturating_sub(dy),
+                    target[2].saturating_sub(dx),
+                    target[3].saturating_sub(dy),
+                ];
             }
             a = self.nodes[a as usize].parent;
         }
@@ -1063,10 +1082,4 @@ fn moved(r: Rect, by: Point) -> Rect {
 /// A slot index as a `u32`.
 fn slot(s: usize) -> u32 {
     u32::try_from(s).unwrap_or(NIL)
-}
-
-/// An offset as pixel coordinates; offsets past `i32` are clamped (a reveal past 2^31 px is
-/// off the grid anyway).
-fn px_i32(v: i64) -> i32 {
-    i32::try_from(v).unwrap_or(if v < 0 { i32::MIN } else { i32::MAX })
 }

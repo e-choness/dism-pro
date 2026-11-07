@@ -32,10 +32,10 @@
 
 use dpro_app::table::{RowMap, RowSource, TableModel};
 use dpro_ui::{
-    Align, Cells, Column, ColumnId, Cx, Dim, Element, FakeText, Input, Key, KeyCode, KeyEvent,
-    Mods, Motion, NodeId, Order, Pick, Point, Rect, Role, Row, RowKey, Size, Status, Style,
-    TABLE_BODY, TABLE_CHECK, TABLE_HEADER, Table, TableEvent, TextMetrics, TextStyle, TextSystem,
-    Track, Tri, Ui,
+    Align, Cells, Column, ColumnId, Cx, Dim, Element, FakeText, Input, Insets, Key, KeyCode,
+    KeyEvent, Mods, Motion, NodeId, Order, Pick, Point, Rect, Role, Row, RowKey, Size, Status,
+    Style, TABLE_BODY, TABLE_CHECK, TABLE_HEADER, Table, TableEvent, TextMetrics, TextStyle,
+    TextSystem, Track, Tri, Ui,
     accesskit::{
         self, Action, ActionRequest, NodeId as AkId, Role as AkRole, SortDirection, Toggled, TreeId,
     },
@@ -116,8 +116,15 @@ struct Page {
     checks: bool,
     /// A source row that can't be checked.
     locked: Option<u32>,
+    /// A source row the view gives no size, so its last cell is empty.
+    no_size: Option<u32>,
     /// The empty table's line, with Clear filter.
     status: Option<&'static str>,
+    columns: &'static [Column<'static>],
+    /// The table's height: the window's, or [`Dim::Auto`] for its rows'.
+    height: Dim,
+    /// The table's padding left and right.
+    pad: f32,
 }
 
 impl Page {
@@ -131,7 +138,11 @@ impl Page {
             sizes,
             checks: true,
             locked: None,
+            no_size: None,
             status: None,
+            columns: &COLUMNS,
+            height: Dim::Fixed(WINDOW.h),
+            pad: 0.0,
         }
     }
 
@@ -188,7 +199,7 @@ impl Page {
     fn view(&self, cx: &mut Cx<'_, Msg>) {
         let table = Table {
             rows: u32::try_from(self.model.view().len()).expect("rows"),
-            columns: &COLUMNS,
+            columns: self.columns,
             sorted: self.model.sort(),
             checks: self.checks.then(|| ("Select", self.all_checked())),
             current: self.model.current_view(),
@@ -202,7 +213,8 @@ impl Page {
         cx.table(
             Element::table(TABLE)
                 .style(Style {
-                    height: Dim::Fixed(WINDOW.h),
+                    height: self.height,
+                    padding: Insets::xy(self.pad, 0.0),
                     ..Style::default()
                 })
                 .name("Programs"),
@@ -212,7 +224,9 @@ impl Page {
                 let i = r as usize;
                 cells.push(&self.names[i]);
                 cells.push(&self.versions[i]);
-                cells.push(&self.size_text[i]);
+                if self.no_size != Some(r) {
+                    cells.push(&self.size_text[i]);
+                }
                 let locked = self.locked == Some(r);
                 Row {
                     key: RowKey(u64::from(r)),
@@ -598,6 +612,82 @@ fn columns_past_the_view_scroll_sideways_and_the_header_follows() {
     assert_eq!(run.rect(run.header(Some(SIZE))).x, 228.0 - x);
 }
 
+/// Three shared columns whose minimums don't all fit their shares.
+const SHARED: [Column<'static>; 3] = [
+    Column {
+        width: Track::Share(3.0),
+        min: 120.0,
+        ..COLUMNS[0]
+    },
+    Column {
+        width: Track::Share(1.0),
+        min: 160.0,
+        ..COLUMNS[1]
+    },
+    Column {
+        width: Track::Share(1.0),
+        min: 80.0,
+        ..COLUMNS[2]
+    },
+];
+
+#[test]
+fn a_share_under_its_minimum_takes_it_and_the_others_share_the_rest() {
+    let mut page = Page::new(100);
+    page.columns = &SHARED;
+    let run = Run::with(page);
+    // 572 px to share at 114.4 a share would leave Version under its 160: it takes 160, and
+    // the other four shares split 412 at 103. The columns fill the width, and nothing scrolls.
+    let expect = [
+        (None, 0.0, CHECK),
+        (Some(NAME), CHECK, 309.0),
+        (Some(VERSION), 337.0, 160.0),
+        (Some(SIZE), 497.0, 103.0),
+    ];
+    for (col, x, w) in expect {
+        let h = run.rect(run.header(col));
+        assert_eq!((h.x, h.w), (x, w), "header {col:?}");
+        let c = run.rect(run.cell(3, col));
+        assert_eq!((c.x, c.w), (x, w), "row 3 {col:?}");
+    }
+    assert_eq!(run.scroll().content.w, WINDOW.w);
+    assert_eq!(run.scroll().bar_x, None);
+}
+
+#[test]
+fn columns_that_fill_the_view_scroll_nothing_sideways_at_any_scale() {
+    let mut page = Page::new(100);
+    page.pad = 2.0;
+    let mut run = Run::scaled(page, 1.25, 1.0);
+    // The rows' view is 598 px wide at x 2: at 125 %, 2.5 to 750 physical pixels, which snap to
+    // 3 and 750. The columns fill its 598 px, 747.5 physical, which rounds to 748: one more.
+    run.ui.set_viewport(Size { w: 602.0, ..WINDOW });
+    run.frame();
+    assert_eq!(run.scroll().content.w, 598.0);
+    assert_eq!(run.scroll().bar_x, None);
+    let at = run.rect(run.body()).center();
+    run.send(Input::Wheel {
+        at,
+        delta: 120,
+        horizontal: true,
+    });
+    assert_eq!(run.scroll().offset_px, [0, 0]);
+}
+
+#[test]
+fn a_table_as_high_as_its_rows_grows_with_the_text_size() {
+    let mut page = Page::new(3);
+    page.height = Dim::Auto;
+    let mut run = Run::with(page);
+    // The header and 3 rows.
+    assert_eq!(run.rect(run.table()).h, 4.0 * ROW);
+    // 54.5625 px rows round to 55: measured when the grid is, not after.
+    run.ui.set_text_scale(2.25);
+    run.frame();
+    assert_eq!(run.rect(run.table()).h, 4.0 * 55.0);
+    assert_eq!(run.rect(run.row(2).expect("built")).bottom(), 4.0 * 55.0);
+}
+
 #[test]
 fn a_cell_shows_its_column_in_its_face() {
     let run = Run::new(10);
@@ -634,11 +724,39 @@ fn tab_lands_on_the_header_then_the_current_row() {
 }
 
 #[test]
-fn tab_lands_on_the_first_built_row_without_a_current_row() {
+fn tab_lands_on_the_first_row_in_view_without_a_current_row() {
     let mut run = Run::new(100);
     run.key(KeyCode::Tab, plain());
     run.key(KeyCode::Tab, plain());
     assert_eq!(run.focused_row(), Some(0));
+    // Rows are built half a view above and below: Tab and Shift+Tab land in view, not on the
+    // first or last built, and scroll nothing. 10.5 rows down, row 11 is the first wholly in.
+    run.key(KeyCode::Tab, plain());
+    assert!(run.ui.scroll_to(run.body(), [0, 378]));
+    run.frame();
+    run.key(KeyCode::Tab, shift());
+    assert_eq!((run.focused_row(), run.offset()), (Some(11), 10.5 * ROW));
+    run.key(KeyCode::Tab, plain());
+    run.key(KeyCode::Tab, plain());
+    assert_eq!((run.focused_row(), run.offset()), (Some(11), 10.5 * ROW));
+}
+
+/// With no current row, a focused row the build drops (a scroll, a refresh) leaves focus on the
+/// first row in view, not on nothing: the keyboard and a client's cursor stay in the table.
+#[test]
+fn a_focused_row_scrolled_out_of_range_leaves_focus_in_view() {
+    let mut run = Run::new(1_000);
+    run.key(KeyCode::Tab, plain());
+    run.key(KeyCode::Tab, plain());
+    assert_eq!(run.focused_row(), Some(0));
+    assert!(run.ui.scroll_to(run.body(), [0, 60 * 36]));
+    run.frame();
+    assert_eq!(run.row(0), None);
+    assert_eq!(run.focused_row(), Some(60));
+    assert_eq!(
+        run.key(KeyCode::Down, plain()),
+        [ev(TableEvent::Current(61))]
+    );
 }
 
 #[test]
@@ -761,6 +879,7 @@ fn a_table_without_checks_takes_the_moves_only() {
 fn a_locked_row_can_be_current_but_not_checked_and_says_why() {
     let mut page = Page::new(100);
     page.locked = Some(2);
+    page.model.set_locked(2, true);
     page.model.set_current(2);
     let mut run = Run::with(page);
     run.ui.set_focus(run.row(2));
@@ -774,12 +893,59 @@ fn a_locked_row_can_be_current_but_not_checked_and_says_why() {
     assert_eq!(cell.description(), Some("A system component"));
     assert_eq!(cell.toggled(), None);
     assert!(!cell.supports_action(Action::Click));
-    // Shift+Down to a row with a check box extends; back to the locked one, it only moves.
+    // Shift+Down to a row with a check box extends. Back onto the locked one Shift extends too,
+    // so the anchor stays where it was; the model skips the locked row. (A plain move there would
+    // move the anchor, and the next Shift range would start on the locked row.)
     assert_eq!(
         run.key(KeyCode::Down, shift()),
         [ev(TableEvent::Check(3, Pick::Extend))]
     );
-    assert_eq!(run.key(KeyCode::Up, shift()), [ev(TableEvent::Current(2))]);
+    assert_eq!(
+        run.key(KeyCode::Up, shift()),
+        [ev(TableEvent::Check(2, Pick::Extend))]
+    );
+    assert_eq!(
+        (run.page.model.current(), run.page.model.selected_count()),
+        (Some(2), 0)
+    );
+    // A Shift range over it, from row 3 (current, so the anchor) to the top, and Ctrl+A check
+    // every row but it.
+    assert_eq!(
+        run.key(KeyCode::Down, plain()),
+        [ev(TableEvent::Current(3))]
+    );
+    assert_eq!(
+        run.key(KeyCode::Home, shift()),
+        [ev(TableEvent::Check(0, Pick::Extend))]
+    );
+    let checked: Vec<u32> = run.page.model.selected_rows().collect();
+    assert_eq!(checked, [0, 1, 3], "row 2 is locked");
+    run.key(KeyCode::Other(u16::from(b'A')), ctrl());
+    assert_eq!(run.page.model.selected_count(), 99);
+    assert!(!run.page.model.is_selected(2));
+}
+
+/// The current row is built first, then again in its place among the others: a cell its view
+/// didn't give stays empty, and doesn't show the text of a row built before it.
+#[test]
+fn a_cell_the_view_left_out_of_the_current_row_stays_empty() {
+    for current in [5, 30] {
+        let mut page = Page::new(100);
+        page.no_size = Some(current);
+        page.model.set_current(current);
+        let run = Run::with(page);
+        let size = |run: &Run, at: u32| {
+            run.ui
+                .info(run.cell(u64::from(at), Some(SIZE)))
+                .expect("a size cell")
+                .text
+                .to_owned()
+        };
+        assert_eq!(size(&run, current), "", "current row {current}");
+        if current == 5 {
+            assert_eq!(size(&run, 4), "148 MB");
+        }
+    }
 }
 
 // ---- the pointer -----------------------------------------------------------------------------
@@ -811,12 +977,19 @@ fn a_click_makes_a_row_current_and_leaves_the_checks() {
         run.page.model.selected_rows().collect::<Vec<_>>(),
         [7, 8, 9]
     );
-    // Released on another row: nothing.
+    // Released on another row: nothing, and focus stays on the current row, which the keys act
+    // on.
+    assert_eq!(run.page.model.current_view(), Some(9));
     let a = run.rect(run.cell(1, Some(NAME))).center();
     let b = run.rect(run.cell(3, Some(NAME))).center();
     assert_eq!(
         run.send_all(&[Input::PointerDown(a), Input::PointerUp(b)]),
         []
+    );
+    assert_eq!(run.focused_row(), Some(9));
+    assert_eq!(
+        run.key(KeyCode::Down, plain()),
+        [ev(TableEvent::Current(10))]
     );
 }
 
@@ -995,6 +1168,25 @@ fn an_empty_table_shows_its_status_line_and_action() {
     assert_eq!(run.ui.children(header).count(), 4);
 }
 
+/// With no rows, the status line is as wide as the columns: the header, which follows it, still
+/// scrolls to a column header past the view that the keyboard moves to.
+#[test]
+fn an_empty_table_still_scrolls_its_header_across() {
+    let mut page = Page::new(0);
+    page.status = Some("No programs match “zz”");
+    let mut run = Run::with(page);
+    // 300 px: Name at its 120 px minimum makes 318 px of columns.
+    run.ui.set_viewport(Size { w: 300.0, ..WINDOW });
+    run.frame();
+    assert_eq!(run.scroll().content.w, CHECK + 120.0 + 80.0 + 90.0);
+    run.key(KeyCode::Tab, plain());
+    assert_eq!(run.ui.focus(), Some(run.header(None)));
+    run.key(KeyCode::End, plain());
+    assert_eq!(run.ui.focus(), Some(run.header(Some(SIZE))));
+    assert_eq!(run.scroll().offset.x, 18.0);
+    assert_eq!(run.rect(run.header(Some(SIZE))).right(), 300.0);
+}
+
 // ---- looks -----------------------------------------------------------------------------------
 
 #[test]
@@ -1053,6 +1245,8 @@ fn the_tree_is_a_grid_of_rows_and_cells_with_their_indices() {
         (grid.row_count(), grid.column_count()),
         (Some(1_000), Some(4))
     );
+    // AccessKit computes neither (A2.3): Narrator says "2 of 1000", not "of 23" built.
+    assert_eq!(grid.size_of_set(), Some(1_000));
     assert_eq!(grid.scroll_y(), Some(0.0));
     assert_eq!(grid.scroll_y_max(), Some(f64::from(1_000.0 * ROW - VIEW)));
     assert!(grid.supports_action(Action::ScrollDown));
@@ -1079,7 +1273,7 @@ fn the_tree_is_a_grid_of_rows_and_cells_with_their_indices() {
 
     let row = node(&tree, ui, run.row(2).expect("built"));
     assert_eq!(row.role(), AkRole::Row);
-    assert_eq!(row.row_index(), Some(2));
+    assert_eq!((row.row_index(), row.position_in_set()), (Some(2), Some(2)));
     assert_eq!(row.is_selected(), Some(true));
     assert_eq!(row.label(), Some("Program 00002"));
     assert!(row.supports_action(Action::Focus));
