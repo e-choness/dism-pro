@@ -289,7 +289,10 @@ fn the_columns_settle_after_each_change() {
     for (step, when) in [
         (run.divider_moved(1, 30.0), "a divider dragged"),
         (
-            Step::Input(Input::PointerUp(Point { x: at.x + 30.0, ..at })),
+            Step::Input(Input::PointerUp(Point {
+                x: at.x + 30.0,
+                ..at
+            })),
             "a divider let go",
         ),
         (

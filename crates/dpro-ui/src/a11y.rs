@@ -248,6 +248,7 @@ impl<M> Ui<M> {
             Role::Radio => AkRole::RadioButton,
             Role::Progress => AkRole::ProgressIndicator,
             Role::MenuItem if n.selected.is_some() => AkRole::ListBoxOption,
+            Role::MenuItem if n.is_check_item() => AkRole::MenuItemCheckBox,
             Role::MenuItem => AkRole::MenuItem,
             Role::ComboBox => AkRole::ComboBox,
             Role::Separator => AkRole::Splitter,
@@ -344,7 +345,7 @@ impl<M> Ui<M> {
                 }
             }
         }
-        if n.role == Role::CheckBox {
+        if n.role == Role::CheckBox || n.is_check_item() {
             node.set_toggled(toggled(n.check));
         }
         match (n.role, n.selected) {

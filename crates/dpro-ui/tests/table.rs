@@ -162,9 +162,9 @@ impl Page {
                 self.model.set_current(at);
             }
             TableEvent::CheckAll => self.model.select_all(),
-            TableEvent::Activate(_) => {}
             TableEvent::Sort(col) => self.sort(col),
-            TableEvent::Resize(..)
+            TableEvent::Activate(_)
+            | TableEvent::Resize(..)
             | TableEvent::Fit(_)
             | TableEvent::ColumnMenu(_)
             | TableEvent::Show(..)

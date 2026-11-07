@@ -22,11 +22,11 @@
 use std::sync::OnceLock;
 
 use dpro_ui::{
-    Align, Axis, Canvas, Cells, ClipboardRequest, Column, ColumnId, ColumnLayout,
-    ColumnMenuLabels, Cx, Dim, Element, FakeText, Input, Insets, Justify, Key, KeyCode, KeyEvent,
-    Look, Mods, Motion, Order, Point, Popup, PopupKind, Radius, Row, RowKey, ScrollBar, Size,
-    Status, Style, TABLE_BODY, TABLE_HEADER, Table, TableEvent, TextEdit, TextStyle, Theme, Tone,
-    Track, Tri, Ui, accesskit::TreeUpdate, tokens,
+    Align, Axis, Canvas, Cells, ClipboardRequest, Column, ColumnId, ColumnLayout, ColumnMenuLabels,
+    Cx, Dim, Element, FakeText, Input, Insets, Justify, Key, KeyCode, KeyEvent, Look, Mods, Motion,
+    Order, Point, Popup, PopupKind, Radius, Row, RowKey, ScrollBar, Size, Status, Style,
+    TABLE_BODY, TABLE_HEADER, Table, TableEvent, TextEdit, TextStyle, Theme, Tone, Track, Tri, Ui,
+    accesskit::TreeUpdate, tokens,
 };
 
 const RAIL: u8 = 12;

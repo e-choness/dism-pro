@@ -186,7 +186,11 @@ impl<M> Ui<M> {
                 }
             }
             Role::MenuItem | Role::Tooltip if node.first == NIL && !node.text.is_empty() => {
-                p.text(node, node.rect.inset(node.style.padding), false, ink);
+                let mut content = node.rect.inset(node.style.padding);
+                if self.in_check_menu(i) {
+                    content = p.menu_check(node, content, ink);
+                }
+                p.text(node, content, false, ink);
             }
             Role::ComboBox => p.combo(node, ink),
             Role::Separator => p.separator(rect),
@@ -696,6 +700,31 @@ impl Painter<'_, '_> {
             color: ink,
         };
         self.text.icon(icon, chevron, self.scale, &mut sink);
+    }
+
+    /// The checks' gutter at the start of a menu item's `content`, a line and a half wide, with
+    /// a checked check item's check in a line-high square there. Returns where its label goes.
+    fn menu_check<M>(&mut self, n: &Node<M>, content: Rect, ink: Color) -> Rect {
+        let line = self.text.measure("", &n.text_style, f32::INFINITY).height;
+        if n.is_check_item() && n.check == Tri::On {
+            let mark = Rect::new(
+                content.x,
+                content.y + ((content.h - line) / 2.0).max(0.0),
+                line.min(content.w),
+                line,
+            );
+            let mut sink = Ink {
+                canvas: &mut *self.canvas,
+                color: ink,
+            };
+            self.text.icon(Icon::CheckMark, mark, self.scale, &mut sink);
+        }
+        let gutter = (line * 1.5).min(content.w);
+        Rect {
+            x: content.x + gutter,
+            w: content.w - gutter,
+            ..content
+        }
     }
 
     /// A table header's rule: a hairline in the border color along the bottom of `r`.

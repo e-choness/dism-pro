@@ -14,7 +14,7 @@ use crate::{
     pool::capacity_for,
     table::sort_value,
     text::TextStyle,
-    tree::{Element, Extra, NIL, NodeId, Role, rare},
+    tree::{CHECK_ITEM, Element, Extra, NIL, NodeId, Role, rare},
     ui::{HoldSlot, ROOT, Side, Ui},
 };
 
@@ -276,9 +276,9 @@ impl<M> Ui<M> {
         seen
     }
 
-    /// Copies a group, a progress bar's value, a column header's sort or a hold button's Invoke
-    /// message into node `i`, clearing what it had of the others. Returns whether a client sees a
-    /// change, and whether it shows.
+    /// Copies a group, a progress bar's value, a column header's sort, a menu item's being a
+    /// check item or a hold button's Invoke message into node `i`, clearing what it had of the
+    /// others. Returns whether a client sees a change, and whether it shows.
     fn update_extra(&mut self, i: u32, extra: Extra<'_, M>) -> (bool, bool) {
         let (group, value, invoke) = match extra {
             Extra::Group(g) => (Some(g), 0.0, None),
@@ -286,6 +286,8 @@ impl<M> Ui<M> {
             Extra::Hold(m) => (None, 0.0, Some(m)),
             // A column header's sort is its value: a client reads it, and its glyph shows it.
             Extra::Sort(order) => (None, sort_value(order), None),
+            // So is a menu item's being a check item: a client sees it, and the check shows.
+            Extra::Check => (None, CHECK_ITEM, None),
             Extra::None | Extra::Field { .. } | Extra::Combo { .. } => (None, 0.0, None),
         };
         let n = &mut self.nodes[i as usize];

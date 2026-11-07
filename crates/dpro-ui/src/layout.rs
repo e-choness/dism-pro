@@ -48,14 +48,32 @@ impl<M> Ui<M> {
             self.reveal(pending);
         }
         // Nodes may have moved, appeared or been enabled under a pointer that stayed still. While
-        // a thumb is dragged the hover stays where it was: the content moving past the pointer
-        // lights nothing (A2.4).
+        // a thumb or a column's divider is dragged the hover stays where it was: the content
+        // moving past the pointer lights nothing (A2.4).
         if let Some(p) = self.pointer
             && self.drag.is_none()
+            && self.divider.is_none()
         {
             let hit = self.hit(p);
             self.pointer_over(hit);
         }
+    }
+
+    /// Whether menu item `i`'s menu has a check item: then every item's label there starts past
+    /// a gutter for the checks, a line and a half wide, as a check box's label does.
+    pub(crate) fn in_check_menu(&self, i: u32) -> bool {
+        let n = &self.nodes[i as usize];
+        if n.role != Role::MenuItem || n.parent == NIL {
+            return false;
+        }
+        let mut c = self.nodes[n.parent as usize].first;
+        while c != NIL {
+            if self.nodes[c as usize].is_check_item() {
+                return true;
+            }
+            c = self.nodes[c as usize].next;
+        }
+        false
     }
 
     /// The natural outer size of `i` when `avail` logical pixels of width are available.
@@ -84,6 +102,15 @@ impl<M> Ui<M> {
                 // table or a row with nothing in it.
                 Role::Container | Role::Progress | Role::Separator | Role::Grid | Role::Row => {
                     Size::ZERO
+                }
+                // Its label past the checks' gutter.
+                Role::MenuItem if self.in_check_menu(i) => {
+                    let gutter = text.measure("", &n.text_style, f32::INFINITY).height * 1.5;
+                    let m = text.measure(&n.text, &n.text_style, (inner_w - gutter).max(0.0));
+                    Size {
+                        w: gutter + m.width,
+                        h: m.height,
+                    }
                 }
                 Role::Label
                 | Role::Button

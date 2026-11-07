@@ -477,6 +477,9 @@ pub mod tokens {
         /// The empty table's status line from the view's edge, and its action from it.
         pub const STATUS_PAD: f32 = 16.0;
         pub const STATUS_GAP: f32 = 8.0;
+        /// A column divider's strip in the header, centred on the column's right edge: where the
+        /// pointer shows the left-right arrows and a press drags the column's width.
+        pub const DIVIDER: f32 = 8.0;
     }
 }
 

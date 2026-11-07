@@ -138,8 +138,8 @@ impl<M: Clone> Ui<M> {
         };
         match input {
             Input::PointerMove(p) => {
-                // A thumb being dragged takes the pointer (A2.4).
-                if self.scroll_pointer(Some(p)) {
+                // A thumb or a column's divider being dragged takes the pointer (A2.4).
+                if self.scroll_pointer(Some(p)) || self.divider_move(p) {
                     return true;
                 }
                 let hit = self.hit(p);
@@ -177,6 +177,10 @@ impl<M: Clone> Ui<M> {
             Input::Press { at, mods, double } => self.pointer_down(at, mods, double),
             Input::PointerUp(p) => self.pointer_up(p, out),
             Input::Key(k) => {
+                // Esc puts a column being resized back.
+                if k.down && k.key == KeyCode::Escape && self.cancel_divider() {
+                    return true;
+                }
                 let before = self.focus;
                 if k.down {
                     // Any key hides a tooltip.
@@ -220,8 +224,9 @@ impl<M: Clone> Ui<M> {
             mods,
             double,
         };
-        // A press on a scroll bar's strip drags its thumb or pages (A2.4).
-        if self.scroll_press(p) {
+        // A press on a scroll bar's strip drags its thumb or pages (A2.4); one on a column's
+        // divider resizes the column, and never sorts.
+        if self.scroll_press(p) || self.divider_press(p, double) {
             self.tip_cancel(true);
             return true;
         }
@@ -254,6 +259,11 @@ impl<M: Clone> Ui<M> {
     }
 
     fn pointer_up(&mut self, p: Point, out: &mut Vec<M>) -> bool {
+        if self.divider_release(p, out) {
+            let hit = self.hit(p);
+            self.pointer_over(hit);
+            return true;
+        }
         if self.scroll_release() {
             // What's under the pointer now: the drag held the bar and the hover as they were.
             self.scroll_pointer(Some(p));
@@ -793,8 +803,8 @@ impl<M> Ui<M> {
     }
 
     /// Cancels a press, by the pointer or by Space, so its release activates nothing, and ends a
-    /// thumb drag: the window lost the pointer, went inactive, or hid (a popup closed by Esc
-    /// while its item is held).
+    /// thumb's drag or puts back a column being resized: the window lost the pointer, went
+    /// inactive, or hid (a popup closed by Esc while its item is held).
     pub fn cancel_press(&mut self) {
         let held = [
             std::mem::replace(&mut self.pressed, NIL),
@@ -807,6 +817,7 @@ impl<M> Ui<M> {
         }
         self.end_hold();
         self.scroll_release();
+        self.cancel_divider();
     }
 
     /// The pointer's press only, the window having lost the pointer: a press held on a node (and
@@ -814,6 +825,7 @@ impl<M> Ui<M> {
     /// thumb being dragged. A press by Space stays.
     fn cancel_pointer_press(&mut self) {
         self.scroll_release();
+        self.cancel_divider();
         let i = std::mem::replace(&mut self.pressed, NIL);
         if i == NIL {
             return;

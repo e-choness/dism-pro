@@ -184,6 +184,10 @@ impl<M> Ui<M> {
         } else {
             self.show_focus_ring();
         }
+        // A table's header asks the view for its column menu (A2.4).
+        if self.is_table_header(i) {
+            return self.column_menu_request(i, start, at, out);
+        }
         if self.nodes[i as usize].interactive() {
             // From the keyboard, the node comes into view; under the pointer, it's there.
             if at.is_some() {
@@ -205,7 +209,7 @@ impl<M> Ui<M> {
     }
 
     /// The deepest node under `p`, interactive or not; the root if none.
-    fn deepest(&self, p: Point) -> u32 {
+    pub(crate) fn deepest(&self, p: Point) -> u32 {
         match self.walk_at(p, |_| {}).0 {
             NIL => ROOT,
             at => at,

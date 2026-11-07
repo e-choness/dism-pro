@@ -93,6 +93,130 @@ pub trait RowSource {
     }
 }
 
+/// A column's width as the user left it (TD-0009 A2.4).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum Width {
+    /// The page's own track for it: fixed, or a share of what the fixed ones leave.
+    #[default]
+    Auto,
+    /// Logical pixels, from a divider's drag or a fit the table measured. The table keeps it at
+    /// least the column's minimum.
+    Px(f32),
+    /// To be fitted: the table measures the header and the cells it built at its next layout,
+    /// lays the column out at that, and sends the width back.
+    Fit,
+}
+
+/// The page's columns as the user arranged them: each one's width, and which are hidden. In the
+/// page's column order, as the table takes them; in memory until settings persist (roadmap 3.2).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ColumnLayout {
+    ids: Vec<ColumnId>,
+    hidden_at_first: Vec<bool>,
+    widths: Vec<Width>,
+    hidden: Vec<bool>,
+}
+
+impl ColumnLayout {
+    /// The page's columns, each with whether it starts hidden, at their own widths.
+    #[must_use]
+    pub fn new(columns: &[(ColumnId, bool)]) -> Self {
+        let hidden_at_first: Vec<bool> = columns.iter().map(|&(_, h)| h).collect();
+        Self {
+            ids: columns.iter().map(|&(id, _)| id).collect(),
+            widths: vec![Width::Auto; columns.len()],
+            hidden: hidden_at_first.clone(),
+            hidden_at_first,
+        }
+    }
+
+    /// Each column's width, in the page's order.
+    #[must_use]
+    pub fn widths(&self) -> &[Width] {
+        &self.widths
+    }
+
+    /// Whether each column is hidden, in the page's order.
+    #[must_use]
+    pub fn hidden(&self) -> &[bool] {
+        &self.hidden
+    }
+
+    /// Column `id`'s width; [`Width::Auto`] for a column that isn't the page's.
+    #[must_use]
+    pub fn width(&self, id: ColumnId) -> Width {
+        self.at(id).map_or(Width::Auto, |i| self.widths[i])
+    }
+
+    /// Whether column `id` is hidden; not for a column that isn't the page's.
+    #[must_use]
+    pub fn is_hidden(&self, id: ColumnId) -> bool {
+        self.at(id).is_some_and(|i| self.hidden[i])
+    }
+
+    /// Gives column `id` `px` logical pixels. Returns whether that changed anything: not for a
+    /// width that isn't finite and at least 0, or a column that isn't the page's.
+    pub fn resize(&mut self, id: ColumnId, px: f32) -> bool {
+        if !px.is_finite() || px < 0.0 {
+            return false;
+        }
+        self.set(id, Width::Px(px))
+    }
+
+    /// Asks the table to fit column `id`, or with `None` every shown column. Returns whether that
+    /// changed anything.
+    pub fn fit(&mut self, id: Option<ColumnId>) -> bool {
+        let Some(id) = id else {
+            let mut changed = false;
+            for (w, &hidden) in self.widths.iter_mut().zip(&self.hidden) {
+                if !hidden && *w != Width::Fit {
+                    *w = Width::Fit;
+                    changed = true;
+                }
+            }
+            return changed;
+        };
+        self.set(id, Width::Fit)
+    }
+
+    /// Hides or shows column `id`. The last column shown stays. Returns whether that changed
+    /// anything. A hidden column keeps its width.
+    pub fn set_hidden(&mut self, id: ColumnId, hidden: bool) -> bool {
+        let Some(i) = self.at(id) else {
+            return false;
+        };
+        if self.hidden[i] == hidden || (hidden && self.hidden.iter().filter(|&&h| !h).count() <= 1)
+        {
+            return false;
+        }
+        self.hidden[i] = hidden;
+        true
+    }
+
+    /// Brings back every column's own width and the columns the page shows at first. Returns
+    /// whether that changed anything.
+    pub fn reset(&mut self) -> bool {
+        let changed =
+            self.hidden != self.hidden_at_first || self.widths.iter().any(|&w| w != Width::Auto);
+        self.widths.fill(Width::Auto);
+        self.hidden.clone_from(&self.hidden_at_first);
+        changed
+    }
+
+    fn at(&self, id: ColumnId) -> Option<usize> {
+        self.ids.iter().position(|&c| c == id)
+    }
+
+    fn set(&mut self, id: ColumnId, w: Width) -> bool {
+        let Some(i) = self.at(id) else {
+            return false;
+        };
+        let changed = self.widths[i] != w;
+        self.widths[i] = w;
+        changed
+    }
+}
+
 // Classes order cells of different kinds in one column; the payload orders cells of one kind.
 const CLASS_CHECK: u8 = 1;
 const CLASS_SIZE: u8 = 2;

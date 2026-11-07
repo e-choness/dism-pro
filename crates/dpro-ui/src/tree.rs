@@ -329,7 +329,14 @@ pub(crate) enum Extra<'s, M> {
     },
     /// A column header's sort: by its column, which way, or not.
     Sort(Option<Order>),
+    /// A menu item that's a check item: its [`check`](Element::check) shows, and a client sees
+    /// a menu check box.
+    Check,
 }
+
+/// A check item's value ([`Element::menu_check`]): its node's `value`, as a column header's sort
+/// is its.
+pub(crate) const CHECK_ITEM: f32 = 1.0;
 
 // Copy whatever `M` is: it holds no `M`, only functions that make one, so building a node drops
 // nothing of it (measured on the shell fixture: with an `M` here, rebuilding a view in which
@@ -460,6 +467,17 @@ impl<'s, M> Element<'s, M> {
                 ..Look::PLAIN
             },
             ..Self::new(key, Role::MenuItem, label, Some(msg))
+        }
+    }
+
+    /// A menu's check item, `on` or not: a check shows beside it, and `msg` toggles it. Every
+    /// label in a menu that has one starts past the checks, lined up.
+    #[must_use]
+    pub fn menu_check(key: Key, label: &'s str, on: bool, msg: M) -> Self {
+        Self {
+            check: if on { Tri::On } else { Tri::Off },
+            extra: Extra::Check,
+            ..Self::menu_item(key, label, msg)
         }
     }
 
@@ -914,6 +932,11 @@ impl<M> Node<M> {
 
     pub(crate) fn interactive(&self) -> bool {
         self.enabled && self.role.interactive()
+    }
+
+    /// A menu's check item ([`Element::menu_check`]).
+    pub(crate) fn is_check_item(&self) -> bool {
+        self.role == Role::MenuItem && self.value.to_bits() == CHECK_ITEM.to_bits()
     }
 
     /// The arrow keys can bring focus to it: an interactive node, or a disabled menu item, which

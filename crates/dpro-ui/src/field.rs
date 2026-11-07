@@ -119,6 +119,8 @@ pub enum Cursor {
     Arrow,
     /// An I-beam, over a field.
     Text,
+    /// The left-right arrows, over a table column's divider and while it's dragged.
+    SizeWE,
 }
 
 /// How the caret looks and blinks: Windows' settings (`SPI_GETCARETWIDTH`, `GetCaretBlinkTime`).
@@ -508,9 +510,13 @@ impl<M> Ui<M> {
         ))
     }
 
-    /// The pointer's shape where it is: an I-beam over a field, and while selecting in one.
+    /// The pointer's shape where it is: an I-beam over a field, and while selecting in one; the
+    /// left-right arrows over a table column's divider, and while dragging one.
     #[must_use]
     pub fn cursor(&self) -> Cursor {
+        if self.divider.is_some() {
+            return Cursor::SizeWE;
+        }
         let i = if self.pressed == NIL {
             self.hover
         } else {
@@ -518,6 +524,12 @@ impl<M> Ui<M> {
         };
         match self.nodes.get(i as usize) {
             Some(n) if n.role == Role::Field && n.enabled => Cursor::Text,
+            _ if self.pressed == NIL
+                && self.drag.is_none()
+                && self.pointer.is_some_and(|p| self.divider_at(p).is_some()) =>
+            {
+                Cursor::SizeWE
+            }
             _ => Cursor::Arrow,
         }
     }

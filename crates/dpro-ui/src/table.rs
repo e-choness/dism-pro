@@ -26,7 +26,7 @@
 use std::mem;
 
 use accesskit::Action;
-use dpro_app::table::{ColumnId, Order, Pick, RowKey, Tri};
+use dpro_app::table::{ColumnId, Order, Pick, RowKey, Tri, Width};
 
 use crate::{
     build::Cx,
@@ -39,7 +39,7 @@ use crate::{
         Tone,
         tokens::{font, popup, table as tok},
     },
-    tree::{Element, Extra, Group, Key, Look, NIL, NodeId, Role, rare},
+    tree::{Element, Extra, Group, Key, Look, NIL, Node, NodeId, Role, rare},
     ui::Ui,
 };
 
@@ -86,7 +86,31 @@ pub struct Column<'s> {
     pub mono: bool,
     /// The order its header sorts by first, the other one after; `None` if it doesn't sort.
     pub sort: Option<Order>,
+    /// The column menu can hide it. The column that names a row usually can't.
+    pub hideable: bool,
 }
+
+/// The column menu's labels, from the view's strings ([`Cx::column_menu`]).
+#[derive(Clone, Copy, Debug)]
+pub struct ColumnMenuLabels<'s> {
+    /// The menu's name, for assistive technology ("Columns").
+    pub name: &'s str,
+    /// Size column to fit.
+    pub fit: &'s str,
+    /// Size all columns to fit.
+    pub fit_all: &'s str,
+    /// Reset columns.
+    pub reset: &'s str,
+}
+
+/// The column menu's Size column to fit, for [`Ui::find`] in its popup. A column's check item's
+/// key is `Key::index` of its [`ColumnId`].
+pub const COLUMN_FIT: Key = Key::name("dpro-ui.columns.fit");
+/// The column menu's Size all columns to fit.
+pub const COLUMN_FIT_ALL: Key = Key::name("dpro-ui.columns.fit-all");
+/// The column menu's Reset columns.
+pub const COLUMN_RESET: Key = Key::name("dpro-ui.columns.reset");
+const COLUMN_SEP: Key = Key::name("dpro-ui.columns.sep");
 
 /// What an empty table shows: a line, and an action (Clear filter).
 #[derive(Clone, Debug)]
@@ -101,6 +125,11 @@ pub struct Table<'s, M> {
     /// How many rows the view has: indices `0..rows`, in the order shown.
     pub rows: u32,
     pub columns: &'s [Column<'s>],
+    /// Each column's width as the user left it, in `columns`' order; a column past its end has
+    /// its own ([`Width::Auto`]).
+    pub widths: &'s [Width],
+    /// Whether each column is hidden, in `columns`' order; a column past its end shows.
+    pub hidden: &'s [bool],
     /// The column the rows are sorted by, and which way.
     pub sorted: Option<(ColumnId, Order)>,
     /// A check column: its header's name ("Select") and the rows' checks together.
@@ -140,8 +169,9 @@ impl Cells<'_> {
     }
 }
 
-/// What the user did to a table, by row index.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// What the user did to a table, by row index, and to its columns. Every table's header takes
+/// context requests, for [`ColumnMenu`](Self::ColumnMenu).
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum TableEvent {
     /// Make this row current: a click, a move, a context request, a client's `Focus` or `Click`.
     Current(u32),
@@ -153,6 +183,19 @@ pub enum TableEvent {
     Activate(u32),
     /// Sort by this column: its header was clicked.
     Sort(ColumnId),
+    /// Give this column this many logical pixels: its divider was let go after a drag (the
+    /// shared columns left of it, at the widths they held, first), or the table measured the fit
+    /// the view asked for.
+    Resize(ColumnId, f32),
+    /// Fit this column, or every shown one: a double-click on its divider, or the column menu.
+    Fit(Option<ColumnId>),
+    /// Open the column menu, for this column (`None`: the check column, or past the last one): a
+    /// context request on the header.
+    ColumnMenu(Option<ColumnId>),
+    /// Show (`true`) or hide this column: the column menu.
+    Show(ColumnId, bool),
+    /// Every column's own width, and the columns the page shows at first: the column menu.
+    ResetColumns,
 }
 
 /// The last press, for a row's click: where, with which modifiers, and whether it was a
@@ -164,12 +207,32 @@ pub(crate) struct Press {
     pub(crate) double: bool,
 }
 
-/// A column as layout needs it.
+/// A shown column as layout needs it, with the width the user left it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Col {
     id: ColumnId,
     width: Track,
     min: f32,
+    /// The view asks for a fit ([`Width::Fit`]): until it's measured, the column has its own
+    /// track.
+    fit: bool,
+    /// The fit is measured: `width` is it, and the view has been sent it.
+    fitted: bool,
+    /// Its header sorts: a fit leaves room for the chevron a sorted one shows.
+    sorts: bool,
+}
+
+/// A column's divider being dragged: table slot `t`'s shown column `col`, pressed at `press_x`
+/// when it was `start_w` wide.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Divider {
+    t: u32,
+    col: usize,
+    press_x: f32,
+    start_w: f32,
+    min: f32,
+    /// A double-click's second press: its release asks to fit the column, unless it's resized.
+    double: bool,
 }
 
 /// A table's state, in the Ui's table table, reached from its rows' viewport's scroll slot.
@@ -180,7 +243,14 @@ pub(crate) struct TableState<M> {
     pub(crate) body: u32,
     pub(crate) on: Option<fn(TableEvent) -> M>,
     pub(crate) rows: u32,
+    /// The shown columns, in order.
     pub(crate) columns: Vec<Col>,
+    /// The next build's columns, made here and swapped in if they differ.
+    cols_next: Vec<Col>,
+    /// A divider's drag: the shown column and its width, which layout gives it while the
+    /// columns left of it hold the widths in `frozen` (from the press).
+    drag: Option<(usize, f32)>,
+    frozen: Vec<f32>,
     pub(crate) checks: bool,
     /// The check column's name, which names every check cell.
     pub(crate) check_label: String,
@@ -218,6 +288,9 @@ impl<M> TableState<M> {
             on: None,
             rows: 0,
             columns: Vec::new(),
+            cols_next: Vec::new(),
+            drag: None,
+            frozen: Vec::new(),
             checks: false,
             check_label: String::new(),
             tracks: Vec::new(),
@@ -401,10 +474,10 @@ impl<M: Clone> Cx<'_, M> {
     }
 
     /// The header: a follower viewport, one Tab stop whose arrows move between its column
-    /// headers. Returns its node.
+    /// headers, and where a context request asks for the column menu. Returns its node.
     fn table_header(&mut self, table: &Table<'_, M>) -> u32 {
         let header = self.place(Element {
-            rare: rare::SCROLL_X,
+            rare: rare::SCROLL_X | rare::CONTEXT,
             extra: Extra::Group(Group::List),
             style: Style {
                 axis: Axis::Row,
@@ -412,10 +485,82 @@ impl<M: Clone> Cx<'_, M> {
             },
             ..Element::new(TABLE_HEADER, Role::Container, "", None)
         });
+        let focus = self.ui.focus;
+        let focused = (focus != NIL && self.ui.nodes[focus as usize].parent == header)
+            .then(|| self.ui.sibling_index(focus));
         let mut hx = self.child(header);
         hx.column_headers(table);
         hx.finish();
+        // The column header focus was on went (its column hidden): focus moves to the one now in
+        // its place, or the one before if it was the last.
+        if let Some(k) = focused
+            && self.ui.focus == NIL
+        {
+            let mut to = self.ui.nodes[header as usize].first;
+            for _ in 0..k {
+                let next = self.ui.nodes[to as usize].next;
+                if next == NIL {
+                    break;
+                }
+                to = next;
+            }
+            if to != NIL {
+                self.ui.focus_node(to);
+            }
+        }
         header
+    }
+
+    /// `table`'s column menu (TD-0009 A2.4), opened for column `at` (`None`: from the check
+    /// column, or past the last column), as the content of a menu popup: each hideable column as
+    /// a check item, checked while it shows, which shows or hides it (the last one shown can't be
+    /// hidden); then Size column to fit (for `at`), Size all columns to fit, and Reset columns.
+    /// Each sends `table`'s event.
+    pub fn column_menu(
+        &mut self,
+        key: Key,
+        table: &Table<'_, M>,
+        at: Option<ColumnId>,
+        labels: &ColumnMenuLabels<'_>,
+    ) {
+        let on = table.on;
+        self.add_with(Element::menu(key).name(labels.name), |cx| {
+            let count = shown(table).count();
+            let mut any = false;
+            for (j, col) in table.columns.iter().enumerate() {
+                if !col.hideable {
+                    continue;
+                }
+                any = true;
+                let showing = !table.hidden.get(j).copied().unwrap_or(false);
+                cx.add(
+                    Element::menu_check(
+                        Key::index(u64::from(col.id.0)),
+                        col.header,
+                        showing,
+                        on(TableEvent::Show(col.id, !showing)),
+                    )
+                    .enabled(!showing || count > 1),
+                );
+            }
+            if any {
+                cx.add(Element::separator(COLUMN_SEP));
+            }
+            cx.add(
+                Element::menu_item(COLUMN_FIT, labels.fit, on(TableEvent::Fit(at)))
+                    .enabled(at.is_some()),
+            );
+            cx.add(Element::menu_item(
+                COLUMN_FIT_ALL,
+                labels.fit_all,
+                on(TableEvent::Fit(None)),
+            ));
+            cx.add(Element::menu_item(
+                COLUMN_RESET,
+                labels.reset,
+                on(TableEvent::ResetColumns),
+            ));
+        });
     }
 
     /// The empty table's status line, and its action as a secondary button.
@@ -453,7 +598,7 @@ impl<M: Clone> Cx<'_, M> {
                 )
             });
         }
-        for col in table.columns {
+        for (_, col) in shown(table) {
             let sorted = table
                 .sorted
                 .and_then(|(c, order)| (c == col.id).then_some(order));
@@ -481,14 +626,15 @@ impl<M: Clone> Cx<'_, M> {
         r: Row<'_>,
         cells: &CellText<'_>,
     ) -> u32 {
+        let first = shown(table).next().map_or(usize::MAX, |(j, _)| j);
         let mut el = Element {
             selected: Some(current),
             look: if current { CURRENT } else { Look::PLAIN },
-            // Named by its first column.
+            // Named by its first column shown.
             ..Element::new(
                 Key::index(r.key.0),
                 Role::Row,
-                cells.get(0),
+                cells.get(first),
                 Some((table.on)(TableEvent::Current(at))),
             )
         }
@@ -508,11 +654,12 @@ impl<M: Clone> Cx<'_, M> {
                 .tooltip(r.locked),
             );
         }
-        for (j, col) in table.columns.iter().enumerate() {
+        // A hidden column's cell isn't built: the view gave its text, which is skipped.
+        for (j, col) in shown(table) {
             rx.add(Element {
                 style: cell_style(col.align),
                 text_style: TextStyle {
-                    weight: if current && j == 0 {
+                    weight: if current && j == first {
                         font::SEMIBOLD
                     } else {
                         font::REGULAR
@@ -531,6 +678,15 @@ impl<M: Clone> Cx<'_, M> {
         rx.finish();
         i
     }
+}
+
+/// `table`'s shown columns, with their places in its columns: the cells' indices.
+fn shown<'t, 's, M>(table: &'t Table<'s, M>) -> impl Iterator<Item = (usize, &'t Column<'s>)> {
+    table
+        .columns
+        .iter()
+        .enumerate()
+        .filter(|&(j, _)| !table.hidden.get(j).copied().unwrap_or(false))
 }
 
 /// The rows' viewport of a table with `rows` rows: one Tab stop if it has any, else the status
@@ -666,6 +822,10 @@ impl<M> Ui<M> {
         let mut fresh = TableState::new();
         fresh.columns = mem::take(&mut st.columns);
         fresh.columns.clear();
+        fresh.cols_next = mem::take(&mut st.cols_next);
+        fresh.cols_next.clear();
+        fresh.frozen = mem::take(&mut st.frozen);
+        fresh.frozen.clear();
         fresh.check_label = mem::take(&mut st.check_label);
         fresh.check_label.clear();
         fresh.tracks = mem::take(&mut st.tracks);
@@ -676,6 +836,10 @@ impl<M> Ui<M> {
         fresh.scratch.clear();
         *st = fresh;
         self.free_tables.push(t);
+        // A drag on a table that went ends with it.
+        if self.divider.is_some_and(|d| d.t == t) {
+            self.divider = None;
+        }
     }
 
     // ---- building ----------------------------------------------------------------------------
@@ -806,23 +970,43 @@ impl<M> Ui<M> {
             st.check_label.clear();
             st.check_label.push_str(label);
         }
-        let col = |c: &Column<'_>| Col {
-            id: c.id,
-            width: c.width,
-            min: c.min,
-        };
-        if st.columns.len() != table.columns.len()
-            || st
-                .columns
-                .iter()
-                .zip(table.columns)
-                .any(|(a, b)| *a != col(b))
-        {
-            st.columns.clear();
-            st.columns.extend(table.columns.iter().map(col));
+        // The shown columns at the widths the user left them. A fit asked for again keeps the
+        // one measured: it's measured once, and sent once.
+        let mut next = mem::take(&mut st.cols_next);
+        next.clear();
+        for (j, c) in shown(table) {
+            let mut col = Col {
+                id: c.id,
+                width: c.width,
+                min: c.min,
+                fit: false,
+                fitted: false,
+                sorts: c.sort.is_some(),
+            };
+            match table.widths.get(j).copied().unwrap_or_default() {
+                Width::Auto => {}
+                Width::Px(w) => col.width = Track::Fixed(w),
+                Width::Fit => {
+                    col.fit = true;
+                    if let Some(old) = st.columns.iter().find(|o| o.id == c.id && o.fit) {
+                        (col.width, col.fitted) = (old.width, old.fitted);
+                    }
+                }
+            }
+            next.push(col);
+        }
+        if next != st.columns {
+            mem::swap(&mut st.columns, &mut next);
             seen = true;
             relayout = true;
+            // A drag ends if its column went or moved (the view changed the columns under it).
+            if let Some((k, _)) = st.drag
+                && next.get(k).map(|c| c.id) != st.columns.get(k).map(|c| c.id)
+            {
+                st.drag = None;
+            }
         }
+        st.cols_next = next;
         let grid = st.grid;
         if renamed {
             // Every check cell is named as the column is.
@@ -1150,15 +1334,6 @@ impl<M> Ui<M> {
             self.rows_resized(t, old, rp);
         }
         let row = to_logical(rp, scale);
-        if self.lay_tracks(t, inner.w) {
-            // Every cell moves.
-            self.nodes[header as usize].dirty = true;
-            self.nodes[body as usize].dirty = true;
-            for k in 0..self.tables[t as usize].built.len() {
-                let (node, _) = self.tables[t as usize].built[k];
-                self.nodes[node as usize].dirty = true;
-            }
-        }
         let head = Rect::new(inner.x, inner.y, inner.w, row.min(inner.h));
         let rows = Rect::new(
             inner.x,
@@ -1168,8 +1343,92 @@ impl<M> Ui<M> {
         );
         let view = rows.snap(scale);
         self.tables[t as usize].view_px = i64::from(view.y1 - view.y0);
+        // A fit measures the rows layout wants built: once the build that made them has.
+        if self.tables[t as usize]
+            .columns
+            .iter()
+            .any(|c| c.fit && !c.fitted)
+            && self.table_settled(t)
+        {
+            self.fit_columns(t, text);
+        }
+        if self.lay_tracks(t, inner.w) {
+            // Every cell moves.
+            self.nodes[header as usize].dirty = true;
+            self.nodes[body as usize].dirty = true;
+            for k in 0..self.tables[t as usize].built.len() {
+                let (node, _) = self.tables[t as usize].built[k];
+                self.nodes[node as usize].dirty = true;
+            }
+        }
         self.arrange(header, head, text, covered);
         self.arrange(body, rows, text, covered);
+    }
+
+    /// Whether table `t`'s last build made the rows layout wants: it used the row height measured,
+    /// and the view (laid out) and its offset ask for no other rows and no reveal.
+    fn table_settled(&self, t: u32) -> bool {
+        let st = &self.tables[t as usize];
+        let s = self.nodes[st.body as usize].scroll;
+        if s == NIL || st.view_px <= 0 || st.built_px != st.row_px || st.reveal.is_some() {
+            return false;
+        }
+        let off = self.scrolls[s as usize].offset[1];
+        st.range == range_of(st.rows, off, st.view_px, st.row_px)
+    }
+
+    /// Measures table `t`'s columns the view asks to fit: each at its header's text (and a
+    /// chevron, if it sorts) or its widest cell in the rows built, whichever is wider, at least
+    /// its minimum. Each takes that width now, and the view is sent it, once.
+    #[inline(never)]
+    fn fit_columns(&mut self, t: u32, text: &mut dyn TextSystem) {
+        let (header, skip) = {
+            let st = &self.tables[t as usize];
+            (st.header, usize::from(st.checks))
+        };
+        let natural = |n: &Node<M>, text: &mut dyn TextSystem| {
+            text.measure(&n.text, &n.text_style, f32::INFINITY).width + n.style.padding.horizontal()
+        };
+        for k in 0..self.tables[t as usize].columns.len() {
+            let c = self.tables[t as usize].columns[k];
+            if !c.fit || c.fitted {
+                continue;
+            }
+            let mut w = c.min;
+            if let Some(h) = self.nth_child(header, skip + k) {
+                let n = &self.nodes[h as usize];
+                let chevron = if c.sorts {
+                    text.measure("", &n.text_style, f32::INFINITY).height
+                } else {
+                    0.0
+                };
+                w = w.max(natural(n, text) + chevron);
+            }
+            for b in 0..self.tables[t as usize].built.len() {
+                let (row, _) = self.tables[t as usize].built[b];
+                if let Some(cell) = self.nth_child(row, skip + k) {
+                    w = w.max(natural(&self.nodes[cell as usize], text));
+                }
+            }
+            let st = &mut self.tables[t as usize];
+            st.columns[k].width = Track::Fixed(w);
+            st.columns[k].fitted = true;
+            if let Some(on) = st.on {
+                self.queued.push(on(TableEvent::Resize(c.id, w)));
+            }
+        }
+    }
+
+    /// Node `i`'s child `k`, counting from 0.
+    fn nth_child(&self, i: u32, k: usize) -> Option<u32> {
+        let mut c = self.nodes[i as usize].first;
+        for _ in 0..k {
+            if c == NIL {
+                break;
+            }
+            c = self.nodes[c as usize].next;
+        }
+        (c != NIL).then_some(c)
     }
 
     /// The row height became `new` pixels from `old` (a text size, measured for the first time):
@@ -1197,19 +1456,29 @@ impl<M> Ui<M> {
     }
 
     /// The columns' tracks across `width`: the check column, fixed columns, then shares of what's
-    /// left, each at least its minimum. Returns whether they changed.
+    /// left, each at least its minimum. While a divider is dragged, its column is the drag's
+    /// width and those left of it the widths they had at the press: the shared ones right of it
+    /// take up the difference. Returns whether they changed.
     fn lay_tracks(&mut self, t: u32, width: f32) -> bool {
         let TableState {
             columns,
             tracks,
             checks,
             content_w,
+            drag,
+            frozen,
             ..
         } = &mut self.tables[t as usize];
+        let (drag, frozen) = (*drag, &*frozen);
+        let track_of = |k: usize, c: &Col| match drag {
+            Some((d, _)) if k < d => Track::Fixed(frozen.get(k).copied().unwrap_or(c.min)),
+            Some((d, w)) if k == d => Track::Fixed(w),
+            _ => c.width,
+        };
         let check = checks.then_some(tok::CHECK_COL);
-        let (fixed, shares) = columns.iter().fold(
+        let (fixed, shares) = columns.iter().enumerate().fold(
             (check.unwrap_or(0.0), 0.0f32),
-            |(fixed, shares), c| match c.width {
+            |(fixed, shares), (k, c)| match track_of(k, c) {
                 Track::Fixed(w) => (fixed + w.max(c.min), shares),
                 Track::Share(s) => (fixed, shares + s.max(0.0)),
             },
@@ -1222,8 +1491,8 @@ impl<M> Ui<M> {
         let mut pinned = 0;
         loop {
             let (mut mins, mut held, mut count) = (0.0f32, 0.0f32, 0);
-            for c in columns.iter() {
-                if let Track::Share(s) = c.width
+            for (k, c) in columns.iter().enumerate() {
+                if let Track::Share(s) = track_of(k, c)
                     && s.max(0.0) * rate < c.min
                 {
                     mins += c.min;
@@ -1242,12 +1511,18 @@ impl<M> Ui<M> {
             }
             (pinned, rate) = (count, next);
         }
-        let widths = check
-            .into_iter()
-            .chain(columns.iter().map(|c| match c.width {
-                Track::Fixed(w) => w.max(c.min),
-                Track::Share(s) => (s.max(0.0) * rate).max(c.min),
-            }));
+        let widths =
+            check
+                .into_iter()
+                .chain(
+                    columns
+                        .iter()
+                        .enumerate()
+                        .map(|(k, c)| match track_of(k, c) {
+                            Track::Fixed(w) => w.max(c.min),
+                            Track::Share(s) => (s.max(0.0) * rate).max(c.min),
+                        }),
+                );
         // In place: a layout that changes nothing allocates nothing.
         let mut changed = false;
         let (mut x, mut k) = (0.0f32, 0);
@@ -1384,6 +1659,194 @@ impl<M> Ui<M> {
     }
 
     // ---- input -------------------------------------------------------------------------------
+
+    /// Takes the messages layout made since the last call, appending them to `out`: the width a
+    /// column the view asked to fit measured. The host updates its model with them and builds
+    /// again.
+    pub fn take_messages(&mut self, out: &mut Vec<M>) {
+        out.append(&mut self.queued);
+    }
+
+    /// The table slot and shown column whose divider is under `p`: the strip
+    /// [`DIVIDER`](tok::DIVIDER) wide centred on a column header's right edge (the check column
+    /// has none), the nearer edge where two strips meet. Only where the header shows and nothing
+    /// covers it.
+    pub(crate) fn divider_at(&self, p: Point) -> Option<(u32, usize)> {
+        let half = tok::DIVIDER / 2.0;
+        for (t, st) in (0u32..).zip(&self.tables) {
+            let header = st.header;
+            let live = self
+                .nodes
+                .get(header as usize)
+                .is_some_and(|n| n.live && n.key == TABLE_HEADER);
+            if !live || !self.window_clip(header).contains(p) {
+                continue;
+            }
+            // Under whatever covers the header (a drawer over the page), no divider.
+            let mut up = self.deepest(p);
+            while up != NIL && up != header {
+                up = self.nodes[up as usize].parent;
+            }
+            if up != header {
+                continue;
+            }
+            let mut best: Option<(usize, f32)> = None;
+            let mut col = 0;
+            let mut item = self.nodes[header as usize].first;
+            while item != NIL {
+                let node = &self.nodes[item as usize];
+                if node.key != TABLE_CHECK {
+                    let off = (p.x - self.window_rect(item).right()).abs();
+                    if off <= half && best.is_none_or(|(_, b)| off < b) {
+                        best = Some((col, off));
+                    }
+                    col += 1;
+                }
+                item = node.next;
+            }
+            if let Some((col, _)) = best {
+                return Some((t, col));
+            }
+        }
+        None
+    }
+
+    /// A press at `p` on a divider: its column's drag begins, the columns left of it holding
+    /// their widths. Returns whether there was one.
+    pub(crate) fn divider_press(&mut self, p: Point, double: bool) -> bool {
+        let Some((t, col)) = self.divider_at(p) else {
+            return false;
+        };
+        let st = &mut self.tables[t as usize];
+        let skip = usize::from(st.checks);
+        let Some(c) = st.columns.get(col).copied() else {
+            return false;
+        };
+        let start_w = st.tracks.get(skip + col).map_or(c.min, |&(_, w)| w);
+        st.frozen.clear();
+        st.frozen
+            .extend(st.tracks.iter().skip(skip).take(col).map(|&(_, w)| w));
+        st.drag = Some((col, start_w));
+        self.divider = Some(Divider {
+            t,
+            col,
+            press_x: p.x,
+            start_w,
+            min: c.min,
+            double,
+        });
+        true
+    }
+
+    /// The pointer at `p` while a divider is dragged: its column follows, at least its minimum,
+    /// and nothing is sent until the release. Returns whether a drag took it.
+    pub(crate) fn divider_move(&mut self, p: Point) -> bool {
+        let Some(d) = self.divider else {
+            return false;
+        };
+        let w = (d.start_w + (p.x - d.press_x)).max(d.min);
+        let st = &mut self.tables[d.t as usize];
+        match st.drag {
+            // The column went (hidden, or the view rebuilt the table): the drag ends.
+            None => self.divider = None,
+            Some(now) if now == (d.col, w) => {}
+            Some(_) => {
+                st.drag = Some((d.col, w));
+                let grid = st.grid;
+                if grid != NIL {
+                    self.mark_dirty(grid);
+                }
+            }
+        }
+        true
+    }
+
+    /// The release at `p` of a divider's drag: if its column's width changed, the view is sent
+    /// the widths the shared columns left of it held, then its own, so nothing moves when the
+    /// view answers; if not, a double-click's second press asks to fit it. Returns whether a drag
+    /// took it.
+    pub(crate) fn divider_release(&mut self, p: Point, out: &mut Vec<M>) -> bool {
+        let Some(d) = self.divider.take() else {
+            return false;
+        };
+        let w = (d.start_w + (p.x - d.press_x)).max(d.min);
+        let st = &mut self.tables[d.t as usize];
+        let live = st.drag.take().is_some();
+        let grid = st.grid;
+        if grid != NIL {
+            self.mark_dirty(grid);
+        }
+        let st = &self.tables[d.t as usize];
+        let (Some(on), true, Some(c)) = (st.on, live, st.columns.get(d.col)) else {
+            return true;
+        };
+        if w.to_bits() == d.start_w.to_bits() {
+            if d.double {
+                out.push(on(TableEvent::Fit(Some(c.id))));
+            }
+            return true;
+        }
+        for (k, left) in st.columns.iter().enumerate().take(d.col) {
+            if matches!(left.width, Track::Share(_)) {
+                let held = st.frozen.get(k).copied().unwrap_or(left.min);
+                out.push(on(TableEvent::Resize(left.id, held)));
+            }
+        }
+        out.push(on(TableEvent::Resize(c.id, w)));
+        true
+    }
+
+    /// Ends a divider's drag with nothing sent, its column back as it was: Esc, or the window
+    /// losing the pointer or going inactive. Returns whether there was one.
+    pub(crate) fn cancel_divider(&mut self) -> bool {
+        let Some(d) = self.divider.take() else {
+            return false;
+        };
+        let st = &mut self.tables[d.t as usize];
+        if st.drag.take().is_some() && st.grid != NIL {
+            let grid = st.grid;
+            self.mark_dirty(grid);
+        }
+        true
+    }
+
+    /// A context request on table header `header`, from node `start` (under the pointer at `at`,
+    /// or focused): the view is asked for the column menu, for the column `start` is in, which
+    /// anchors it. It isn't a node's context menu: [`Ui::take_context`] stays empty.
+    pub(crate) fn column_menu_request(
+        &mut self,
+        header: u32,
+        start: u32,
+        at: Option<Point>,
+        out: &mut Vec<M>,
+    ) -> bool {
+        let Some(t) = self.table_of_grid(self.nodes[header as usize].parent) else {
+            return false;
+        };
+        let Some(on) = self.tables[t as usize].on else {
+            return false;
+        };
+        let mut c = start;
+        while c != NIL && self.nodes[c as usize].parent != header {
+            c = self.nodes[c as usize].parent;
+        }
+        let item = (c != NIL).then_some(c);
+        let col = item
+            .filter(|&c| self.nodes[c as usize].key != TABLE_CHECK)
+            .and_then(|c| {
+                let st = &self.tables[t as usize];
+                let k = self.sibling_index(c).checked_sub(usize::from(st.checks))?;
+                st.columns.get(k).map(|c| c.id)
+            });
+        let anchor = item.unwrap_or(header);
+        self.anchor_node = anchor;
+        self.anchor = Some(match at {
+            Some(p) => Rect::new(p.x, p.y, 0.0, 0.0),
+            None => self.window_rect(anchor),
+        });
+        out.push(on(TableEvent::ColumnMenu(col)));
+        true
+    }
 
     /// A click released on row `i`: on its check box, with Ctrl or Shift, the checks; a
     /// double-click's second activates; else it becomes current.

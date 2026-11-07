@@ -72,8 +72,8 @@ use windows_sys::{
                 CREATESTRUCTW, CW_USEDEFAULT, CreateWindowExW, DEVICE_NOTIFY_WINDOW_HANDLE,
                 DefWindowProcW, DestroyWindow, DispatchMessageW, GWLP_USERDATA, GetClientRect,
                 GetMessageTime, GetMessageW, GetSystemMetrics, GetWindowLongPtrW, HCURSOR,
-                HTCLIENT, IDC_ARROW, IDC_IBEAM, KillTimer, LoadCursorW, MINMAXINFO, MSG,
-                PBT_POWERSETTINGCHANGE, PostQuitMessage, RegisterClassExW, SIZE_MINIMIZED,
+                HTCLIENT, IDC_ARROW, IDC_IBEAM, IDC_SIZEWE, KillTimer, LoadCursorW, MINMAXINFO,
+                MSG, PBT_POWERSETTINGCHANGE, PostQuitMessage, RegisterClassExW, SIZE_MINIMIZED,
                 SM_CXDOUBLECLK, SM_CYDOUBLECLK, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOMOVE,
                 SWP_NOZORDER, SetCursor, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
                 TranslateMessage, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_CREATE, WM_DESTROY,
@@ -547,7 +547,7 @@ struct State {
     /// The first half of a surrogate pair a `WM_CHAR` brought; 0 if none.
     surrogate: Cell<u16>,
     /// The system's arrow and I-beam.
-    cursors: [HCURSOR; 2],
+    cursors: [HCURSOR; 3],
     /// The handler asked to close.
     close: Cell<bool>,
     /// `TrackMouseEvent` will send `WM_MOUSELEAVE`.
@@ -693,6 +693,7 @@ impl State {
                 [
                     LoadCursorW(null_mut(), IDC_ARROW),
                     LoadCursorW(null_mut(), IDC_IBEAM),
+                    LoadCursorW(null_mut(), IDC_SIZEWE),
                 ]
             },
             close: Cell::new(false),
@@ -1006,6 +1007,7 @@ impl State {
         let cursor = match handler.cursor() {
             Cursor::Arrow => self.cursors[0],
             Cursor::IBeam => self.cursors[1],
+            Cursor::SizeWE => self.cursors[2],
         };
         // SAFETY: a system cursor; no other preconditions.
         unsafe { SetCursor(cursor) };
@@ -2330,8 +2332,7 @@ mod tests {
             min_size: (100, 100),
             compose: Compose::Never,
         };
-        let window =
-            Window::new(&options, Box::new(Shaped(Rc::clone(&shape)))).expect("a window");
+        let window = Window::new(&options, Box::new(Shaped(Rc::clone(&shape)))).expect("a window");
         let hwnd = window.hwnd;
         // As the system asks when the pointer moves over the client area.
         let lp = LPARAM::try_from(HTCLIENT | (WM_MOUSEMOVE << 16)).unwrap_or(1);

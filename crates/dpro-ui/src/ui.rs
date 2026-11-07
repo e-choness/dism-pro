@@ -12,7 +12,7 @@ use crate::{
     layout::Shown,
     pool::TextPool,
     scroll::{Drag, Scroll},
-    table::{Press, TableState},
+    table::{Divider, Press, TableState},
     tooltip::Tip,
     tree::{Key, NIL, Node, NodeId, NodeInfo, Role},
 };
@@ -137,6 +137,10 @@ pub struct Ui<M> {
     pub(crate) cell_ends: Vec<usize>,
     /// The last press: where, with which modifiers, and whether it was a double-click's second.
     pub(crate) press: Press,
+    /// A table column's divider being dragged (`table.rs`).
+    pub(crate) divider: Option<Divider>,
+    /// Messages layout made (a column's fit), for the host to take ([`Ui::take_messages`]).
+    pub(crate) queued: Vec<M>,
 }
 
 /// A node's tooltip, and a dropdown's accessible name and step: in a side table, so the nodes
@@ -239,6 +243,8 @@ impl<M> Ui<M> {
             cell_text: String::new(),
             cell_ends: Vec::new(),
             press: Press::default(),
+            divider: None,
+            queued: Vec::new(),
         };
         ui.damage_all();
         ui

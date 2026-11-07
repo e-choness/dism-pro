@@ -409,11 +409,18 @@ impl<P: Model> Host<P> {
     /// its rows' height and view until a layout has measured them, and a scroll can bring other
     /// rows into view than it built (TD-0009 A2.5).
     fn build(&mut self) {
-        let model = &self.model;
-        for _ in 0..2 {
+        // Again if a table asks (its first build guesses its rows), and once more after a
+        // column's fit, which layout measures and the model takes (TD-0009 A2.4).
+        for _ in 0..3 {
+            let model = &self.model;
             self.ui.build(|c| model.view(c));
             self.ui.layout(self.text.as_mut());
-            if !self.ui.wants_build() {
+            self.ui.take_messages(&mut self.msgs);
+            let fitted = !self.msgs.is_empty();
+            for msg in self.msgs.drain(..) {
+                self.model.update(msg);
+            }
+            if !fitted && !self.ui.wants_build() {
                 break;
             }
         }
@@ -556,6 +563,7 @@ impl<P: Model> Handler for Host<P> {
         match self.ui.cursor() {
             Cursor::Text => gui::Cursor::IBeam,
             Cursor::Arrow => gui::Cursor::Arrow,
+            Cursor::SizeWE => gui::Cursor::SizeWE,
         }
     }
 

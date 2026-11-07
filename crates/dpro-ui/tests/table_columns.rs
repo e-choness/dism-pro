@@ -143,8 +143,6 @@ struct Page {
     sizes: Vec<String>,
     /// The page ignores the widths the table sends, so a fit stays a fit.
     keep_fit: bool,
-    /// The column menu the view asked for last, if any.
-    menu: Option<Option<ColumnId>>,
 }
 
 impl Page {
@@ -160,9 +158,10 @@ impl Page {
             columns: ColumnLayout::new(&ids),
             names: (0..rows).map(|r| format!("Program {r:05}")).collect(),
             versions: (0..rows).map(|r| format!("{}.{}", r % 10, r % 7)).collect(),
-            sizes: (0..rows).map(|r| format!("{} MB", (r * 37) % 1000)).collect(),
+            sizes: (0..rows)
+                .map(|r| format!("{} MB", (r * 37) % 1000))
+                .collect(),
             keep_fit: false,
-            menu: None,
         }
     }
 
@@ -182,7 +181,6 @@ impl Page {
             TableEvent::ResetColumns => {
                 self.columns.reset();
             }
-            TableEvent::ColumnMenu(at) => self.menu = Some(at),
             _ => {}
         }
     }
@@ -361,7 +359,12 @@ impl Run {
     /// Row `r`'s cell in column `col`.
     fn cell(&self, r: u64, col: ColumnId) -> NodeId {
         self.ui
-            .find(&[TABLE, TABLE_BODY, Key::index(r), Key::index(u64::from(col.0))])
+            .find(&[
+                TABLE,
+                TABLE_BODY,
+                Key::index(r),
+                Key::index(u64::from(col.0)),
+            ])
             .expect("the cell")
     }
 
@@ -419,7 +422,11 @@ fn a_column_takes_the_width_the_user_left_it_at_least_its_minimum() {
     // Name stops sharing; Size can't go under its 60 px.
     assert_eq!(run.widths(), [CHECK, 200.0, 80.0, 60.0]);
     assert_eq!(run.content_w(), CHECK + 200.0 + 80.0 + 60.0);
-    assert_eq!(run.rect(run.cell(0, SIZE)).w, 60.0, "the rows share the tracks");
+    assert_eq!(
+        run.rect(run.cell(0, SIZE)).w,
+        60.0,
+        "the rows share the tracks"
+    );
 }
 
 #[test]
@@ -473,7 +480,11 @@ fn a_drag_on_a_divider_resizes_live_and_sends_the_widths_on_release() {
     assert_eq!(run.widths(), [CHECK, 402.0, 110.0, 90.0]);
     assert_eq!(run.rect(run.cell(0, VERSION)).w, 110.0);
     assert_eq!(run.content_w(), CHECK + 402.0 + 110.0 + 90.0);
-    assert_eq!(run.page.columns.widths(), &[Width::Auto; 3], "nothing sent yet");
+    assert_eq!(
+        run.page.columns.widths(),
+        &[Width::Auto; 3],
+        "nothing sent yet"
+    );
     // Let go: Name stops sharing at the width it holds, so nothing jumps after the drag.
     assert_eq!(
         run.send(Input::PointerUp(to)),
@@ -497,7 +508,11 @@ fn the_shared_columns_right_of_a_divider_take_up_the_difference() {
         Input::PointerDown(at),
         Input::PointerMove(to),
     ]);
-    assert_eq!(run.widths(), [CHECK, 296.0, 80.0, 196.0], "the view stays full");
+    assert_eq!(
+        run.widths(),
+        [CHECK, 296.0, 80.0, 196.0],
+        "the view stays full"
+    );
     assert_eq!(
         run.send(Input::PointerUp(to)),
         [ev(TableEvent::Resize(NAME, 296.0))]
@@ -565,10 +580,7 @@ fn a_press_on_a_divider_never_sorts() {
 fn a_divider_past_the_view_drags_where_the_header_scrolled_it() {
     let mut run = Run::new(100);
     // 300 px: Name at its 120 px minimum makes 318 px of columns.
-    run.ui.set_viewport(Size {
-        w: 300.0,
-        ..WINDOW
-    });
+    run.ui.set_viewport(Size { w: 300.0, ..WINDOW });
     run.frame();
     let body = run.ui.find(&[TABLE, TABLE_BODY]).expect("the rows' view");
     assert!(run.ui.scroll_to(body, [100, 0]), "clamped at 18 px");
@@ -596,12 +608,18 @@ fn the_pointer_shows_the_left_right_arrows_over_a_divider_and_while_dragging() {
     assert_eq!(run.ui.cursor(), Cursor::SizeWE, "4 px either side");
     run.send(Input::PointerMove(at_x(at, -5.0)));
     assert_eq!(run.ui.cursor(), Cursor::Arrow);
-    run.send(Input::PointerMove(Point { x: CHECK, y: HEADER_Y }));
+    run.send(Input::PointerMove(Point {
+        x: CHECK,
+        y: HEADER_Y,
+    }));
     assert_eq!(run.ui.cursor(), Cursor::Arrow, "the check column has none");
     run.send(Input::PointerMove(Point { y: 60.0, ..at }));
     assert_eq!(run.ui.cursor(), Cursor::Arrow, "the rows have none");
     run.send_all(&[Input::PointerMove(at), Input::PointerDown(at)]);
-    let away = Point { x: at.x + 40.0, y: 200.0 };
+    let away = Point {
+        x: at.x + 40.0,
+        y: 200.0,
+    };
     run.send(Input::PointerMove(away));
     assert_eq!(run.ui.cursor(), Cursor::SizeWE, "the drag holds it");
     run.send(Input::PointerUp(away));
@@ -679,7 +697,8 @@ fn a_fit_measures_the_rows_built_not_every_row() {
     // 13 characters of 6.5 px and the padding are under Name's 120 px minimum.
     assert_eq!(run.fits, [ev(TableEvent::Resize(NAME, 120.0))]);
     run.fits.clear();
-    // Row 900 current: it's built, out of view, and its cells count.
+    // Row 900 made current is scrolled to and built: now its cells count. The fit is measured
+    // once the build that made it has, not from the rows the view had before.
     run.page.model.set_current(900);
     run.page.columns.fit(Some(NAME));
     run.frame();
@@ -696,7 +715,11 @@ fn hidden_columns_leave_the_header_the_rows_and_the_grid() {
     let shown = [TABLE_CHECK, col_key(NAME), col_key(SIZE)];
     assert_eq!(run.keys(run.header_node()), shown);
     assert_eq!(run.keys(run.row(0)), shown);
-    assert_eq!(run.widths(), [CHECK, 482.0, 90.0], "Name shares what Version left");
+    assert_eq!(
+        run.widths(),
+        [CHECK, 482.0, 90.0],
+        "Name shares what Version left"
+    );
     let tree = run.ui.a11y_tree();
     let grid = node(&tree, &run.ui, run.table());
     assert_eq!(grid.column_count(), Some(3));
@@ -765,7 +788,10 @@ fn a_context_request_on_the_header_asks_for_the_column_menu() {
     // Past the last column, still on the header.
     run.page.columns.resize(NAME, 200.0);
     run.frame();
-    let past = Point { x: 500.0, y: HEADER_Y };
+    let past = Point {
+        x: 500.0,
+        y: HEADER_Y,
+    };
     assert_eq!(
         run.send(Input::ContextMenu(Some(past))),
         [ev(TableEvent::ColumnMenu(None))]
@@ -781,7 +807,13 @@ fn items(ui: &Ui<Msg>) -> Vec<(Key, Role, String, bool, Tri)> {
         .collect()
 }
 
-fn item(key: Key, role: Role, text: &str, enabled: bool, check: Tri) -> (Key, Role, String, bool, Tri) {
+fn item(
+    key: Key,
+    role: Role,
+    text: &str,
+    enabled: bool,
+    check: Tri,
+) -> (Key, Role, String, bool, Tri) {
     (key, role, text.to_owned(), enabled, check)
 }
 
@@ -797,9 +829,27 @@ fn the_column_menu_lists_the_hideable_columns_then_its_commands() {
             item(col_key(VERSION), Role::MenuItem, "Version", true, Tri::On),
             item(col_key(SIZE), Role::MenuItem, "Size", true, Tri::Off),
             item(sep, Role::Separator, "", true, Tri::Off),
-            item(COLUMN_FIT, Role::MenuItem, "Size column to fit", true, Tri::Off),
-            item(COLUMN_FIT_ALL, Role::MenuItem, "Size all columns to fit", true, Tri::Off),
-            item(COLUMN_RESET, Role::MenuItem, "Reset columns", true, Tri::Off),
+            item(
+                COLUMN_FIT,
+                Role::MenuItem,
+                "Size column to fit",
+                true,
+                Tri::Off
+            ),
+            item(
+                COLUMN_FIT_ALL,
+                Role::MenuItem,
+                "Size all columns to fit",
+                true,
+                Tri::Off
+            ),
+            item(
+                COLUMN_RESET,
+                Role::MenuItem,
+                "Reset columns",
+                true,
+                Tri::Off
+            ),
         ]
     );
     // From the check column's header, no column to fit.
@@ -848,12 +898,20 @@ fn a_check_item_is_a_menu_check_box_to_a_client() {
     let tree = ui.a11y_tree();
     let menu = node(&tree, &ui, ui.find(&[MENU]).expect("the menu"));
     assert_eq!((menu.role(), menu.label()), (AkRole::Menu, Some("Columns")));
-    let version = node(&tree, &ui, ui.find(&[MENU, col_key(VERSION)]).expect("an item"));
+    let version = node(
+        &tree,
+        &ui,
+        ui.find(&[MENU, col_key(VERSION)]).expect("an item"),
+    );
     assert_eq!(
         (version.role(), version.toggled()),
         (AkRole::MenuItemCheckBox, Some(Toggled::True))
     );
-    let size = node(&tree, &ui, ui.find(&[MENU, col_key(SIZE)]).expect("an item"));
+    let size = node(
+        &tree,
+        &ui,
+        ui.find(&[MENU, col_key(SIZE)]).expect("an item"),
+    );
     assert_eq!(size.toggled(), Some(Toggled::False));
     let fit = node(&tree, &ui, ui.find(&[MENU, COLUMN_FIT]).expect("an item"));
     assert_eq!((fit.role(), fit.toggled()), (AkRole::MenuItem, None));
@@ -864,7 +922,7 @@ fn a_check_item_is_a_menu_check_box_to_a_client() {
 fn first_ink(pixels: &[u32], width: u32, rect: Rect) -> Option<i32> {
     let r = rect.snap(1.0);
     let w = usize::try_from(width).ok()?;
-    let y = usize::try_from((r.y0 + r.y1) / 2).ok()?;
+    let y = usize::try_from(i32::midpoint(r.y0, r.y1)).ok()?;
     let row = pixels.get(y * w..(y + 1) * w)?;
     let px = |x: i32| usize::try_from(x).ok().and_then(|x| row.get(x)).copied();
     let bg = px(r.x1 - 2)?;

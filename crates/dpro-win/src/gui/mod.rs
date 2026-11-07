@@ -240,6 +240,8 @@ pub enum Cursor {
     Arrow,
     /// The I-beam, over text that can be selected or edited.
     IBeam,
+    /// The left-right arrows, over a column's divider and while it's dragged.
+    SizeWE,
 }
 
 /// The application side of a [`Window`]. It must not pump messages (no modal loop) while it
