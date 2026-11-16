@@ -349,6 +349,9 @@ impl IUIAutomationFocusChangedEventHandler_Impl for FocusEventHandler_Impl {
 }
 
 mod simple;
-// dpro: the table and scroll patterns (PATCHES.md, 4).
+// dpro: the table and scroll patterns (PATCHES.md, 4), menus' check items (PATCHES.md, 5), and
+// the helpers their tests share.
+mod menu;
+mod providers;
 mod table;
 // dpro: `mod subclassed;` is removed with `SubclassingAdapter` (PATCHES.md, 1).

@@ -50,7 +50,8 @@ amendment).
        - Its cells are a row's `Cell`, `GridCell`, `RowHeader` and `ColumnHeader` parts with a
          `column_index`, at the row's index unless they carry their own.
        - A nested table's parts are its own.
-     - `src/tests/table.rs`: tests that call the providers in process, so Wine runs them too (T2).
+     - `src/tests/table.rs`: tests that call the providers in process, so Wine runs them too (T2),
+       with the helpers in `src/tests/providers.rs` (5).
    - **`src/node.rs`:**
      - **Grid on a table.** `RowCount`, `ColumnCount`, and `GetItem`:
        - a row or column past the counts is `E_INVALIDARG`;
@@ -88,3 +89,11 @@ amendment).
        - A percentage outside 0–100 is `E_INVALIDARG`. An amount on an axis that doesn't scroll,
          or a missing action, is `UIA_E_INVALIDOPERATION`, and then nothing is sent.
    - **`src/lib.rs`, `src/tests/mod.rs`:** the two `mod table;` lines.
+5. **A menu's check items are menu items** (TD-0009 5b2's column menu). A `MenuItemCheckBox` is
+   UI Automation's MenuItem with the Toggle pattern, as Windows' own menus and WinUI's toggle menu
+   items are, so Narrator reads "menu item, checked" and counts it among the menu's items.
+   Upstream maps it to CheckBox, as Chromium does.
+   - **`src/node.rs`:** the control type. `MenuItemRadio` is unused and stays upstream's.
+   - **New files:** `src/tests/menu.rs`, its tests; `src/tests/providers.rs`, the helpers it
+     shares with `src/tests/table.rs` (4).
+   - **`src/tests/mod.rs`:** the `mod menu;` and `mod providers;` lines.

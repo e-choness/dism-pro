@@ -167,7 +167,9 @@ impl NodeWrapper<'_> {
             Role::Marquee => UIA_TextControlTypeId,
             Role::Math => UIA_GroupControlTypeId,
             Role::MenuBar => UIA_MenuBarControlTypeId,
-            Role::MenuItemCheckBox => UIA_CheckBoxControlTypeId,
+            // dpro: a check item is a menu item with the Toggle pattern, as in Windows' own menus,
+            // not a check box (PATCHES.md, 5).
+            Role::MenuItemCheckBox => UIA_MenuItemControlTypeId,
             Role::MenuItemRadio => UIA_RadioButtonControlTypeId,
             Role::MenuListPopup => UIA_ListControlTypeId,
             Role::Meter => UIA_ProgressBarControlTypeId,

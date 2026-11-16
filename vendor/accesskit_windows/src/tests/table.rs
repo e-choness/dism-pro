@@ -10,28 +10,20 @@
 //! so theirs comes from the row, as in a web page's grid.
 
 use accesskit::{
-    Action, ActionData, ActionHandler, ActionRequest, Node, NodeId, Point, Rect, Role, ScrollUnit,
-    SortDirection, Toggled, TreeId, TreeInfo, TreeUpdate,
+    Action, ActionData, Node, NodeId, Point, Rect, Role, ScrollUnit, SortDirection, Toggled,
+    TreeId, TreeInfo, TreeUpdate,
 };
-use accesskit_consumer::Tree;
-use std::{
-    ffi::c_void,
-    sync::{Arc, Mutex},
-};
+use std::sync::Arc;
 use windows::{
-    Win32::{
-        Foundation::{E_INVALIDARG, HWND},
-        System::{
-            Com::SAFEARRAY,
-            Ole::*,
-            Variant::{VARIANT, VT_BOOL, VT_BSTR, VT_I4},
-        },
-        UI::Accessibility::*,
-    },
+    Win32::{Foundation::E_INVALIDARG, UI::Accessibility::*},
     core::*,
 };
 
-use crate::context::{ActionHandlerWrapper, Context};
+use super::providers::{
+    self, Requests, control_type, element, elements, is_content, name, names, pattern, property,
+    text,
+};
+use crate::context::Context;
 
 const WINDOW: NodeId = NodeId(0);
 const GRID: NodeId = NodeId(1);
@@ -133,120 +125,8 @@ fn tree() -> TreeUpdate {
     }
 }
 
-/// Every request the providers send.
-#[derive(Clone, Default)]
-struct Requests(Arc<Mutex<Vec<ActionRequest>>>);
-
-impl ActionHandler for Requests {
-    fn do_action(&mut self, request: ActionRequest) {
-        self.0.lock().unwrap().push(request);
-    }
-}
-
-impl Requests {
-    fn take(&self) -> Vec<(Action, Option<ActionData>, NodeId)> {
-        self.0
-            .lock()
-            .unwrap()
-            .drain(..)
-            .map(|r| (r.action, r.data, r.target_node))
-            .collect()
-    }
-}
-
-/// The tree's context, with no window: these providers never ask for one.
 fn context(requests: &Requests) -> Arc<Context> {
-    Context::new(
-        HWND::default().into(),
-        Tree::new(tree(), true),
-        Arc::new(ActionHandlerWrapper::new(requests.clone())),
-        false,
-    )
-}
-
-fn element(context: &Arc<Context>, id: NodeId) -> IRawElementProviderSimple {
-    let full = context
-        .read_tree()
-        .state()
-        .node_by_tree_local_id(id, TreeId::ROOT)
-        .unwrap()
-        .id();
-    context.get_or_create_platform_node(full).into_interface()
-}
-
-fn pattern<T: Interface>(element: &IRawElementProviderSimple, id: UIA_PATTERN_ID) -> Option<T> {
-    // A pattern the node doesn't have is a null provider.
-    unsafe { element.GetPatternProvider(id) }
-        .ok()
-        .map(|p| p.cast().unwrap())
-}
-
-fn property(element: &IRawElementProviderSimple, id: UIA_PROPERTY_ID) -> VARIANT {
-    unsafe { element.GetPropertyValue(id) }.unwrap()
-}
-
-/// A string property's value; `None` if it isn't a string.
-fn text(value: &VARIANT) -> Option<String> {
-    // SAFETY: the union holds a BSTR when the type says so.
-    unsafe {
-        let value = &value.Anonymous.Anonymous;
-        (value.vt == VT_BSTR).then(|| value.Anonymous.bstrVal.to_string())
-    }
-}
-
-/// An int property's value, read as the union holds it: Wine has no `VariantToInt32`.
-fn int(value: &VARIANT) -> Option<i32> {
-    // SAFETY: the union holds an i32 when the type says so.
-    unsafe {
-        let value = &value.Anonymous.Anonymous;
-        (value.vt == VT_I4).then(|| value.Anonymous.lVal)
-    }
-}
-
-/// A bool property's value.
-fn flag(value: &VARIANT) -> Option<bool> {
-    // SAFETY: the union holds a VARIANT_BOOL when the type says so.
-    unsafe {
-        let value = &value.Anonymous.Anonymous;
-        (value.vt == VT_BOOL).then(|| value.Anonymous.boolVal.as_bool())
-    }
-}
-
-fn name(element: &IRawElementProviderSimple) -> String {
-    text(&property(element, UIA_NamePropertyId)).unwrap()
-}
-
-fn control_type(element: &IRawElementProviderSimple) -> UIA_CONTROLTYPE_ID {
-    UIA_CONTROLTYPE_ID(int(&property(element, UIA_ControlTypePropertyId)).unwrap())
-}
-
-fn is_content(element: &IRawElementProviderSimple) -> bool {
-    flag(&property(element, UIA_IsContentElementPropertyId)).unwrap()
-}
-
-/// A SAFEARRAY of providers, taken.
-fn elements(array: *mut SAFEARRAY) -> Vec<IRawElementProviderSimple> {
-    let mut out = Vec::new();
-    if array.is_null() {
-        return out;
-    }
-    unsafe {
-        let (lower, upper) = (
-            SafeArrayGetLBound(array, 1).unwrap(),
-            SafeArrayGetUBound(array, 1).unwrap(),
-        );
-        for i in lower..=upper {
-            let mut item: Option<IUnknown> = None;
-            SafeArrayGetElement(array, &i, (&raw mut item).cast::<c_void>()).unwrap();
-            out.push(item.unwrap().cast().unwrap());
-        }
-        SafeArrayDestroy(array).unwrap();
-    }
-    out
-}
-
-fn names(array: *mut SAFEARRAY) -> Vec<String> {
-    elements(array).iter().map(name).collect()
+    providers::context(requests, tree())
 }
 
 #[test]
