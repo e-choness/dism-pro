@@ -22,6 +22,8 @@ use crate::{
     util::{QueuedEvent, StringBuffer},
     window_handle::WindowHandle,
 };
+// dpro: a table's rows realized on request (PATCHES.md, 6).
+use crate::realize::{Realizer, RealizingHandler};
 
 fn focus_event(context: &Arc<Context>, node_id: FullNodeId) -> QueuedEvent {
     let platform_node = context.get_or_create_platform_node(node_id);
@@ -429,6 +431,22 @@ impl Adapter {
             hwnd,
             is_window_focused,
             Arc::new(ActionHandlerWrapper::new(action_handler)),
+        )
+    }
+
+    // dpro: an adapter whose virtualized tables realize their rows on request (PATCHES.md, 6).
+    /// Creates a new Windows platform adapter, as [`new`](Self::new) does, whose tables realize
+    /// the rows a client asks for through `realizer`.
+    pub fn with_realizer(
+        hwnd: HWND,
+        is_window_focused: bool,
+        action_handler: impl 'static + ActionHandler + Send,
+        realizer: impl 'static + Realizer,
+    ) -> Self {
+        Self::with_wrapped_action_handler(
+            hwnd,
+            is_window_focused,
+            Arc::new(RealizingHandler::new(action_handler, realizer)),
         )
     }
 

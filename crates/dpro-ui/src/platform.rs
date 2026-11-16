@@ -35,8 +35,8 @@ mod popups;
 use std::time::Instant;
 
 use dpro_win::gui::{
-    self, Backdrop, Compose, Event, Frame, Handler, PointPx, Presenter, SizePx, Surface, Window,
-    WindowCx, WindowOptions, text,
+    self, Backdrop, Compose, Event, Frame, Handler, PointPx, Presenter, Realize, Realized, SizePx,
+    Surface, Window, WindowCx, WindowOptions, text,
 };
 
 use crate::{
@@ -635,6 +635,42 @@ impl<P: Model> Handler for Host<P> {
             }
             self.frame(cx);
         }
+    }
+
+    /// A client waits for a table's row (TD-0009 A2.5): it's revealed, or searched for by name in
+    /// the view and the one found revealed, then the frame builds it; the window serves the
+    /// update before the client looks again. Tables are on the main surface only.
+    fn a11y_realize(&mut self, request: &Realize, cx: &mut WindowCx<'_>) -> Realized {
+        if cx.surface() != Surface::Main {
+            return Realized::Unavailable;
+        }
+        let (Realize::Row { tree, table, .. } | Realize::Named { tree, table, .. }) = request;
+        let Some(table) = (*tree == accesskit::TreeId::ROOT)
+            .then(|| self.ui.a11y_node(*table))
+            .flatten()
+        else {
+            return Realized::NotFound;
+        };
+        // An index past u32's rows is past every table's end.
+        let found = match request {
+            Realize::Row { row, .. } => {
+                let row = u32::try_from(*row).ok();
+                if !row.is_some_and(|row| self.ui.realize(table, row)) {
+                    return Realized::NotFound;
+                }
+                self.frame(cx);
+                row
+            }
+            Realize::Named { after, name, .. } => {
+                let after = after.map(|at| u32::try_from(at).unwrap_or(u32::MAX));
+                if !self.ui.find_row(table, after, name) {
+                    return Realized::NotFound;
+                }
+                self.frame(cx);
+                self.ui.take_found(table)
+            }
+        };
+        found.map_or(Realized::NotFound, |at| Realized::Row(at as usize))
     }
 }
 

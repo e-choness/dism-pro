@@ -169,9 +169,31 @@ pub struct Cells<'b> {
     ends: &'b mut Vec<usize>,
     values: &'b mut ValueCache,
     formats: &'b dyn Formats,
+    /// The one column a search reads, or [`ALL`] for a build. A search goes through every row, so
+    /// it formats only that column's values, and keeps none: the others are left empty.
+    keep: usize,
 }
 
-impl Cells<'_> {
+/// [`Cells::keep`] for a build: every value is formatted, or kept from an earlier build.
+const ALL: usize = usize::MAX;
+
+impl<'b> Cells<'b> {
+    fn new(
+        text: &'b mut String,
+        ends: &'b mut Vec<usize>,
+        values: &'b mut ValueCache,
+        formats: &'b dyn Formats,
+        keep: usize,
+    ) -> Self {
+        Self {
+            text,
+            ends,
+            values,
+            formats,
+            keep,
+        }
+    }
+
     /// The next column's text. It's copied, so it can come from anywhere.
     pub fn push(&mut self, text: &str) {
         self.text.push_str(text);
@@ -197,10 +219,32 @@ impl Cells<'_> {
     }
 
     /// A value's text, kept from an earlier build or formatted now.
-    #[inline]
+    ///
+    /// Always inlined into the view's row closure, as plain `#[inline]` no longer was once the
+    /// search's branch came in: called, it cost a frame of the shell's rows ~870 Ir (+0.8 %).
+    #[expect(
+        clippy::inline_always,
+        reason = "measured: called, event.unchanged cost 871 Ir (0.8 %) more (C1)"
+    )]
+    #[inline(always)]
     fn value(&mut self, v: Value) {
-        self.values.push(v, self.formats, self.text);
+        if self.keep == ALL {
+            self.values.push(v, self.formats, self.text);
+        } else {
+            self.searched(v);
+        }
         self.ends.push(self.text.len());
+    }
+
+    /// [`value`](Self::value) in a search: formatted if it's the column the search reads, and
+    /// not kept. A search starts each row's `ends` empty, so their length is this column. Out of
+    /// line, so a build's values don't carry it.
+    #[cold]
+    #[inline(never)]
+    fn searched(&mut self, v: Value) {
+        if self.ends.len() == self.keep {
+            v.format(self.formats, self.text);
+        }
     }
 }
 
@@ -327,6 +371,18 @@ pub(crate) struct TableState<M> {
     reveal: Option<u32>,
     /// The text of the values its cells showed.
     values: ValueCache,
+    /// A client's search by name, which the next build runs (TD-0009 A2.5).
+    find: Option<Find>,
+    /// The row the last search found, for [`Ui::take_found`].
+    found: Option<u32>,
+}
+
+/// A search for a table's first row from `from` on whose name (its first shown column's text) is
+/// `name`, in the view's order.
+#[derive(Debug)]
+struct Find {
+    from: u32,
+    name: String,
 }
 
 impl<M> TableState<M> {
@@ -358,6 +414,8 @@ impl<M> TableState<M> {
             current_key: None,
             reveal: None,
             values: ValueCache::default(),
+            find: None,
+            found: None,
         }
     }
 }
@@ -467,21 +525,29 @@ impl<M: Clone> Cx<'_, M> {
         };
         values.begin(cx.ui.formats_generation);
         let formats = Rc::clone(&cx.ui.formats.0);
+        let shown = Shown::of(table);
+        // A client's search, through the view's rows, reveals the row it finds (A2.5).
+        if let Some(find) = (t != NIL)
+            .then(|| cx.ui.tables[t as usize].find.take())
+            .flatten()
+        {
+            let mut cells = Cells::new(&mut text, &mut ends, &mut values, &*formats, shown.first);
+            let found = search(&find, table.rows, shown.first, &mut cells, &mut row);
+            text.clear();
+            ends.clear();
+            let st = &mut cx.ui.tables[t as usize];
+            st.found = found;
+            st.reveal = found.or(st.reveal);
+        }
         // The current row first: whether its key changed says whether it's another row.
         let current = table.current.filter(|&c| c < table.rows);
         let cur = current.map(|c| {
             row(
                 c,
-                &mut Cells {
-                    text: &mut text,
-                    ends: &mut ends,
-                    values: &mut values,
-                    formats: &*formats,
-                },
+                &mut Cells::new(&mut text, &mut ends, &mut values, &*formats, ALL),
             )
         });
         let (kept_text, kept_ends) = (text.len(), ends.len());
-        let shown = Shown::of(table);
         let plan = (t != NIL).then(|| {
             cx.ui
                 .table_plan(t, table, current, cur.map(|r| Key::index(r.key.0)))
@@ -505,12 +571,7 @@ impl<M: Clone> Cx<'_, M> {
                         ends.truncate(kept_ends);
                         let r = row(
                             at,
-                            &mut Cells {
-                                text: &mut text,
-                                ends: &mut ends,
-                                values: &mut values,
-                                formats: &*formats,
-                            },
+                            &mut Cells::new(&mut text, &mut ends, &mut values, &*formats, ALL),
                         );
                         (r, kept_ends..ends.len(), kept_text)
                     };
@@ -755,6 +816,28 @@ impl<M: Clone> Cx<'_, M> {
     }
 }
 
+/// The first row from `find.from` up to `rows` whose `name` column reads `find.name`, through
+/// the view's `row`, which pushes each row's cells into `cells` (a search's: that column only).
+fn search<'r>(
+    find: &Find,
+    rows: u32,
+    name: usize,
+    cells: &mut Cells<'_>,
+    row: &mut impl FnMut(u32, &mut Cells<'_>) -> Row<'r>,
+) -> Option<u32> {
+    (find.from..rows).find(|&at| {
+        cells.text.clear();
+        cells.ends.clear();
+        row(at, cells);
+        let named = CellText {
+            text: cells.text,
+            ends: cells.ends,
+            start: 0,
+        };
+        named.get(name) == find.name
+    })
+}
+
 /// `table`'s shown columns, with their places in its columns: the cells' indices.
 fn shown<'t, 's, M>(table: &'t Table<'s, M>) -> impl Iterator<Item = (usize, &'t Column<'s>)> {
     table
@@ -898,6 +981,38 @@ impl<M> Ui<M> {
         let Some(t) = self.index(table).and_then(|i| self.table_of_grid(i)) else {
             return false;
         };
+        self.reveal_row(t, row)
+    }
+
+    /// Searches `table`'s rows after `after` (from the first if `None`), in the view's order, for
+    /// the first named `name` (its first shown column's text), at the next build, which also
+    /// [`realize`](Self::realize)s the row found: a client's search by name (TD-0009 A2.5).
+    /// [`take_found`](Self::take_found) then says which row it was. The search goes through the
+    /// view's rows, reading only that column. False if `table` isn't a table.
+    pub fn find_row(&mut self, table: NodeId, after: Option<u32>, name: &str) -> bool {
+        let Some(t) = self.index(table).and_then(|i| self.table_of_grid(i)) else {
+            return false;
+        };
+        let from = after.map_or(0, |at| at.saturating_add(1));
+        let st = &mut self.tables[t as usize];
+        st.found = None;
+        st.find = Some(Find {
+            from,
+            name: name.to_owned(),
+        });
+        true
+    }
+
+    /// The row the last build's [`find_row`](Self::find_row) found in `table`, by index in the
+    /// view's order. A search no build ran (the view didn't build the table) is dropped.
+    pub fn take_found(&mut self, table: NodeId) -> Option<u32> {
+        let t = self.index(table).and_then(|i| self.table_of_grid(i))?;
+        let st = &mut self.tables[t as usize];
+        st.find = None;
+        st.found.take()
+    }
+
+    fn reveal_row(&mut self, t: u32, row: u32) -> bool {
         let st = &mut self.tables[t as usize];
         if row >= st.rows {
             return false;

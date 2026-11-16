@@ -228,6 +228,17 @@ pub(crate) enum Value {
     Time(u64),
 }
 
+impl Value {
+    /// Appends its text in `formats` to `out`.
+    pub(crate) fn format(self, formats: &dyn Formats, out: &mut String) {
+        match self {
+            Self::Size(b) => formats.size(Bytes(b), out),
+            Self::Date(t) => formats.date(UnixMillis(t), out),
+            Self::Time(t) => formats.time(UnixMillis(t), out),
+        }
+    }
+}
+
 impl Hash for Value {
     /// One `u64`, the value with its kind in the top bits, so a lookup mixes once. Values whose
     /// kinds collide are told apart by `Eq`.
@@ -317,11 +328,7 @@ impl ValueCache {
     #[inline(never)]
     fn format(&mut self, v: Value, formats: &dyn Formats, out: &mut String) {
         let start = out.len();
-        match v {
-            Value::Size(b) => formats.size(Bytes(b), out),
-            Value::Date(t) => formats.date(UnixMillis(t), out),
-            Value::Time(t) => formats.time(UnixMillis(t), out),
-        }
+        v.format(formats, out);
         let text = &out[start..];
         if text.len() > KEEP {
             return;

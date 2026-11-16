@@ -11,9 +11,16 @@ use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, atomic::AtomicBool};
 use windows::core::ComObject;
 
 use crate::{node::PlatformNode, util::*, window_handle::WindowHandle};
+// dpro: a table's rows realized on request (PATCHES.md, 6).
+use crate::realize::{Realize, Realized};
 
 pub(crate) trait ActionHandlerNoMut {
     fn do_action(&self, request: ActionRequest);
+
+    // dpro: the app's realizer, if it gave one (PATCHES.md, 6). Called with no lock held.
+    fn realize(&self, _request: &Realize) -> Realized {
+        Realized::Unavailable
+    }
 }
 
 pub(crate) struct ActionHandlerWrapper<H: ActionHandler + Send>(Mutex<H>);
@@ -75,6 +82,11 @@ impl Context {
 
     pub(crate) fn do_action(&self, request: ActionRequest) {
         self.action_handler.do_action(request);
+    }
+
+    // dpro: asks the app to build a row (PATCHES.md, 6). The caller holds no lock of the tree's.
+    pub(crate) fn realize(&self, request: &Realize) -> Realized {
+        self.action_handler.realize(request)
     }
 
     pub(crate) fn get_or_create_platform_node(

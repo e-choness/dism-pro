@@ -1,29 +1,50 @@
 //! UI Automation's side of the window (TD-0009 §5.3, §5.5): the queue that carries clients'
-//! requests from UI Automation's threads to the UI thread, and the glue that asks the handler for
-//! its tree on a client's first request.
+//! requests from UI Automation's threads to the UI thread, the realizer that builds a table's row
+//! a client asks for while it waits (A2.5), and the glue that asks the handler for its tree on a
+//! client's first request.
 
 use std::{
     cell::RefMut,
     ffi::c_void,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, MutexGuard, PoisonError,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 
 use accesskit::{ActionHandler, ActionRequest, ActivationHandler, TreeUpdate};
+use accesskit_windows::{Realize, Realized, Realizer};
 use windows_sys::Win32::{
     Foundation::HWND,
-    UI::WindowsAndMessaging::{PostMessageW, WM_APP},
+    System::Threading::GetCurrentThreadId,
+    UI::WindowsAndMessaging::{
+        GetWindowThreadProcessId, PostMessageW, SMTO_ABORTIFHUNG, SMTO_ERRORONEXIT,
+        SendMessageTimeoutW, WM_APP,
+    },
 };
 
 use super::{Handler, Surface};
 
 /// Posted to the window when requests are waiting; one per drain, however many arrive.
 pub(super) const WM_APP_A11Y: u32 = WM_APP + 1;
+/// Sent to the window while a client waits for a row (TD-0009 A2.5). Its `WPARAM` is the
+/// realize's number, never a pointer: a send that times out is still delivered, later.
+pub(super) const WM_APP_REALIZE: u32 = WM_APP + 3;
 /// Requests waiting at most. More are dropped: a client gone wild must not grow memory, and no
 /// person issues 64 commands between two turns of the message loop.
 const QUEUE_CAP: usize = 64;
+/// How long a client waits for the UI thread to build a row (TD-0009 A2.5). A hung thread
+/// fails the send at once.
+pub(super) const REALIZE_TIMEOUT_MS: u32 = 500;
+
+/// The realize a client waits on, between its thread and the UI thread.
+#[derive(Debug, Default)]
+struct Pending {
+    /// Its number, 0 when none waits; a late message with another number does nothing.
+    id: usize,
+    request: Option<Realize>,
+    answer: Option<Realized>,
+}
 
 /// Clients' requests on their way to the UI thread.
 #[derive(Debug, Default)]
@@ -33,6 +54,17 @@ pub(super) struct Requests {
     woken: AtomicBool,
     /// The window to wake, as its handle's address; 0 before it exists and once it's destroyed.
     hwnd: AtomicUsize,
+    /// The realize in flight.
+    pending: Mutex<Pending>,
+    /// Held while a client waits on a realize: one at a time. The UI thread never takes it.
+    realizing: Mutex<()>,
+    /// The last realize's number.
+    numbered: AtomicUsize,
+}
+
+/// `m` locked, its poison ignored: every holder leaves its data whole.
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 impl Requests {
@@ -82,12 +114,91 @@ impl Requests {
     }
 }
 
+impl Requests {
+    /// Has the UI thread build `request`'s row, on a client's thread, and waits for its answer:
+    /// at most [`REALIZE_TIMEOUT_MS`]. [`Realized::Unavailable`] without a window, on the UI
+    /// thread itself (an in-process client must not re-enter it), or if it didn't answer.
+    pub(super) fn realize(&self, request: &Realize) -> Realized {
+        let hwnd = self.hwnd.load(Ordering::Acquire);
+        if hwnd == 0 {
+            return Realized::Unavailable;
+        }
+        let hwnd: HWND = std::ptr::with_exposed_provenance_mut::<c_void>(hwnd);
+        // SAFETY: reading a window's thread needs no access to it; a destroyed window reads 0.
+        let thread = unsafe { GetWindowThreadProcessId(hwnd, std::ptr::null_mut()) };
+        // SAFETY: no preconditions.
+        if thread == 0 || thread == unsafe { GetCurrentThreadId() } {
+            return Realized::Unavailable;
+        }
+        let _one = lock(&self.realizing);
+        let id = self
+            .numbered
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_add(1)
+            .max(1);
+        *lock(&self.pending) = Pending {
+            id,
+            request: Some(request.clone()),
+            answer: None,
+        };
+        let mut result = 0;
+        // SAFETY: a window destroyed meanwhile fails the call. The message carries a number, and
+        // `result` outlives the call, which writes it only before it returns.
+        let sent = unsafe {
+            SendMessageTimeoutW(
+                hwnd,
+                WM_APP_REALIZE,
+                id,
+                0,
+                SMTO_ABORTIFHUNG | SMTO_ERRORONEXIT,
+                REALIZE_TIMEOUT_MS,
+                &raw mut result,
+            )
+        };
+        // Whatever happened, nothing waits now: a late message finds no realize to run.
+        let answer = std::mem::take(&mut *lock(&self.pending)).answer;
+        if sent == 0 {
+            return Realized::Unavailable;
+        }
+        answer.unwrap_or(Realized::Unavailable)
+    }
+
+    /// The realize numbered `id`, on the UI thread, if its client still waits.
+    pub(super) fn realize_request(&self, id: usize) -> Option<Realize> {
+        let pending = lock(&self.pending);
+        if pending.id == id && id != 0 {
+            pending.request.clone()
+        } else {
+            None
+        }
+    }
+
+    /// The UI thread's answer to the realize numbered `id`, its tree update already served. Its
+    /// client may have stopped waiting; then it's dropped.
+    pub(super) fn realize_answer(&self, id: usize, answer: Realized) {
+        let mut pending = lock(&self.pending);
+        if pending.id == id && id != 0 {
+            pending.answer = Some(answer);
+        }
+    }
+}
+
 /// The action handler `accesskit_windows` calls on UI Automation's threads.
 pub(super) struct ToUiThread(pub(super) Arc<Requests>);
 
 impl ActionHandler for ToUiThread {
     fn do_action(&mut self, request: ActionRequest) {
         self.0.push(request);
+    }
+}
+
+/// The realizer `accesskit_windows` calls on UI Automation's threads, with no lock of its own
+/// held (TD-0009 A2.5).
+pub(super) struct Realizing(pub(super) Arc<Requests>);
+
+impl Realizer for Realizing {
+    fn realize(&self, request: &Realize) -> Realized {
+        self.0.realize(request)
     }
 }
 

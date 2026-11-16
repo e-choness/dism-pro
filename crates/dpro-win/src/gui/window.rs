@@ -92,9 +92,9 @@ use windows_sys::{
 };
 
 use super::{
-    Backdrop, Cursor, Event, Frame, Handler, Mods, PointPx, PopupKind, Presenter, RectPx, SizePx,
-    Surface, WindowOptions,
-    a11y::{Initial, Requests, ToUiThread, WM_APP_A11Y},
+    Backdrop, Cursor, Event, Frame, Handler, Mods, PointPx, PopupKind, Presenter, Realized, RectPx,
+    SizePx, Surface, WindowOptions,
+    a11y::{Initial, Realizing, Requests, ToUiThread, WM_APP_A11Y, WM_APP_REALIZE},
     clipboard,
     compose::{Composer, Device, Gpu, Rects, after_loss},
     env::{Env, GUID_POWER_SAVING_STATUS, WM_APP_ENV, Watch},
@@ -346,7 +346,9 @@ impl Window {
             with_state(hwnd, |s| {
                 s.requests.attach(hwnd);
                 let actions = ToUiThread(Arc::clone(&s.requests));
-                let adapter = Adapter::new(accesskit_windows::HWND(hwnd), false, actions);
+                let realizer = Realizing(Arc::clone(&s.requests));
+                let adapter =
+                    Adapter::with_realizer(accesskit_windows::HWND(hwnd), false, actions, realizer);
                 if let Ok(mut slot) = s.a11y.try_borrow_mut() {
                     *slot = Some(adapter);
                 }
@@ -887,11 +889,24 @@ impl State {
                     self.dispatch(hwnd, |h, cx| h.a11y_action(&request, cx));
                 }
             }
+            WM_APP_REALIZE => self.realize(hwnd, wp),
             WM_APP_ENV => self.env_changed(hwnd),
             WM_DESTROY => self.destroyed(hwnd),
             _ => return self.input(hwnd, msg, wp, lp),
         }
         Some(0)
+    }
+
+    /// `WM_APP_REALIZE`: a client waits for a table's row, the realize numbered `id` (TD-0009
+    /// A2.5). The dispatch serves the update the handler made before the answer goes back, so the
+    /// client's second look finds the row. A busy handler can't answer.
+    fn realize(&self, hwnd: HWND, id: WPARAM) {
+        let answer = self
+            .requests
+            .realize_request(id)
+            .and_then(|request| self.dispatch(hwnd, |h, cx| h.a11y_realize(&request, cx)))
+            .unwrap_or(Realized::Unavailable);
+        self.requests.realize_answer(id, answer);
     }
 
     /// `WM_DESTROY`: unsubscribes, lets UI Automation go, and ends the loop. Windows has destroyed
@@ -1820,8 +1835,10 @@ mod tests {
         PM_REMOVE, PeekMessageW, PostMessageW, SendMessageW,
     };
 
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
-    use crate::gui::{Compose, compose::on_wine};
+    use crate::gui::{Compose, Realize, compose::on_wine};
 
     #[test]
     fn words_of_an_lparam() {
@@ -2162,9 +2179,22 @@ mod tests {
     }
 
     /// Serves a window with one button whose label counts its clicks, and logs what it's asked.
+    /// A realize counts as a click, so the update after it differs.
     struct Accessible {
         log: Rc<RefCell<Vec<String>>>,
         clicks: u32,
+        /// The updates served, which a client's thread can read.
+        updates: Arc<AtomicUsize>,
+    }
+
+    impl Accessible {
+        fn new(log: &Rc<RefCell<Vec<String>>>) -> Self {
+            Self {
+                log: Rc::clone(log),
+                clicks: 0,
+                updates: Arc::new(AtomicUsize::new(0)),
+            }
+        }
     }
 
     impl Accessible {
@@ -2198,6 +2228,7 @@ mod tests {
 
         fn a11y_update(&mut self, _: Surface) -> Option<accesskit::TreeUpdate> {
             self.log.borrow_mut().push("update".into());
+            self.updates.fetch_add(1, Ordering::SeqCst);
             Some(self.tree())
         }
 
@@ -2207,6 +2238,120 @@ mod tests {
                 .push(format!("{:?} {}", request.action, request.target_node.0));
             self.clicks += 1;
         }
+
+        fn a11y_realize(&mut self, request: &Realize, _: &mut WindowCx<'_>) -> Realized {
+            self.clicks += 1;
+            match request {
+                Realize::Row { row, .. } => {
+                    self.log.borrow_mut().push(format!("realize row {row}"));
+                    Realized::Row(*row)
+                }
+                Realize::Named { name, .. } => {
+                    self.log.borrow_mut().push(format!("find {name}"));
+                    Realized::NotFound
+                }
+            }
+        }
+    }
+
+    fn accessible_window(log: &Rc<RefCell<Vec<String>>>) -> (Window, Arc<AtomicUsize>) {
+        let handler = Accessible::new(log);
+        let updates = Arc::clone(&handler.updates);
+        let options = WindowOptions {
+            title: "dpro-win a11y test",
+            size: (200, 100),
+            min_size: (100, 100),
+            compose: Compose::Never,
+        };
+        let window = Window::new(&options, Box::new(handler)).expect("a window");
+        // UiaRootObjectId, as a UI Automation client's first request sends it.
+        // SAFETY: a message sent to this test's live window, on its thread.
+        unsafe { SendMessageW(window.hwnd, WM_GETOBJECT, 0, -25) };
+        (window, updates)
+    }
+
+    /// Dispatches this thread's waiting messages.
+    fn pump_all() {
+        // SAFETY: plain data; all-zero is a valid value.
+        let mut msg: MSG = unsafe { std::mem::zeroed() };
+        // SAFETY: msg is a live local; each message goes to its window.
+        while unsafe { PeekMessageW(&raw mut msg, null_mut(), 0, 0, PM_REMOVE) } != 0 {
+            // SAFETY: msg is the message PeekMessageW just filled.
+            unsafe { DispatchMessageW(&raw const msg) };
+        }
+    }
+
+    fn row_7() -> Realize {
+        Realize::Row {
+            tree: accesskit::TreeId::ROOT,
+            table: accesskit::NodeId(1),
+            row: 7,
+        }
+    }
+
+    /// T2: a client's thread waits while the UI thread builds the row; the update that holds it
+    /// is served before the answer goes back.
+    #[test]
+    fn a_realize_waits_for_the_ui_thread_which_serves_its_update_first() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let (window, updates) = accessible_window(&log);
+        // SAFETY: as above.
+        let requests =
+            unsafe { with_state(window.hwnd, |s| Arc::clone(&s.requests)) }.expect("a live window");
+        let client = std::thread::spawn(move || {
+            let found = requests.realize(&row_7());
+            let missing = requests.realize(&Realize::Named {
+                tree: accesskit::TreeId::ROOT,
+                table: accesskit::NodeId(1),
+                after: Some(7),
+                name: "Zeta".into(),
+            });
+            (found, updates.load(Ordering::SeqCst), missing)
+        });
+        let start = Instant::now();
+        while !client.is_finished() && start.elapsed() < Duration::from_secs(5) {
+            pump_all();
+            std::thread::yield_now();
+        }
+        let (found, served, missing) = client.join().expect("the client thread");
+        assert_eq!(found, Realized::Row(7));
+        assert_eq!(missing, Realized::NotFound);
+        assert!(served >= 1, "the update came after the answer");
+        assert_eq!(
+            *log.borrow(),
+            ["tree", "realize row 7", "update", "find Zeta", "update"]
+        );
+        drop(window);
+        pump_all();
+    }
+
+    /// T2: on the UI thread itself, a realize can't wait for it; a client whose UI thread doesn't
+    /// answer within the timeout gets nothing, and the late message runs nothing.
+    #[test]
+    fn a_realize_the_ui_thread_can_t_answer_is_unavailable() {
+        assert_eq!(Requests::default().realize(&row_7()), Realized::Unavailable);
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let (window, _) = accessible_window(&log);
+        // SAFETY: as above.
+        let requests =
+            unsafe { with_state(window.hwnd, |s| Arc::clone(&s.requests)) }.expect("a live window");
+        assert_eq!(requests.realize(&row_7()), Realized::Unavailable);
+        // This thread doesn't pump while the client waits.
+        let start = Instant::now();
+        let answer = std::thread::spawn(move || requests.realize(&row_7()))
+            .join()
+            .expect("the client thread");
+        let waited = start.elapsed();
+        assert_eq!(answer, Realized::Unavailable);
+        let timeout = Duration::from_millis(u64::from(crate::gui::a11y::REALIZE_TIMEOUT_MS));
+        assert!(
+            waited >= timeout.mul_f32(0.8) && waited < timeout * 4,
+            "waited {waited:?}"
+        );
+        pump_all();
+        assert_eq!(*log.borrow(), ["tree"]);
+        drop(window);
+        pump_all();
     }
 
     /// T2 (Wine's UI Automation): a client's first request gets the handler's tree; a request
@@ -2215,10 +2360,7 @@ mod tests {
     fn ui_automation_gets_the_tree_and_requests_reach_the_ui_thread() {
         use accesskit::{Action, ActionHandler, ActionRequest, NodeId, TreeId};
         let log = Rc::new(RefCell::new(Vec::new()));
-        let handler = Accessible {
-            log: Rc::clone(&log),
-            clicks: 0,
-        };
+        let handler = Accessible::new(&log);
         let options = WindowOptions {
             title: "dpro-win a11y test",
             size: (200, 100),

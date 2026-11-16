@@ -97,3 +97,37 @@ amendment).
    - **New files:** `src/tests/menu.rs`, its tests; `src/tests/providers.rs`, the helpers it
      shares with `src/tests/table.rs` (4).
    - **`src/tests/mod.rs`:** the `mod menu;` and `mod providers;` lines.
+6. **Rows realized on request** (TD-0009 A2.5, slice 5c3). A virtualized table builds only the
+   rows near its view, so the tree holds those alone, but a client can ask for any row: Narrator's
+   Ctrl+Alt+End through Grid's `GetItem`, or a search through ItemContainer. The app can build a
+   row when asked; the adapter asks it.
+   - **New files:**
+     - `src/realize.rs`: `Realize` (a row by index, or the first after one whose name is a
+       given string), `Realized` (the row's index, not found, or unavailable), and the app's
+       `Realizer`. `RealizingHandler` pairs the app's action handler with its realizer; the
+       realizer is called without the handler's lock.
+     - `src/tests/realize.rs`: in-process tests, the app's half played by a realizer that
+       builds the row and pushes the update before it answers.
+   - **`src/adapter.rs`:** `Adapter::with_realizer`: `Adapter::new`, given the app's realizer too.
+   - **`src/context.rs`:** `ActionHandlerNoMut::realize`, unavailable by default, and
+     `Context::realize`.
+   - **`src/table.rs`:** a row by index, the rows built (with their selection) and the rows after
+     one, through a filter that keeps rows a clipping parent hides, as the app built them; and a
+     row's or cell's place in its table.
+   - **`src/node.rs`:**
+     - **Realizing.** A provider looks under the tree's read lock; when the row isn't there it
+       drops the lock, asks `Context::realize`, and looks again under a new one. The app answers
+       on its own thread, having pushed its update, so the second look finds the row.
+     - **Grid's `GetItem`** on a row in range that isn't built asks for it: found, the cell;
+       unavailable or still missing, `UIA_E_ELEMENTNOTAVAILABLE`, as before.
+     - **ItemContainer on a table.** `FindItemByProperty` returns a row, after `pStartAfter`
+       (a row or cell of this table; any other element is `E_INVALIDARG`) or from the first:
+       - property 0: the next row, realized if it isn't built;
+       - `Name` (a string): the app searches its view for the row with that name and realizes it.
+         With no realizer, or one that can't answer, the built rows are searched;
+       - `SelectionItemIsSelected` (a bool): the next selected row among those built (only the
+         app's selection is known, and it's built: dpro-ui builds the current row), or the next
+         unselected one, realized;
+       - any other property, or a value of the wrong type, is `E_INVALIDARG`. No row is NULL with
+         `S_OK`, as UI Automation's documentation asks.
+   - **`src/lib.rs`, `src/tests/mod.rs`:** the `mod realize;` lines and the re-exports.

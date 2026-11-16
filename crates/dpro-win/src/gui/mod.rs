@@ -56,6 +56,7 @@ pub mod text;
 mod window;
 
 pub use accesskit;
+pub use accesskit_windows::{Realize, Realized};
 pub use compose::Compose;
 pub use window::{Window, WindowCx};
 
@@ -282,6 +283,15 @@ pub trait Handler {
     /// handler's to ignore.
     fn a11y_action(&mut self, request: &accesskit::ActionRequest, cx: &mut WindowCx<'_>) {
         let _ = (request, cx);
+    }
+
+    /// A client asked for a table's row that isn't in the tree (TD-0009 A2.5): build it, scrolled
+    /// into view, or search the table's view for a row by name and build the one found. On the UI
+    /// thread, while the client's thread waits; the window serves the tree update this makes
+    /// before the client looks again. [`Realized::Unavailable`] if the handler has no such table.
+    fn a11y_realize(&mut self, request: &Realize, cx: &mut WindowCx<'_>) -> Realized {
+        let _ = (request, cx);
+        Realized::Unavailable
     }
 }
 

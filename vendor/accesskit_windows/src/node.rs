@@ -34,7 +34,8 @@ use crate::{
     text::PlatformRange as PlatformTextRange,
     util::*,
 };
-// dpro: the table and scroll patterns (PATCHES.md, 4).
+// dpro: the table and scroll patterns (PATCHES.md, 4), and rows realized on request (6).
+use crate::realize::{Realize, Realized};
 use crate::table;
 use accesskit::ScrollUnit;
 
@@ -789,6 +790,11 @@ impl NodeWrapper<'_> {
         table::is_table(self.node)
     }
 
+    // dpro: rows realized on request (PATCHES.md, 6).
+    fn is_item_container_pattern_supported(&self) -> bool {
+        table::is_table(self.node)
+    }
+
     fn is_grid_item_pattern_supported(&self) -> bool {
         table::is_cell(self.node)
     }
@@ -955,6 +961,53 @@ fn providers<'a>(
     safe_array_from_com_slice(&providers)
 }
 
+// dpro: rows realized on request (PATCHES.md, 6).
+
+/// What a first look under the tree's lock found.
+enum Look<T> {
+    Found(T),
+    /// The client can't see the row: the app is asked to build it, with the lock released.
+    Realize(Realize),
+}
+
+/// What a client's `FindItemByProperty` looks for among a table's rows.
+enum Wanted {
+    /// The row after the start: property 0, any value.
+    Next,
+    /// A row that is, or isn't, selected.
+    Selected(bool),
+    /// A row with this name, exactly.
+    Name(String),
+}
+
+impl Wanted {
+    /// `E_INVALIDARG` for any other property, or a value of the wrong type.
+    fn of(property_id: UIA_PROPERTY_ID, value: &VARIANT) -> Result<Self> {
+        // SAFETY: a VARIANT's type field is always valid to read.
+        let vt = unsafe { value.Anonymous.Anonymous.vt };
+        match property_id {
+            UIA_PROPERTY_ID(0) => Ok(Self::Next),
+            UIA_NamePropertyId if vt == VT_BSTR => {
+                // SAFETY: the union holds a BSTR, as its type says.
+                let name = unsafe { value.Anonymous.Anonymous.Anonymous.bstrVal.to_string() };
+                Ok(Self::Name(name))
+            }
+            UIA_SelectionItemIsSelectedPropertyId if vt == VT_BOOL => {
+                // SAFETY: the union holds a VARIANT_BOOL, as its type says.
+                let selected = unsafe { value.Anonymous.Anonymous.Anonymous.boolVal.as_bool() };
+                Ok(Self::Selected(selected))
+            }
+            _ => Err(invalid_arg()),
+        }
+    }
+}
+
+fn provider(context: &Arc<Context>, node: &NodeRef) -> IRawElementProviderSimple {
+    context
+        .get_or_create_platform_node(node.id())
+        .into_interface()
+}
+
 fn enqueue_property_change(
     queue: &mut Vec<QueuedEvent>,
     element: &IRawElementProviderSimple,
@@ -991,7 +1044,9 @@ fn enqueue_property_change(
     IGridItemProvider,
     ITableProvider,
     ITableItemProvider,
-    IScrollProvider
+    IScrollProvider,
+    // dpro: rows realized on request (PATCHES.md, 6).
+    IItemContainerProvider
 )]
 pub(crate) struct PlatformNode {
     pub(crate) context: Weak<Context>,
@@ -1330,6 +1385,154 @@ impl PlatformNode {
             return Err(invalid_operation());
         }
         self.set_selected(false)
+    }
+
+    // dpro: a virtualized table's rows, realized on request (PATCHES.md, 6).
+
+    /// Runs `look` on this node under the tree's lock. If it needs a row the client can't see,
+    /// asks the app with the lock released (the app takes it to push its update), then runs
+    /// `again` with the app's answer.
+    fn realize_then<T>(
+        &self,
+        look: impl for<'a> FnOnce(NodeRef<'a>, TreeId, NodeId, &Arc<Context>) -> Result<Look<T>>,
+        again: impl for<'a> FnOnce(NodeRef<'a>, Realized, &Arc<Context>) -> Result<T>,
+    ) -> Result<T> {
+        let context = self.upgrade_context()?;
+        let request = {
+            let tree = context.read_tree();
+            let (node, local_id, tree_id) = self.node_with_location(&tree)?;
+            match look(node, tree_id, local_id, &context)? {
+                Look::Found(found) => return Ok(found),
+                Look::Realize(request) => request,
+            }
+        };
+        let realized = context.realize(&request);
+        let tree = context.read_tree();
+        let node = self.node(&tree)?;
+        again(node, realized, &context)
+    }
+
+    /// Grid's `GetItem`: the cell, its row realized if the client can't see it.
+    fn grid_item(&self, row: i32, column: i32) -> Result<IRawElementProviderSimple> {
+        let (Ok(row), Ok(column)) = (usize::try_from(row), usize::try_from(column)) else {
+            return Err(invalid_arg());
+        };
+        self.realize_then(
+            |node, tree, table, context| {
+                let data = node.data();
+                if !data.row_count().is_some_and(|n| row < n)
+                    || !data.column_count().is_some_and(|n| column < n)
+                {
+                    return Err(invalid_arg());
+                }
+                Ok(match table::cell_at(&node, row, column) {
+                    Some(cell) => Look::Found(provider(context, &cell)),
+                    None => Look::Realize(Realize::Row { tree, table, row }),
+                })
+            },
+            // The table may have changed meanwhile: only the cell itself will do.
+            |node, realized, context| match realized {
+                Realized::Row(_) => table::cell_at(&node, row, column)
+                    .map(|cell| provider(context, &cell))
+                    .ok_or_else(element_not_available),
+                Realized::NotFound | Realized::Unavailable => Err(element_not_available()),
+            },
+        )
+    }
+
+    /// The row of `start`, an element of this table (one of its rows, or a cell in one);
+    /// `None` without one. `E_INVALIDARG` for another provider's element, or another table's.
+    fn start_row(&self, start: Option<&IRawElementProviderSimple>) -> Result<Option<usize>> {
+        let Some(start) = start else {
+            return Ok(None);
+        };
+        let start = start
+            .cast_object_ref::<PlatformNode>()
+            .map_err(|_| invalid_arg())?;
+        if !Weak::ptr_eq(&start.context, &self.context) {
+            return Err(invalid_arg());
+        }
+        self.with_tree_and_context(|tree, _| {
+            let table = self.node(tree)?;
+            let (of, at) = table::row_place(&start.node(tree)?).ok_or_else(invalid_arg)?;
+            if of.id() == table.id() {
+                Ok(Some(at))
+            } else {
+                Err(invalid_arg())
+            }
+        })
+    }
+
+    /// ItemContainer's `FindItemByProperty` on a table: its first row past `start` that has
+    /// the property's value, in the view's order, realized if the client can't see it. `None`
+    /// if no row has it.
+    fn find_row(
+        &self,
+        start: Option<&IRawElementProviderSimple>,
+        property_id: UIA_PROPERTY_ID,
+        value: &VARIANT,
+    ) -> Result<Option<IRawElementProviderSimple>> {
+        let wanted = Wanted::of(property_id, value)?;
+        let after = self.start_row(start)?;
+        let next = after.map_or(0, |at| at + 1);
+        self.realize_then(
+            |node, tree, table, context| {
+                let row = match &wanted {
+                    Wanted::Next => next,
+                    // The app builds its selected row whether in view or not, so the built rows
+                    // say where it is.
+                    Wanted::Selected(true) => {
+                        let first = table::built_rows(&node)
+                            .into_iter()
+                            .filter(|&(at, selected)| selected && at >= next)
+                            .map(|(at, _)| at)
+                            .min();
+                        let Some(at) = first else {
+                            return Ok(Look::Found(None));
+                        };
+                        at
+                    }
+                    Wanted::Selected(false) => {
+                        let selected: Vec<usize> = table::built_rows(&node)
+                            .into_iter()
+                            .filter_map(|(at, selected)| selected.then_some(at))
+                            .collect();
+                        (next..)
+                            .find(|at| !selected.contains(at))
+                            .unwrap_or(usize::MAX)
+                    }
+                    // Only the app can search rows it hasn't built.
+                    Wanted::Name(name) => {
+                        return Ok(Look::Realize(Realize::Named {
+                            tree,
+                            table,
+                            after,
+                            name: name.clone(),
+                        }));
+                    }
+                };
+                if !node.data().row_count().is_some_and(|n| row < n) {
+                    return Ok(Look::Found(None));
+                }
+                Ok(match table::row_at(&node, row) {
+                    Some(found) => Look::Found(Some(provider(context, &found))),
+                    None => Look::Realize(Realize::Row { tree, table, row }),
+                })
+            },
+            |node, realized, context| match (realized, &wanted) {
+                (Realized::Row(at), _) => table::row_at(&node, at)
+                    .map(|found| Some(provider(context, &found)))
+                    .ok_or_else(element_not_available),
+                (Realized::NotFound, _) => Ok(None),
+                // Without the app, a name is searched for among the rows the client sees.
+                (Realized::Unavailable, Wanted::Name(name)) => Ok(table::rows_after(&node, after)
+                    .into_iter()
+                    .filter(|(_, row)| row.label().as_deref() == Some(name.as_str()))
+                    .min_by_key(|&(at, _)| at)
+                    .map(|(_, found)| provider(context, &found))),
+                (Realized::Unavailable, _) => Err(element_not_available()),
+            },
+        )
     }
 
     fn is_root(&self, state: &TreeState) -> bool {
@@ -1876,22 +2079,8 @@ patterns! {
         (UIA_GridColumnCountPropertyId, ColumnCount, column_count, i32)
     ), (
         fn GetItem(&self, row: i32, column: i32) -> Result<IRawElementProviderSimple> {
-            self.resolve_with_context(|node, context| {
-                let (Ok(row), Ok(column)) = (usize::try_from(row), usize::try_from(column)) else {
-                    return Err(invalid_arg());
-                };
-                let data = node.data();
-                if !data.row_count().is_some_and(|n| row < n)
-                    || !data.column_count().is_some_and(|n| column < n)
-                {
-                    return Err(invalid_arg());
-                }
-                // A row the app hasn't built isn't in the tree.
-                match table::cell_at(&node, row, column) {
-                    Some(cell) => Ok(context.get_or_create_platform_node(cell.id()).into_interface()),
-                    None => Err(element_not_available()),
-                }
-            })
+            // dpro: a row the app hasn't built is realized (PATCHES.md, 6).
+            self.grid_item(row, column)
         }
     )),
     (UIA_TablePatternId, ITableProvider, ITableProvider_Impl, is_table_pattern_supported, (), (
@@ -1958,6 +2147,19 @@ patterns! {
 
         fn SetScrollPercent(&self, horizontal: f64, vertical: f64) -> Result<()> {
             self.scroll_to_percent(horizontal, vertical)
+        }
+    )),
+    // dpro: a table's rows found by name, by selection or in order, realized (PATCHES.md, 6).
+    (UIA_ItemContainerPatternId, IItemContainerProvider, IItemContainerProvider_Impl, is_item_container_pattern_supported, (), (
+        fn FindItemByProperty(
+            &self,
+            start_after: Ref<IRawElementProviderSimple>,
+            property_id: UIA_PROPERTY_ID,
+            value: &VARIANT,
+        ) -> Result<IRawElementProviderSimple> {
+            // No row found is a null element and S_OK, which `Error::empty` makes.
+            self.find_row(start_after.ok().ok(), property_id, value)?
+                .ok_or_else(Error::empty)
         }
     ))
 }

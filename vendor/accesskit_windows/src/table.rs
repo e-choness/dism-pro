@@ -1,4 +1,4 @@
-// dpro: DISM Pro's addition to the vendored adapter (PATCHES.md, 4), under the crate's
+// dpro: DISM Pro's addition to the vendored adapter (PATCHES.md, 4 and 6), under the crate's
 // licences: the MIT license or the Apache License, Version 2.0, at your option.
 
 //! The parts of a table that UI Automation's Grid, Table, GridItem and TableItem patterns read,
@@ -17,7 +17,7 @@
 //! exist only for the rows the app has built.
 
 use accesskit::Role;
-use accesskit_consumer::NodeRef;
+use accesskit_consumer::{FilterResult, NodeRef};
 
 use crate::filters::filter;
 
@@ -53,13 +53,22 @@ pub(crate) fn is_table(node: &NodeRef) -> bool {
 /// Visits `node`'s filtered descendants in order, skipping nested tables. False if `f` stopped
 /// the walk.
 pub(crate) fn walk<'a>(node: &NodeRef<'a>, f: &mut impl FnMut(NodeRef<'a>) -> Walk) -> bool {
-    for child in node.filtered_children(filter) {
+    walk_in(node, &filter, f)
+}
+
+/// [`walk`] through the nodes `keep` keeps.
+fn walk_in<'a>(
+    node: &NodeRef<'a>,
+    keep: &impl Fn(&NodeRef) -> FilterResult,
+    f: &mut impl FnMut(NodeRef<'a>) -> Walk,
+) -> bool {
+    for child in node.filtered_children(keep) {
         if is_table_role(child.role()) {
             continue;
         }
         match f(child) {
             Walk::Into => {
-                if !walk(&child, f) {
+                if !walk_in(&child, keep, f) {
                     return false;
                 }
             }
@@ -68,6 +77,83 @@ pub(crate) fn walk<'a>(node: &NodeRef<'a>, f: &mut impl FnMut(NodeRef<'a>) -> Wa
         }
     }
     true
+}
+
+// dpro: rows realized on request (PATCHES.md, 6).
+
+/// Every node the app built, in view or not: the client's filter without its clipping, which
+/// hides rows scrolled out of a view (all but the nearest on each side).
+fn built(node: &NodeRef) -> FilterResult {
+    if node.is_focused() {
+        FilterResult::Include
+    } else if node.is_hidden() {
+        FilterResult::ExcludeSubtree
+    } else if matches!(node.role(), Role::GenericContainer | Role::TextRun) {
+        FilterResult::ExcludeNode
+    } else {
+        FilterResult::Include
+    }
+}
+
+/// `table`'s row at index `row`, if the client sees it: built, and in view or next to it.
+pub(crate) fn row_at<'a>(table: &NodeRef<'a>, row: usize) -> Option<NodeRef<'a>> {
+    let mut found = None;
+    walk(table, &mut |node| match node.role() {
+        Role::Row => {
+            if node.data().row_index() == Some(row) {
+                found = Some(node);
+                return Walk::Stop;
+            }
+            Walk::Over
+        }
+        _ => Walk::Into,
+    });
+    found
+}
+
+/// `table`'s built rows, in view or not, as (index, selected), in tree order.
+pub(crate) fn built_rows(table: &NodeRef) -> Vec<(usize, bool)> {
+    let mut rows = Vec::new();
+    walk_in(table, &built, &mut |node| match node.role() {
+        Role::Row => {
+            if let Some(at) = node.data().row_index() {
+                rows.push((at, node.is_selected() == Some(true)));
+            }
+            Walk::Over
+        }
+        _ => Walk::Into,
+    });
+    rows
+}
+
+/// The rows the client sees in `table` with index past `after` (all if `None`), as (index, row),
+/// in tree order.
+pub(crate) fn rows_after<'a>(
+    table: &NodeRef<'a>,
+    after: Option<usize>,
+) -> Vec<(usize, NodeRef<'a>)> {
+    let mut rows = Vec::new();
+    walk(table, &mut |node| match node.role() {
+        Role::Row => {
+            match node.data().row_index() {
+                Some(at) if after.is_none_or(|a| at > a) => rows.push((at, node)),
+                _ => {}
+            }
+            Walk::Over
+        }
+        _ => Walk::Into,
+    });
+    rows
+}
+
+/// The table and row index of `node`, a table's row or one of its cells.
+pub(crate) fn row_place<'a>(node: &NodeRef<'a>) -> Option<(NodeRef<'a>, usize)> {
+    let row = if node.role() == Role::Row {
+        *node
+    } else {
+        row_of(node)?
+    };
+    Some((containing_table(&row)?, row.data().row_index()?))
 }
 
 /// The table `node` is part of: its nearest filtered ancestor with a table role, if that one is
