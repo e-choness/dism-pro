@@ -45,7 +45,8 @@ use gungraun::{
     Callgrind, LibraryBenchmarkConfig, library_benchmark, library_benchmark_group, main,
 };
 use shell::{
-    CTRL, FRAME_MS, Msg, PATH, Run, START, Shell, Step, key, long_text, popup_key, popup_view,
+    CTRL, FAR_NAME, FRAME_MS, Msg, PATH, Run, START, Shell, Step, key, long_text, popup_key,
+    popup_view,
 };
 
 /// `run` after one full session, and the session.
@@ -238,6 +239,7 @@ fn session((mut run, steps): (Run, Vec<Step>)) -> (Run, Vec<Step>) {
 #[bench::check_space(args = (key(KeyCode::Space, true, Mods::default())), setup = row_with)]
 #[bench::header_sort(args = (Step::Update(Msg::Table(TableEvent::Sort(ColumnId(0))))), setup = warm_with)]
 #[bench::realize(args = (Step::Realize(700)), setup = accessible_with)]
+#[bench::find_row(args = (Step::Find(FAR_NAME)), setup = accessible_with)]
 #[bench::column_drag(args = (30.0), setup = divider_with)]
 #[bench::column_fit(args = (Step::Update(Msg::Table(TableEvent::Fit(Some(ColumnId(1)))))), setup = warm_with)]
 #[bench::column_menu(args = (Step::Input(Input::ContextMenu(None))), setup = header_with)]

@@ -1,4 +1,4 @@
-// dpro: DISM Pro's helpers for its in-process provider tests (PATCHES.md, 4 and 5), under the
+// dpro: DISM Pro's helpers for its in-process provider tests (PATCHES.md, 4, 5 and 6), under the
 // crate's licences: the MIT license or the Apache License, Version 2.0, at your option.
 
 //! Providers called the way a client calls them, in process: no window and no UI Automation core,
@@ -23,7 +23,10 @@ use windows::{
     core::*,
 };
 
-use crate::context::{ActionHandlerWrapper, Context};
+use crate::{
+    context::{ActionHandlerWrapper, Context},
+    realize::{Realizer, RealizingHandler},
+};
 
 /// Every request the providers send.
 #[derive(Clone, Default)]
@@ -52,6 +55,20 @@ pub(super) fn context(requests: &Requests, tree: TreeUpdate) -> Arc<Context> {
         HWND::default().into(),
         Tree::new(tree, true),
         Arc::new(ActionHandlerWrapper::new(requests.clone())),
+        false,
+    )
+}
+
+/// `tree`'s context, its rows realized by `realizer` (PATCHES.md, 6).
+pub(super) fn context_with(
+    requests: &Requests,
+    tree: TreeUpdate,
+    realizer: impl Realizer + 'static,
+) -> Arc<Context> {
+    Context::new(
+        HWND::default().into(),
+        Tree::new(tree, true),
+        Arc::new(RealizingHandler::new(requests.clone(), realizer)),
         false,
     )
 }

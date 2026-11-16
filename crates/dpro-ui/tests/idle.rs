@@ -33,7 +33,7 @@ use dpro_ui::{
         popup::{TIP_DELAY_MS, TIP_SHOWS_FOR},
     },
 };
-use shell::{FRAME_MS, Msg, Run, Shell, Step, key, popup_view, view};
+use shell::{FAR_NAME, FRAME_MS, Msg, Run, Shell, Step, key, popup_view, view};
 
 /// Frames until the animations stop: the first tick starts them, and they end once a whole
 /// duration has passed.
@@ -270,6 +270,7 @@ fn the_table_settles_after_each_change() {
             "a sort",
         ),
         (Step::Realize(700), "a far row realized"),
+        (Step::Find(FAR_NAME), "a far row found by name"),
         (key(KeyCode::End, true, plain), "End"),
     ] {
         run.step(step);

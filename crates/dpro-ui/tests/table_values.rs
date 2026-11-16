@@ -184,6 +184,23 @@ fn a_frame_that_changes_nothing_formats_nothing() {
     assert_eq!(run.calls.get(), built);
 }
 
+/// A client's search by name (A2.5, slice 5c3) reads every row it passes, but formats only what
+/// realizing the row it finds builds: no other column's values, so nothing for the cache.
+#[test]
+fn a_search_by_name_formats_no_more_than_realizing_the_row_it_finds() {
+    let mut realized = Run::new(10_000);
+    let table = realized.ui.find(&[TABLE]).expect("the table");
+    assert!(realized.ui.realize(table, 9_000));
+    realized.frame();
+    let mut searched = Run::new(10_000);
+    let table = searched.ui.find(&[TABLE]).expect("the table");
+    assert!(searched.ui.find_row(table, None, "Program 9000"));
+    searched.frame();
+    assert_eq!(searched.ui.take_found(table), Some(9_000));
+    assert_eq!(searched.calls.get(), realized.calls.get());
+    assert_eq!(searched.text(9_000, SIZE), realized.text(9_000, SIZE));
+}
+
 #[test]
 fn rows_scrolled_back_into_view_are_not_formatted_again() {
     let mut run = Run::new(1_000);

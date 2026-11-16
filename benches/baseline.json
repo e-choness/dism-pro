@@ -36,6 +36,7 @@
     "crates/dpro-ui/benches/ir.rs interact::event.column_fit": 296709,
     "crates/dpro-ui/benches/ir.rs interact::event.column_menu": 144054,
     "crates/dpro-ui/benches/ir.rs interact::event.context_menu": 157112,
+    "crates/dpro-ui/benches/ir.rs interact::event.find_row": 1283536,
     "crates/dpro-ui/benches/ir.rs interact::event.formats_change": 149875,
     "crates/dpro-ui/benches/ir.rs interact::event.header_sort": 113951,
     "crates/dpro-ui/benches/ir.rs interact::event.hold_tick": 139312,

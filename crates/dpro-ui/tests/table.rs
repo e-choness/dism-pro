@@ -1150,6 +1150,62 @@ fn realize_builds_and_reveals_a_far_row() {
     assert!(!run.ui.realize(run.body(), 0), "not a table");
 }
 
+/// T1 (A2.5, slice 5c3): a client's search by name goes through the view's rows at the next
+/// build, which realizes the row it finds.
+#[test]
+fn find_row_searches_the_view_by_name_and_realizes_the_row_found() {
+    let mut run = Run::new(100_000);
+    assert!(run.ui.find_row(run.table(), None, "Program 99998"));
+    run.frame();
+    assert_eq!(run.ui.take_found(run.table()), Some(99_998));
+    let row = run.rect(run.row(99_998).expect("built"));
+    assert_eq!(row.bottom(), run.rect(run.body()).bottom());
+    assert_eq!(run.ui.take_found(run.table()), None, "taken once");
+    // Past the row; a column that doesn't name the rows; a name in another case.
+    let offset = run.offset();
+    for (after, name) in [
+        (Some(99_998), "Program 99998"),
+        (None, "3.3"),
+        (None, "program 00001"),
+    ] {
+        assert!(run.ui.find_row(run.table(), after, name));
+        run.frame();
+        assert_eq!(run.ui.take_found(run.table()), None, "{name}");
+    }
+    assert_eq!(run.offset(), offset, "nothing found, nothing scrolled");
+    assert!(
+        !run.ui.find_row(run.body(), None, "Program 00001"),
+        "not a table"
+    );
+}
+
+#[test]
+fn find_row_counts_in_the_view_s_order() {
+    let mut run = Run::new(1_000);
+    run.page.sort(SIZE);
+    run.frame();
+    let at = run.page.model.view().iter().position(|&r| r == 3);
+    let at = at.and_then(|at| u32::try_from(at).ok());
+    assert!(run.ui.find_row(run.table(), None, "Program 00003"));
+    run.frame();
+    assert_eq!(run.ui.take_found(run.table()), at);
+    assert!(run.row(3).is_some(), "realized");
+    // After it, the next one named so: none.
+    assert!(run.ui.find_row(run.table(), at, "Program 00003"));
+    run.frame();
+    assert_eq!(run.ui.take_found(run.table()), None);
+}
+
+#[test]
+fn a_search_no_build_ran_is_dropped() {
+    let mut run = Run::new(1_000);
+    assert!(run.ui.find_row(run.table(), None, "Program 00900"));
+    assert_eq!(run.ui.take_found(run.table()), None);
+    run.frame();
+    assert_eq!(run.offset(), 0.0, "dropped, so nothing revealed");
+    assert!(run.row(900).is_none());
+}
+
 // ---- states ----------------------------------------------------------------------------------
 
 #[test]

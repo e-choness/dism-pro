@@ -25,16 +25,16 @@ use super::providers::{
 };
 use crate::context::Context;
 
-const WINDOW: NodeId = NodeId(0);
-const GRID: NodeId = NodeId(1);
-const HEADER: NodeId = NodeId(2);
-const BODY: NodeId = NodeId(3);
-const CHECK_HEADER: NodeId = NodeId(10);
-const NAME_HEADER: NodeId = NodeId(11);
-const SIZE_HEADER: NodeId = NodeId(12);
-const ROW_0: NodeId = NodeId(20);
-const ROW_1: NodeId = NodeId(21);
-const CELLS: [[NodeId; 3]; 2] = [
+pub(super) const WINDOW: NodeId = NodeId(0);
+pub(super) const GRID: NodeId = NodeId(1);
+pub(super) const HEADER: NodeId = NodeId(2);
+pub(super) const BODY: NodeId = NodeId(3);
+pub(super) const CHECK_HEADER: NodeId = NodeId(10);
+pub(super) const NAME_HEADER: NodeId = NodeId(11);
+pub(super) const SIZE_HEADER: NodeId = NodeId(12);
+pub(super) const ROW_0: NodeId = NodeId(20);
+pub(super) const ROW_1: NodeId = NodeId(21);
+pub(super) const CELLS: [[NodeId; 3]; 2] = [
     [NodeId(30), NodeId(31), NodeId(32)],
     [NodeId(33), NodeId(34), NodeId(35)],
 ];
@@ -47,7 +47,7 @@ fn header(label: &str, column: usize) -> Node {
     node
 }
 
-fn row(at: usize, label: &str, selected: bool, cells: [NodeId; 3]) -> Node {
+pub(super) fn row(at: usize, label: &str, selected: bool, cells: [NodeId; 3]) -> Node {
     let mut node = Node::new(Role::Row);
     node.set_label(label);
     node.set_row_index(at);
@@ -58,7 +58,7 @@ fn row(at: usize, label: &str, selected: bool, cells: [NodeId; 3]) -> Node {
     node
 }
 
-fn cell(role: Role, text: &str, row: Option<usize>, column: usize) -> Node {
+pub(super) fn cell(role: Role, text: &str, row: Option<usize>, column: usize) -> Node {
     let mut node = Node::new(role);
     if !text.is_empty() {
         node.set_label(text);
@@ -70,7 +70,7 @@ fn cell(role: Role, text: &str, row: Option<usize>, column: usize) -> Node {
     node
 }
 
-fn tree() -> TreeUpdate {
+pub(super) fn tree() -> TreeUpdate {
     let mut window = Node::new(Role::Window);
     window.set_children(vec![GRID]);
     let mut grid = Node::new(Role::Grid);

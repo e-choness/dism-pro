@@ -36,6 +36,9 @@ const CELLS: usize = 8;
 pub(crate) const DRAWER_ROWS: u64 = 20;
 const CATEGORIES: u8 = 4;
 const DATA: usize = 1_000;
+/// A program far down the first tab's view, its 748th row of 750: what a client's search by name
+/// walks to (TD-0009 A2.5, slice 5c3).
+pub(crate) const FAR_NAME: &str = "Contoso Toolbox 996";
 /// The text typed into the filter: 10 keystrokes.
 const TYPED: &str = "contoso up";
 const PAGES: [&str; RAIL as usize] = [
@@ -232,9 +235,15 @@ pub(crate) struct Shell {
 
 impl Shell {
     pub(crate) fn new() -> Self {
+        Self::with_rows(DATA)
+    }
+
+    /// The page with `rows` data rows, named and valued as [`new`](Self::new)'s 1,000: the probe's
+    /// `--rows 100000` makes the table G1's "Data table" walks (TD-0009 A2.9).
+    pub(crate) fn with_rows(rows: usize) -> Self {
         const VENDORS: [&str; 4] = ["Contoso", "Fabrikam", "Northwind", "Tailspin"];
         const PRODUCTS: [&str; 4] = ["Updater Pro", "Toolbox", "Media Suite", "Backup Agent"];
-        let cells = (0..DATA)
+        let cells = (0..rows)
             .map(|i| {
                 [
                     format!("{} {} {i}", VENDORS[i % 4], PRODUCTS[(i / 4) % 4]),
@@ -249,17 +258,17 @@ impl Shell {
             })
             .collect();
         // About the megabytes the text says, and a few more bytes, so every digit varies.
-        let sizes = (0..DATA as u64)
+        let sizes = (0..rows as u64)
             .map(|i| Bytes(((i * 37) % 4096) * 1_048_576 + (i * 7_919) % 1_048_576))
             .collect();
-        let days = (0..DATA as u64)
+        let days = (0..rows as u64)
             .map(|i| UnixMillis(FIRST_DAY + (i % 336) * DAY_MS))
             .collect();
         let mut s = Self {
             page: 0,
             selected: None,
             current: None,
-            checked: vec![false; DATA],
+            checked: vec![false; rows],
             checked_count: 0,
             sorted: None,
             columns: ColumnLayout::new(&COLUMNS.map(|c| (c.id, false))),
@@ -279,7 +288,7 @@ impl Shell {
             cells,
             sizes,
             days,
-            visible: Vec::with_capacity(DATA),
+            visible: Vec::with_capacity(rows),
         };
         s.refilter();
         s
@@ -435,9 +444,10 @@ impl Shell {
                 }
             }
             TableEvent::CheckAll => {
-                let on = self.checked_count < DATA;
+                let rows = self.checked.len();
+                let on = self.checked_count < rows;
                 self.checked.fill(on);
-                self.checked_count = if on { DATA } else { 0 };
+                self.checked_count = if on { rows } else { 0 };
             }
             TableEvent::Activate(at) => {
                 self.select(row(at));
@@ -496,7 +506,7 @@ impl Shell {
     fn all_checked(&self) -> Tri {
         match self.checked_count {
             0 => Tri::Off,
-            DATA => Tri::On,
+            n if n == self.checked.len() => Tri::On,
             _ => Tri::Mixed,
         }
     }
@@ -1004,6 +1014,9 @@ pub(crate) enum Step {
     /// The table's row at this place built and scrolled into view, as UI Automation's realizer
     /// asks for it (TD-0009 A2.5).
     Realize(u32),
+    /// The table's first row with this name, searched for through the view and realized, as UI
+    /// Automation's `FindItemByProperty` asks for it (A2.5, slice 5c3).
+    Find(&'static str),
     /// The user's formats changed (Settings › Time & language › Region): sizes' decimal
     /// separator is now this (A2.5, slice 5b3).
     Decimal(&'static str),
@@ -1153,6 +1166,11 @@ impl Run {
             Step::Realize(at) => {
                 if let Some(table) = self.ui.find(&Self::TABLE) {
                     self.ui.realize(table, at);
+                }
+            }
+            Step::Find(name) => {
+                if let Some(table) = self.ui.find(&Self::TABLE) {
+                    self.ui.find_row(table, None, name);
                 }
             }
         }
@@ -1498,7 +1516,7 @@ impl Run {
             .last();
         let key = last.and_then(|id| self.ui.info(id)).map(|n| n.key);
         let row = (0u32..)
-            .take(DATA)
+            .take(self.shell.cells.len())
             .find(|&r| Some(Key::index(u64::from(r))) == key);
         if let Some(r) = row {
             self.step(Step::Update(Msg::Row(r)));

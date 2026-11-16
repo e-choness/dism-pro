@@ -15,9 +15,9 @@ use std::collections::{HashMap, HashSet};
 
 use dpro_ui::{
     Input, KeyCode, KeyEvent, Mods, Point,
-    accesskit::{Node, NodeId, TreeUpdate},
+    accesskit::{Node, NodeId, Role, TreeUpdate},
 };
-use shell::{Msg, Run, Shell, Step};
+use shell::{FAR_NAME, Msg, Run, Shell, Step};
 
 /// A client's copy of the tree.
 struct Mirror {
@@ -126,6 +126,9 @@ fn incremental_updates_keep_a_copy_equal_to_the_whole_tree() {
         // Windows' text size: every node's bounds move, nothing else changes.
         Step::TextScale(2.25),
         Step::TextScale(1.0),
+        // A client's row realized, then one it searched for by name (A2.5).
+        Step::Realize(700),
+        Step::Find(FAR_NAME),
     ]);
     // The field's value and focus, with the drawer opening between edits, then cleared by the
     // app, not the field.
@@ -152,4 +155,26 @@ fn incremental_updates_keep_a_copy_equal_to_the_whole_tree() {
     // An event that changes nothing a client sees sends nothing.
     run.step(Step::Input(Input::PointerMove(Point { x: -1.0, y: -1.0 })));
     assert!(run.a11y_update().is_none());
+}
+
+/// The `event.find_row` bench's search, after the session, walks to its row far down the view
+/// and realizes it: what it measures is a search that finds (A2.5, slice 5c3).
+#[test]
+fn the_search_by_name_finds_a_far_row_and_sends_it() {
+    let mut run = Run::accessible(Shell::new());
+    for s in run.session() {
+        run.step(s);
+    }
+    run.take_a11y = false;
+    run.step(Step::Find(FAR_NAME));
+    let table = run.ui.find(&Run::TABLE).expect("the table");
+    assert_eq!(run.ui.take_found(table), Some(747));
+    let update = run.a11y_update().expect("an update");
+    assert!(
+        update
+            .nodes
+            .iter()
+            .any(|(_, n)| n.role() == Role::Row && n.label() == Some(FAR_NAME)),
+        "the row found is sent, by its name"
+    );
 }

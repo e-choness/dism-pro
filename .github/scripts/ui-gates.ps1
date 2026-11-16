@@ -88,6 +88,19 @@ raw-API baseline, measured in this job, so it holds on whatever machine the runn
       changed with SetLocaleInfoW and WM_SETTINGCHANGE "intl" broadcast, as Settings does; the
       cells follow, and follow back when the old values are put back (always, in a finally). Each
       is read back through UIA within 2 s; the time is advisory (U3: 50 ms).
+  Data table (TD-0009 A2.5, A2.9, slice 5c3): the shell with --rows 100000, 75,000 on its first
+      tab, through UIA's patterns on the DataGrid. GridPattern counts every row while at most 100
+      are built. GetItem on the last row's Publisher cell, which isn't built, returns it with its
+      GridItem row and column, and the view has scrolled to it; its TableItem gives the Publisher
+      HeaderItem and the row's name cell. ItemContainer's FindItemByProperty finds a row by Name
+      halfway down (the shell searches its view and builds the row), in view; after it, none other
+      has that name. ScrollPattern's SetScrollPercent(-1, 100) shows the last row, and a wheel
+      notch (SendInput) changes the first row built. Toggle on a check cell checks the row, and the
+      check column's header box goes Mixed (the probe's toolbar has no count); Toggle again clears
+      both. The focused row's SelectionItem is selected. TablePattern's column headers are the
+      header's HeaderItems; Invoke on Name's twice sorts by it and then reverses, so GetItem(0, 1)
+      is the last row's name. Each is read back through UIA within 2 s; GetItem's and the search's
+      round trips are advisory (U3: 50 ms).
 
 The probe target is dpro-ui's `shell` example until roadmap 3.2 gives dismpro.exe its shell.
 Results go to annotations and the job summary; the raw reports and screenshots go to -Out, which
@@ -1711,6 +1724,131 @@ try {
 foreach ($k in $checks.Keys) { $lines += '{0,-50} {1}' -f $k, (Format-Verdict $checks[$k]) }
 $ok = $checks.Count -gt 0 -and -not ($checks.Values -contains $false)
 Publish 'Value cells' $lines $ok
+if (-not $ok) { $failed++ }
+
+
+# Data table (TD-0009 A2.5, A2.9, slice 5c3) ---------------------------------------------------------
+# The shell with 100,000 data rows: 75,000 on its first tab, which leaves every fourth (a Store app)
+# to the other. Data row i is "{vendor i % 4} {product (i / 4) % 4} {i}".
+$dataRows = 75000
+# Data row 99,998, the view's last.
+$lastName = 'Northwind Backup Agent 99998'
+# Data row 50,000, the view's 37,501st: far from both ends, so never built before it's found.
+$midName = 'Contoso Updater Pro 50000'
+# A pattern's call that throws (an element gone, a row UIA couldn't realize) reads as $null.
+function Get-Or-Null([scriptblock] $Call) { try { & $Call } catch { $null } }
+function Get-Toggle($Element) { (Get-Pattern $Element ([Windows.Automation.TogglePattern]::Pattern)).Current.ToggleState }
+
+$lines = @("Data table: the shell with 100,000 data rows at $Size, $dataRows on its first tab, through UIA's patterns (the checks are gates, each read back within 2 s; the times are advisory, U3: 50 ms)")
+$checks = [ordered]@{}
+$hwnd = [IntPtr]::Zero
+$p = Start-Process -FilePath $exe.shell -ArgumentList @('--size', $Size, '--rows', '100000') -PassThru
+$null = $p.Handle
+try {
+    $shown = Wait-Until {
+        $script:hwnd = [UiaGateWin32]::FindWindowW('dismpro.window', 'DISM Pro shell probe')
+        $script:hwnd -ne [IntPtr]::Zero -and [UiaGateWin32]::IsWindowVisible($script:hwnd)
+    } 30000
+    if (-not $shown) { throw "the shell showed no window in 30 s (exited: $($p.HasExited))" }
+    $root = $ae::FromHandle($hwnd)
+    $table = $null
+    $found = Wait-Until { $script:table = Find-First $root $types::DataGrid 'Programs'; $null -ne $script:table } 10000
+    if (-not $found) { throw 'no DataGrid "Programs" in 10 s' }
+    $view = $table.Current.BoundingRectangle
+    $grid = Get-Pattern $table ([Windows.Automation.GridPattern]::Pattern)
+    $built = @(Get-Rows $root).Count
+    $lines += 'grid: {0:N0} rows, {1} columns; {2} rows built' -f $grid.Current.RowCount, $grid.Current.ColumnCount, $built
+    $checks['GridPattern counts every row'] = $grid.Current.RowCount -eq $dataRows
+    $checks['far fewer rows are built (<= 100)'] = $built -gt 0 -and $built -le 100
+
+    # The last row's Publisher cell: not built, so the adapter asks the shell to build it.
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    $cell = $grid.GetItem($dataRows - 1, 2)
+    $lines += '{0,-12} {1}' -f 'GetItem', (Format-Ms $sw.Elapsed.TotalMilliseconds 50)
+    $at = Get-Pattern $cell ([Windows.Automation.GridItemPattern]::Pattern)
+    $checks['GetItem(last, 2) gives that cell'] = $at.Current.Row -eq ($dataRows - 1) -and $at.Current.Column -eq 2
+    $checks['the view scrolls to it'] = Wait-Until { Test-Inside $cell.Current.BoundingRectangle $view } 2000
+    $heads = Get-Pattern $cell ([Windows.Automation.TableItemPattern]::Pattern)
+    $column = @($heads.Current.GetColumnHeaderItems() | ForEach-Object { $_.Current.Name })
+    $row = @($heads.Current.GetRowHeaderItems() | ForEach-Object { $_.Current.Name })
+    $lines += "  its headers: column '$($column -join ', ')', row '$($row -join ', ')'"
+    $checks['TableItem gives its column''s header and its row''s'] = ($column -join '|') -eq 'Publisher' -and ($row -join '|') -eq $lastName
+
+    # A row far up, by name: the shell searches its view and builds the row it finds.
+    $container = Get-Pattern $table ([Windows.Automation.ItemContainerPattern]::Pattern)
+    $sw.Restart()
+    $item = $container.FindItemByProperty($null, $ae::NameProperty, $midName)
+    $lines += '{0,-12} {1}' -f 'find by name', (Format-Ms $sw.Elapsed.TotalMilliseconds 50)
+    $checks['ItemContainer finds a far row by Name'] = $null -ne $item -and $item.Current.Name -eq $midName -and $item.Current.ControlType -eq $types::DataItem
+    $checks['the row found is in view'] = $null -ne $item -and (Wait-Until { Test-Inside $item.Current.BoundingRectangle $view } 2000)
+    # Started after the row found (an element the client got from this table), the search finds
+    # nothing: $null, not an error.
+    $again = 'no first row'
+    if ($null -ne $item) {
+        $again = try { $container.FindItemByProperty($item, $ae::NameProperty, $midName) } catch { "an error: $($_.Exception.Message)" }
+    }
+    if ($null -ne $again) { $lines += "  after it: $(if ($again -is [string]) { $again } else { $again.Current.Name })" }
+    $checks['after it, no other row has that name'] = $null -eq $again
+
+    # Scrolled to the end through ScrollPattern, then a wheel notch back up through SendInput.
+    $scroll = Get-Pattern $table ([Windows.Automation.ScrollPattern]::Pattern)
+    $scroll.SetScrollPercent([Windows.Automation.ScrollPattern]::NoScroll, 100)
+    $lastRow = $null
+    $checks['SetScrollPercent(-1, 100) shows the last row'] = Wait-Until {
+        $script:lastRow = Get-Rows $root | Where-Object { $_.Current.Name -eq $lastName } | Select-Object -First 1
+        $null -ne $script:lastRow -and (Test-Inside $script:lastRow.Current.BoundingRectangle $view)
+    } 2000
+    $top = (Get-Rows $root | Select-Object -First 1).Current.Name
+    $checks['the window is active'] = [GlassGateWin32]::Activate($hwnd)
+    [void][ScrollGateWin32]::SetCursorPos([int] ($view.X + $view.Width / 2), [int] ($view.Y + $view.Height / 2))
+    [void][ScrollGateWin32]::Wheel(120, $false)
+    $checks['a wheel notch changes the first row built'] = Wait-Until { (Get-Rows $root | Select-Object -First 1).Current.Name -ne $top } 2000
+
+    # The last row's check cell, toggled through UIA: the row is checked, and the check column's
+    # header box follows (the probe's toolbar shows the current row, not a count). Then unchecked.
+    $tableHeads = @((Get-Pattern $table ([Windows.Automation.TablePattern]::Pattern)).Current.GetColumnHeaders())
+    $box = $tableHeads[0]
+    $check = Get-Or-Null { $grid.GetItem($dataRows - 1, 0) }
+    if ($null -eq $check) { throw 'no check cell for the last row' }
+    (Get-Pattern $check ([Windows.Automation.TogglePattern]::Pattern)).Toggle()
+    $on = [Windows.Automation.ToggleState]::On
+    $mixed = [Windows.Automation.ToggleState]::Indeterminate
+    $off = [Windows.Automation.ToggleState]::Off
+    $checks['Toggle on a check cell checks the row'] = Wait-Until { (Get-Toggle $check) -eq $on } 2000
+    $checks['the header''s box follows (Mixed)'] = Wait-Until { (Get-Toggle $box) -eq $mixed } 2000
+    (Get-Pattern $check ([Windows.Automation.TogglePattern]::Pattern)).Toggle()
+    $checks['Toggle again unchecks it, and the box'] = Wait-Until { ((Get-Toggle $check) -eq $off) -and ((Get-Toggle $box) -eq $off) } 2000
+
+    # The current row is the selected one.
+    $lastRow = Get-Rows $root | Where-Object { $_.Current.Name -eq $lastName } | Select-Object -First 1
+    if ($null -eq $lastRow) { throw 'the last row is no longer built' }
+    $lastRow.SetFocus()
+    $checks['the current row''s SelectionItem is selected'] = Wait-Until { $lastRow.Current.HasKeyboardFocus -and (Test-Selected $lastRow) } 2000
+
+    # TablePattern's headers are the header's items, the check box's first; Invoke on Name's sorts
+    # by it (the data's order), and again reverses it, so the first row is the last one.
+    $headNames = @($tableHeads | ForEach-Object { $_.Current.Name })
+    $itemNames = @(Find-Elements $table $types::HeaderItem $null | ForEach-Object { $_.Current.Name })
+    $lines += "  column headers: $($headNames -join ' | ')"
+    $checks['TablePattern''s column headers are the header''s'] = $headNames.Count -eq $grid.Current.ColumnCount -and ($headNames -join '|') -eq ($itemNames -join '|')
+    $name = $tableHeads | Where-Object { $_.Current.Name -eq 'Name' } | Select-Object -First 1
+    if ($null -eq $name) { throw 'no column header "Name"' }
+    $invoke = Get-Pattern $name ([Windows.Automation.InvokePattern]::Pattern)
+    $invoke.Invoke()
+    $invoke.Invoke()
+    $checks['Invoke on Name''s header twice reverses the rows'] = Wait-Until { (Get-Or-Null { $grid.GetItem(0, 1).Current.Name }) -eq $lastName } 2000
+} catch {
+    $lines += "data table FAILED: $($_.Exception.Message)"
+    $checks['client'] = $false
+} finally {
+    if (-not $p.HasExited) {
+        if ($hwnd -ne [IntPtr]::Zero) { [void][UiaGateWin32]::PostMessageW($hwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) } # WM_CLOSE
+        if (-not $p.WaitForExit(5000)) { $p.Kill(); $lines += 'the shell did not close on WM_CLOSE'; $checks['closes'] = $false }
+    }
+}
+foreach ($k in $checks.Keys) { $lines += '{0,-50} {1}' -f $k, (Format-Verdict $checks[$k]) }
+$ok = $checks.Count -gt 0 -and -not ($checks.Values -contains $false)
+Publish 'Data table' $lines $ok
 if (-not $ok) { $failed++ }
 
 exit $failed
