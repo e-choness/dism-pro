@@ -1,6 +1,6 @@
 # Toolchain images in GHCR, a private package (ADR-0003, decision #29). The toolchain workflow
 # prints this file after it publishes. CI pulls these images while docker/build.Dockerfile is
 # still the blob below, and builds them from source otherwise.
-dockerfile=78cd1c4951a94dc677a1de5fbf349b83f63bb8aa
-t1=ghcr.io/e-choness/dism-pro-build@sha256:a3daf135f7ec7f80a2e6cf4639658a571e1bbc8865c120e371324d8e86f4c2cd
-t2=ghcr.io/e-choness/dism-pro-build@sha256:8c9a3b8af396dfcc1f70a6f5075fd42733dfdf38b27eb716cb0bb757f44b640d
+dockerfile=9a65187b52db49083d307200177b39b4baa21c44
+t1=ghcr.io/e-choness/dism-pro-build@sha256:dc198893d30e797ee3d154eff0632eecd82224a1df12f7fbdc7cd09ddf409edc
+t2=ghcr.io/e-choness/dism-pro-build@sha256:fe07e966a4bb23f5d7c8188512664738139d0f17293d30838e5393af9d8b279e
