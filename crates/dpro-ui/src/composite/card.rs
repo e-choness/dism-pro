@@ -362,9 +362,11 @@ fn card_value<M>(cx: &mut Cx<'_, M>, value: CardValue<'_>) {
     match value {
         // An empty label a metric's line high, so the metric that replaces it moves nothing: it
         // stretches across the card, and a client doesn't see it, as an empty label is hidden.
+        // A quiet fill, not the hover layer: high contrast drops state layers, and shows this
+        // as button face.
         CardValue::Loading => {
             cx.add(Element::text(CARD_VALUE, "").text_style(METRIC).look(Look {
-                fill: Some(Tone::Hover),
+                fill: Some(Tone::Subtle),
                 radius: Radius::Small,
                 ..Look::PLAIN
             }));

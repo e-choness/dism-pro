@@ -2,10 +2,10 @@
 //!
 //! Summary cards: a clickable card is a Button named by its label, described by "{value}.
 //! {detail}", with presentational children; a static one is a Group named by its label; a grid
-//! wraps them at 220 px each, and a loading card's value arriving repaints the value alone. Scan
-//! cards: Space toggles, Mixed shows, Details only when the scan failed, a size update damages only
-//! its slot at any text size, and a scan starting or ending repaints its slot alone, its bar under
-//! the size.
+//! wraps them at 220 px each, a loading card's skeleton shows in high contrast, and its value
+//! arriving repaints the value alone. Scan cards: Space toggles, Mixed shows, Details only when the
+//! scan failed, a size update damages only its slot at any text size, and a scan starting or ending
+//! repaints its slot alone, its bar under the size.
 
 #![allow(missing_docs)]
 
@@ -16,7 +16,8 @@ use composites::{
     CARDS, CATEGORIES, Model, Msg, NARROW, PAGE, Run, SCANS, START, Step, key, key_up,
 };
 use dpro_ui::{
-    FakeText, Input, Key, KeyCode, Mods, Motion, Rect, Role, Size, Tri, Ui,
+    Canvas, Color, FakeText, Input, Key, KeyCode, Mods, Motion, Rect, Role, Size, SysColors, Theme,
+    Tri, Ui,
     accesskit::{Role as AkRole, Toggled},
     composite::{
         CARD_LABEL, CARD_VALUE, CardValue, SCAN_CHECK, SCAN_DETAILS, SCAN_SIZE, ScanSize,
@@ -328,4 +329,65 @@ fn a_loading_cards_value_arriving_repaints_the_value_alone() {
             "{d:?} is outside the value {allowed:?}"
         );
     }
+}
+
+#[test]
+fn a_loading_cards_skeleton_shows_in_high_contrast() {
+    let mut ui = Ui::<u8>::new(
+        Size { w: 400.0, h: 300.0 },
+        1.0,
+        Motion {
+            hover_ms: tokens::motion::HOVER_MS,
+        },
+    );
+    ui.build(|cx| {
+        cx.summary_card(
+            Key::name("card"),
+            &SummaryCard {
+                label: "Undo history",
+                value: CardValue::Loading,
+                detail: "",
+                delta: None,
+                open: None,
+                separator: ". ",
+            },
+        );
+    });
+    ui.layout(&mut FakeText);
+    let skeleton = ui
+        .find(&[Key::name("card"), CARD_VALUE])
+        .and_then(|id| ui.info(id))
+        .map_or(Rect::default(), |n| n.rect);
+    let sys = SysColors {
+        window: Color::hex(0x00_0000),
+        window_text: Color::hex(0xFF_FFFF),
+        highlight: Color::hex(0x1A_EBFF),
+        highlight_text: Color::hex(0x00_0000),
+        hot_light: Color::hex(0xFF_FF00),
+        gray_text: Color::hex(0x3F_F23F),
+        btn_face: Color::hex(0x20_2040),
+        btn_text: Color::hex(0xFF_FFFE),
+    };
+    let (w, h) = ui.pixel_size();
+    let mut pixels = vec![0; usize::try_from(w * h).unwrap_or(0)];
+    if let Some(mut canvas) = Canvas::new(&mut pixels, w, h) {
+        ui.paint(&mut canvas, &mut FakeText, &Theme::high_contrast(sys));
+    }
+    let mid = skeleton.center();
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a pixel inside a 400 × 300 window"
+    )]
+    let at = (mid.y as u32) * w + mid.x as u32;
+    let pixel = pixels
+        .get(usize::try_from(at).unwrap_or(usize::MAX))
+        .copied()
+        .unwrap_or(0);
+    let face = sys.btn_face;
+    assert_eq!(
+        pixel,
+        0xFF00_0000 | u32::from(face.r) << 16 | u32::from(face.g) << 8 | u32::from(face.b),
+        "the skeleton at {skeleton:?}"
+    );
 }
