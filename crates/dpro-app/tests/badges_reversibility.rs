@@ -31,7 +31,6 @@ fn a_reversible_change_is_undoable_without_a_description() {
 }
 
 #[test]
-#[ignore = "slice 6a: lands with the code"]
 fn a_deadline_counts_whole_days_left_rounded_up() {
     for (left, days) in [(1, 1), (DAY - 1, 1), (DAY, 1), (DAY + 1, 2), (7 * DAY, 7)] {
         let r = until(left);
@@ -53,7 +52,6 @@ fn a_deadline_counts_whole_days_left_rounded_up() {
 }
 
 #[test]
-#[ignore = "slice 6a: lands with the code"]
 fn a_passed_deadline_is_permanent_and_says_expired() {
     for r in [
         Reversibility::<&str>::ReversibleUntil { until: NOW },
@@ -79,7 +77,6 @@ fn a_passed_deadline_is_permanent_and_says_expired() {
 }
 
 #[test]
-#[ignore = "slice 6a: lands with the code"]
 fn an_undo_by_an_inverse_change_is_undoable_and_names_the_inverse() {
     let inverse = ChangeKind::ServiceStart {
         name: "wuauserv",
@@ -102,7 +99,6 @@ fn an_undo_by_an_inverse_change_is_undoable_and_names_the_inverse() {
 }
 
 #[test]
-#[ignore = "slice 6a: lands with the code"]
 fn an_irreversible_change_is_permanent_and_gives_its_reason() {
     let r = Reversibility::Irreversible {
         reason: "plan-irreversible-delete",
@@ -124,7 +120,6 @@ fn an_irreversible_change_is_permanent_and_gives_its_reason() {
 }
 
 #[test]
-#[ignore = "slice 6a: lands with the code"]
 fn a_restart_is_caution_described_by_its_reason_and_none_is_neutral() {
     let b = badges::restart::<&str>(true, Some(RebootReason::WindowsUpdate));
     assert_eq!(b.tone, Tone::Caution);
@@ -151,7 +146,6 @@ fn a_restart_is_caution_described_by_its_reason_and_none_is_neutral() {
 }
 
 #[test]
-#[ignore = "slice 6a: lands with the code"]
 fn a_plans_summary_gives_its_restart_badge() {
     let mut summary = PlanSummary {
         changes: 3,
