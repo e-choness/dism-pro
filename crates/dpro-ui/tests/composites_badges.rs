@@ -131,7 +131,6 @@ fn badges_are_text_and_never_a_tab_stop() {
 }
 
 #[test]
-#[ignore = "slice 6a: lands with the code"]
 fn a_badges_description_is_in_the_accessibility_tree() {
     let mut run = Run::accessible(Model::new());
     let tree = run.ui.a11y_tree();
@@ -143,7 +142,6 @@ fn a_badges_description_is_in_the_accessibility_tree() {
 }
 
 #[test]
-#[ignore = "slice 6a: lands with the code"]
 fn each_tone_has_its_own_fill_from_the_token_table() {
     // Decision #45's pairs: five tones, five distinct fills, in light and in dark.
     for theme in [Theme::LIGHT, Theme::DARK] {
@@ -167,7 +165,6 @@ fn each_tone_has_its_own_fill_from_the_token_table() {
 }
 
 #[test]
-#[ignore = "slice 6a: lands with the code"]
 fn high_contrast_draws_no_fill_and_a_border_in_the_text_color() {
     let sys = SysColors {
         window: Color::hex(0x00_0000),

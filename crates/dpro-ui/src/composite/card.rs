@@ -5,8 +5,18 @@
 //!   "{value}. {detail}", its parts presentational; a static one is a group named by its label,
 //!   which is a level-2 heading. [`Cx::card_grid`] wraps cards at [`card::MIN_W`] each.
 //! - A **category scan card** (Clean, artboard 02): a check box named by the category, holding its
-//!   name and description; a risk badge; the size in a fixed slot at the end, so a size update
-//!   while scanning damages that slot alone; and Details when the scan failed.
+//!   name and description, and described by "{description}. {size}. {badge}"; a risk badge; the
+//!   size in a fixed slot at the end, so a size update while scanning damages that slot alone,
+//!   with a 2 px bar under it while its category scans; and Details when the scan failed.
+//!
+//!   A3.5 (5) draws the bar along the card's bottom. That needs a row inside the card for the
+//!   parts and a bar node beside it in every card, 14 more nodes on the composites page:
+//!   measured, +11.6 % on its whole accessibility tree and +6.6 to +8.3 % on each frame that
+//!   builds it. In the slot it's one node while a category scans, and starting or ending a scan
+//!   still repaints the slot alone (decision #41).
+//!
+//! Sizes are written by the window's formats, as a table's size cells are, and every description
+//! is assembled in one kept buffer, so a warm page builds its cards without allocating.
 
 use std::{mem, rc::Rc};
 
@@ -43,6 +53,8 @@ pub const SCAN_DETAILS: Key = Key::name("dpro-ui.scan.details");
 
 /// The size slot's text.
 const SIZE_TEXT: Key = Key::name("dpro-ui.scan.size.text");
+/// The scan's bar under the size, while the category scans.
+const SCAN_BAR: Key = Key::name("dpro-ui.scan.bar");
 /// A status card's dot and word.
 const DOT: Key = Key::name("dpro-ui.card.dot");
 const WORD: Key = Key::name("dpro-ui.card.word");
@@ -77,8 +89,8 @@ pub struct SummaryCard<'s, M> {
     pub delta: Option<(&'s str, StatusTone)>,
     /// A clickable card's message, which opens its page; `None` for a static card.
     pub open: Option<M>,
-    /// What joins the value and the detail in a clickable card's description (". " in en-US,
-    /// from the app's catalog).
+    /// What joins the value and the detail in a clickable card's description:
+    /// `ui-description-separator` (". " in en-US).
     pub separator: &'s str,
 }
 
@@ -108,7 +120,8 @@ pub struct ScanLabels<'s> {
     pub failed: &'s str,
     /// `ui-scan-details`.
     pub details: &'s str,
-    /// What joins the check box's description, "{description}. {size}. {badge}".
+    /// What joins the check box's description, "{description}. {size}. {badge}":
+    /// `ui-description-separator`.
     pub separator: &'s str,
 }
 
@@ -242,101 +255,122 @@ impl<M: Clone> Cx<'_, M> {
             text.push_str(b.text);
         }
         let (size, description) = text.split_at(size_end);
-        let nothing = c.size == ScanSize::Bytes(Bytes(0));
+        // The size's slot is a size's width at the user's text size, so sizes arriving while the
+        // category scans keep it as it is; a longer word ("Nothing to clean") widens it.
+        let size_w = scan::SIZE_W * self.ui.text_scale;
         let id = self.add_with(
             Element::stack(key)
                 .style(Style {
                     axis: Axis::Row,
-                    gap: SCAN_GAP,
+                    gap: scan::GAP,
                     align: Align::Center,
-                    padding: Insets::xy(SCAN_PAD_X, SCAN_PAD_Y),
+                    padding: Insets::xy(scan::PAD_X, scan::PAD_Y),
                     ..Style::default()
                 })
                 .look(CARD),
-            |cx| {
-                let mut check = Element::toggle(SCAN_CHECK, c.name, c.check, c.toggle.clone())
-                    .style(Style {
-                        grow: 1.0,
-                        gap: SPACE[0] / 2.0,
-                        padding: Insets {
-                            left: SCAN_BOX + SCAN_GAP,
-                            ..Insets::default()
-                        },
-                        ..Style::default()
-                    })
-                    .enabled(c.busy.is_none() && !nothing)
-                    .describe(description);
-                if let Some(reason) = c.busy {
-                    check = check.tooltip(reason);
-                }
-                cx.add_with(check, |cx| {
-                    cx.add(Element::text(SCAN_NAME, c.name).text_style(STRONG));
-                    cx.add(
-                        Element::text(SCAN_DESCRIPTION, c.description)
-                            .text_style(SMALL)
-                            .look(SECONDARY),
-                    );
-                });
-                if let Some(b) = c.badge {
-                    let mut badge = Element::badge(SCAN_BADGE, b.text, b.tone);
-                    if let Some(d) = b.description {
-                        badge = badge.describe(d);
-                    }
-                    cx.add(badge);
-                }
-                cx.add_with(
-                    Element::stack(SCAN_SIZE).style(Style {
-                        width: Dim::Fixed(scan::SIZE_W),
-                        align: Align::End,
-                        ..Style::default()
-                    }),
-                    |cx| {
-                        cx.add(Element::text(SIZE_TEXT, size).look(SECONDARY));
-                    },
-                );
-                if let Some(details) = &c.details {
-                    cx.add(
-                        Element::button(SCAN_DETAILS, labels.details, details.clone())
-                            .style(Style {
-                                min: Size {
-                                    w: 0.0,
-                                    h: DETAILS_H,
-                                },
-                                padding: Insets::xy(SPACE[2], 0.0),
-                                ..Style::default()
-                            })
-                            .look(Look::SECONDARY),
-                    );
-                }
-            },
+            |cx| scan_parts(cx, c, size, description, size_w),
         );
         self.ui.cell_text = text;
         id
     }
 }
 
+/// A scan card's parts: the check box holding the name and the description, described by
+/// `description`; the badge; `size` in its slot, at least `size_w` wide, with the scan's bar
+/// under it while the category scans; and Details.
+fn scan_parts<M: Clone>(
+    cx: &mut Cx<'_, M>,
+    c: &ScanCard<'_, M>,
+    size: &str,
+    description: &str,
+    size_w: f32,
+) {
+    let nothing = c.size == ScanSize::Bytes(Bytes(0));
+    // The toolkit puts the box at the check box's start and its lines after it (A3.5 addition 9).
+    let mut check = Element::toggle(SCAN_CHECK, c.name, c.check, c.toggle.clone())
+        .style(Style {
+            grow: 1.0,
+            ..Style::default()
+        })
+        .enabled(c.busy.is_none() && !nothing)
+        .describe(description);
+    if let Some(reason) = c.busy {
+        check = check.tooltip(reason);
+    }
+    cx.add_with(check, |cx| {
+        cx.add(Element::text(SCAN_NAME, c.name).text_style(STRONG));
+        cx.add(
+            Element::text(SCAN_DESCRIPTION, c.description)
+                .text_style(SMALL)
+                .look(SECONDARY),
+        );
+    });
+    if let Some(b) = c.badge {
+        let mut badge = Element::badge(SCAN_BADGE, b.text, b.tone);
+        if let Some(d) = b.description {
+            badge = badge.describe(d);
+        }
+        cx.add(badge);
+    }
+    cx.add_with(
+        Element::stack(SCAN_SIZE).style(Style {
+            align: Align::End,
+            gap: SPACE[0],
+            min: Size { w: size_w, h: 0.0 },
+            ..Style::default()
+        }),
+        |cx| {
+            cx.add(Element::text(SIZE_TEXT, size).look(SECONDARY));
+            // The scan's bar, a size's width under "Scanning…": in the slot, so starting or
+            // ending a scan repaints the slot alone, and a node only while the category scans.
+            // The slot is shorter than the check box's two lines, so the card keeps its height.
+            if c.size == ScanSize::Scanning {
+                cx.add(
+                    Element::stack(SCAN_BAR)
+                        .style(Style {
+                            width: Dim::Fixed(size_w),
+                            height: Dim::Fixed(scan::BAR),
+                            ..Style::default()
+                        })
+                        .look(Look {
+                            fill: Some(Tone::Accent),
+                            radius: Radius::Pill,
+                            ..Look::PLAIN
+                        }),
+                );
+            }
+        },
+    );
+    if let Some(details) = &c.details {
+        cx.add(
+            Element::button(SCAN_DETAILS, c.labels.details, details.clone())
+                .style(Style {
+                    min: Size {
+                        w: 0.0,
+                        h: scan::DETAILS_H,
+                    },
+                    padding: Insets::xy(SPACE[2], 0.0),
+                    ..Style::default()
+                })
+                .look(Look::SECONDARY),
+        );
+    }
+}
+
 /// A summary card's value: a skeleton, a metric, or a dot and a word.
 fn card_value<M>(cx: &mut Cx<'_, M>, value: CardValue<'_>) {
     match value {
+        // An empty label a metric's line high, so the metric that replaces it moves nothing: it
+        // stretches across the card, and a client doesn't see it, as an empty label is hidden.
         CardValue::Loading => {
-            cx.add(
-                Element::stack(CARD_VALUE)
-                    .style(Style {
-                        height: Dim::Fixed(font::DISPLAY),
-                        ..Style::default()
-                    })
-                    .look(Look {
-                        fill: Some(Tone::Hover),
-                        radius: Radius::Small,
-                        ..Look::PLAIN
-                    }),
-            );
+            cx.add(Element::text(CARD_VALUE, "").text_style(METRIC).look(Look {
+                fill: Some(Tone::Hover),
+                radius: Radius::Small,
+                ..Look::PLAIN
+            }));
         }
         CardValue::Metric(metric) => {
-            cx.add(Element::text(CARD_VALUE, metric).text_style(TextStyle {
-                size: font::DISPLAY,
-                ..STRONG
-            }));
+            cx.add(Element::text(CARD_VALUE, metric).text_style(METRIC));
         }
         CardValue::Status(word, tone) => {
             cx.add_with(
@@ -350,8 +384,8 @@ fn card_value<M>(cx: &mut Cx<'_, M>, value: CardValue<'_>) {
                     cx.add(
                         Element::stack(DOT)
                             .style(Style {
-                                width: Dim::Fixed(DOT_SIZE),
-                                height: Dim::Fixed(DOT_SIZE),
+                                width: Dim::Fixed(card::DOT),
+                                height: Dim::Fixed(card::DOT),
                                 ..Style::default()
                             })
                             .look(Look {
@@ -370,14 +404,11 @@ fn card_value<M>(cx: &mut Cx<'_, M>, value: CardValue<'_>) {
     }
 }
 
-/// A status card's dot.
-const DOT_SIZE: f32 = 10.0;
-/// A scan card's padding, gap, check box and Details button (A3.5 (5)).
-const SCAN_PAD_X: f32 = 16.0;
-const SCAN_PAD_Y: f32 = 14.0;
-const SCAN_GAP: f32 = 14.0;
-const SCAN_BOX: f32 = 18.0;
-const DETAILS_H: f32 = 32.0;
+/// A metric: display type, semibold.
+const METRIC: TextStyle = TextStyle {
+    size: font::DISPLAY,
+    ..STRONG
+};
 
 /// A status's color.
 const fn status(tone: StatusTone) -> Tone {
