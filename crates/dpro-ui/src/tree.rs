@@ -379,11 +379,19 @@ pub(crate) enum Extra<'s, M> {
 
     /// A [live region](Element::live)'s politeness (A3.5 addition 5, A4.5).
     Live(Live),
+
+    /// A container whose children are [presentational](Element::presentation): its node's value
+    /// ([`PRESENTATION`]).
+    Presentation,
 }
 
 /// A check item's value ([`Element::menu_check`]): its node's `value`, as a column header's sort
 /// is its.
 pub(crate) const CHECK_ITEM: f32 = 1.0;
+
+/// A [presentation](Element::presentation) container's value, as a check item's is: a container
+/// has no other.
+pub(crate) const PRESENTATION: f32 = 1.0;
 
 /// A [glyph](Element::glyph)'s icon as its node's `value`, as a check item's is: one more than
 /// its place in [`Icon::ALL`], so no glyph's is 0. A label has no other value, and a new icon
@@ -1005,6 +1013,24 @@ impl<'s, M> Element<'s, M> {
     }
 }
 
+/// Slice 6a's settings rows (A3.5 (15)): text that names and describes a control beside it.
+impl<M> Element<'_, M> {
+    /// Makes a container's children presentational, as a check box's are (A3.5 addition 9):
+    /// they're left out of the accessibility tree, because a control beside them is named and
+    /// described by the same words, so they're read once. A settings row's label and
+    /// description.
+    ///
+    /// Other roles ignore it, as does a container whose arrow keys move through its items or
+    /// that's a live region.
+    #[must_use]
+    pub(crate) fn presentation(mut self) -> Self {
+        if self.role == Role::Container && matches!(self.extra, Extra::None) {
+            self.extra = Extra::Presentation;
+        }
+        self
+    }
+}
+
 /// [`Element::a11y`]: A4.5's properties that few elements have, in one byte beside
 /// [`Element::a11y_text`]. A heading's level or a landmark, and what that text is; zero for
 /// none, so building a node tests this byte with its [`rare`] flags. The node keeps a copy in
@@ -1339,6 +1365,11 @@ impl<M> Node<M> {
     /// A menu's check item ([`Element::menu_check`]).
     pub(crate) fn is_check_item(&self) -> bool {
         self.role == Role::MenuItem && self.value.to_bits() == CHECK_ITEM.to_bits()
+    }
+
+    /// A container whose children are presentational ([`Element::presentation`]).
+    pub(crate) fn is_presentation(&self) -> bool {
+        self.role == Role::Container && self.value.to_bits() == PRESENTATION.to_bits()
     }
 
     /// A [glyph](Element::glyph)'s icon; `None` for every other node.

@@ -1,19 +1,21 @@
 //! The inline error panel (TD-0009 A3.5 (9), A3.9): Details toggles, the excerpt is capped at 8
 //! lines and sanitized, the actions come in order, and a client sees a group named by the title,
-//! whose title is live when the panel came unbidden.
+//! a level-2 heading that's live when the panel came unbidden. Its tint, border and glyph come
+//! from the token table, and expanding reflows its column once.
 
 #![allow(missing_docs)]
 
 #[path = "../benches/fixtures/composites.rs"]
 mod composites;
 
-use composites::{ERROR, Model, Msg, PAGE, Run, Step, key, key_up};
+use composites::{ERROR, INFO, Model, Msg, PAGE, Run, Step, key, key_up};
 use dpro_ui::{
-    Element, FakeText, Key, KeyCode, Live, Mods, Motion, NodeId, Role, Size, Ui,
+    Canvas, Color, Element, FakeText, Key, KeyCode, Live, Mods, Motion, NodeId, Rect, Role, Size,
+    SysColors, Theme, Tone, Ui,
     accesskit::{Live as AkLive, Role as AkRole},
     composite::{
-        ERROR_ACTIONS, ERROR_CODE, ERROR_COPY, ERROR_DETAILS, ERROR_LOG, ERROR_TITLE, ErrorPanel,
-        ErrorTone, LogExcerpt,
+        ERROR_ACTIONS, ERROR_API, ERROR_CODE, ERROR_COPY, ERROR_DETAILS, ERROR_GLYPH, ERROR_LOG,
+        ERROR_TITLE, ErrorPanel, ErrorTone, LogExcerpt,
     },
     tokens::{self, error},
 };
@@ -55,6 +57,16 @@ fn the_excerpt_is_the_logs_last_8_lines() {
 
 /// A panel alone, expanded, over `log`.
 fn alone(log: &str) -> Ui<u8> {
+    alone_as(ErrorTone::Error, log)
+}
+
+/// A panel of `tone` alone, expanded, over `log`.
+fn alone_as(tone: ErrorTone, log: &str) -> Ui<u8> {
+    panel(tone, ("Code 0x80070005", "DeleteFileW"), log)
+}
+
+/// A panel of `tone` alone, expanded, with its code and call, over `log`.
+fn panel(tone: ErrorTone, (code, api): (&str, &str), log: &str) -> Ui<u8> {
     let mut ui = Ui::new(
         Size { w: 800.0, h: 600.0 },
         1.0,
@@ -66,10 +78,10 @@ fn alone(log: &str) -> Ui<u8> {
         cx.error_panel(
             Key::name("e"),
             &ErrorPanel {
-                tone: ErrorTone::Error,
+                tone,
                 title: "Couldn't clean",
-                code: "Code 0x80070005",
-                api: "DeleteFileW",
+                code,
+                api,
                 next: "Try again as administrator.",
                 log: Some(LogExcerpt {
                     source: "job.log",
@@ -103,7 +115,15 @@ fn part<M>(ui: &Ui<M>, key: Key) -> Option<NodeId> {
 }
 
 #[test]
-#[ignore = "slice 6a: lands with the code"]
+fn a_finding_without_a_code_or_a_call_shows_neither() {
+    let ui = panel(ErrorTone::Partial, ("", ""), "one line");
+    assert!(part(&ui, ERROR_CODE).is_none() && part(&ui, ERROR_API).is_none());
+    assert!(part(&ui, ERROR_LOG).is_some(), "the log still shows");
+    let ui = alone("one line");
+    assert!(part(&ui, ERROR_CODE).is_some() && part(&ui, ERROR_API).is_some());
+}
+
+#[test]
 fn the_excerpt_is_sanitized() {
     // Control characters and bidirectional overrides from a log never reach the screen or a
     // client: they'd reorder or hide text (TD-0009 §8's field rules).
@@ -149,7 +169,6 @@ fn a_client_sees_a_group_named_by_the_title() {
 }
 
 #[test]
-#[ignore = "slice 6a: lands with the code"]
 fn the_title_is_assertive_when_the_panel_came_unbidden_and_silent_otherwise() {
     let mut run = Run::accessible(Model::new());
     let tree = run.ui.a11y_tree();
@@ -162,4 +181,125 @@ fn the_title_is_assertive_when_the_panel_came_unbidden_and_silent_otherwise() {
         tree.nodes.iter().all(|(_, n)| n.live().is_none()),
         "Live::Off sets nothing"
     );
+}
+
+#[test]
+fn the_title_is_a_level_2_heading_and_details_says_whether_its_open() {
+    let mut run = Run::accessible(Model::new());
+    let tree = run.ui.a11y_tree();
+    let title = run.part(&[PAGE, ERROR], ERROR_TITLE).expect("the title");
+    let node = run.ak(&tree, title).expect("in the tree");
+    assert_eq!(node.role(), AkRole::Heading);
+    assert_eq!(node.level(), Some(1), "aria-level less one");
+    let details = run.part(&[PAGE, ERROR], ERROR_DETAILS).expect("Details");
+    let node = run.ak(&tree, details).expect("in the tree");
+    assert_eq!(node.role(), AkRole::Button);
+    assert_eq!(node.label(), Some("Details"));
+    assert_eq!(node.is_expanded(), Some(false));
+    // Its word and chevron are its own: a client reads the button once.
+    assert_eq!(node.children(), &[]);
+}
+
+#[test]
+fn expanding_reflows_the_column_once_and_settles() {
+    let mut run = Run::with(Model::new()).warmed();
+    let rect = |run: &Run, path: &[Key]| {
+        run.find(path)
+            .and_then(|id| run.ui.info(id))
+            .map_or(Rect::default(), |n| n.rect)
+    };
+    let (panel, info) = (rect(&run, &[PAGE, ERROR]), rect(&run, &[PAGE, INFO]));
+    let frames = run.frames;
+    run.step(Step::Update(Msg::Expand));
+    assert_eq!(run.frames, frames + 1, "one frame");
+    assert!(!run.ui.wants_frame(), "nothing left to lay out or animate");
+    let (open, moved) = (rect(&run, &[PAGE, ERROR]), rect(&run, &[PAGE, INFO]));
+    let grew = open.h - panel.h;
+    assert!(grew > 0.0, "{panel:?} to {open:?}");
+    assert!(
+        (moved.y - (info.y + grew)).abs() < 0.01,
+        "what's under the panel moves by its growth: {info:?} to {moved:?}"
+    );
+}
+
+/// `ui` painted in `theme`, read at `(x, y)` (logical pixels at scale 1).
+fn pixel(ui: &Ui<u8>, theme: &Theme, x: f32, y: f32) -> u32 {
+    let (w, h) = ui.pixel_size();
+    let mut pixels = vec![0; usize::try_from(w * h).unwrap_or(0)];
+    if let Some(mut canvas) = Canvas::new(&mut pixels, w, h) {
+        ui.paint(&mut canvas, &mut FakeText, theme);
+    }
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a pixel inside an 800 × 600 window"
+    )]
+    let (x, y) = (x as u32, y as u32);
+    pixels
+        .get(usize::try_from(y * w + x).unwrap_or(usize::MAX))
+        .copied()
+        .unwrap_or(0)
+}
+
+/// `c` as an opaque canvas pixel.
+fn px(c: Color) -> u32 {
+    0xFF00_0000 | u32::from(c.r) << 16 | u32::from(c.g) << 8 | u32::from(c.b)
+}
+
+#[test]
+fn the_tint_and_the_glyph_come_from_the_token_table() {
+    let sys = SysColors {
+        window: Color::hex(0x00_0000),
+        window_text: Color::hex(0xFF_FFFF),
+        highlight: Color::hex(0x1A_EBFF),
+        highlight_text: Color::hex(0x00_0000),
+        hot_light: Color::hex(0xFF_FF00),
+        gray_text: Color::hex(0x3F_F23F),
+        btn_face: Color::hex(0x20_2040),
+        btn_text: Color::hex(0xFF_FFFE),
+    };
+    let hc = Theme::high_contrast(sys);
+    for (tone, fill, status) in [
+        (ErrorTone::Error, Tone::ErrorFill, Tone::Danger),
+        (ErrorTone::Partial, Tone::WarnFill, Tone::Warn),
+    ] {
+        let ui = alone_as(tone, "one line");
+        let info = |key| {
+            part(&ui, key)
+                .and_then(|id| ui.info(id))
+                .map_or(Rect::default(), |n| n.rect)
+        };
+        let panel = ui
+            .find(&[Key::name("e")])
+            .and_then(|id| ui.info(id))
+            .map_or(Rect::default(), |n| n.rect);
+        let glyph = info(ERROR_GLYPH).center();
+        let mid = panel.y + panel.h / 2.0;
+        let pad = panel.x + error::PADDING / 2.0;
+        for theme in [Theme::LIGHT, Theme::DARK] {
+            assert_eq!(
+                pixel(&ui, &theme, pad, mid),
+                px(theme.color(fill)),
+                "{tone:?}"
+            );
+            // The glyph is in the status color, not the border's.
+            assert_eq!(
+                pixel(&ui, &theme, glyph.x, glyph.y),
+                px(theme.color(status)),
+                "{tone:?}'s glyph"
+            );
+        }
+        // High contrast: no tint, a `WindowText` border.
+        assert_eq!(pixel(&ui, &hc, pad, mid), px(sys.window), "{tone:?}");
+        assert_eq!(
+            pixel(&ui, &hc, panel.x, mid),
+            px(sys.window_text),
+            "{tone:?}"
+        );
+        assert_eq!(
+            pixel(&ui, &hc, glyph.x, glyph.y),
+            px(sys.window_text),
+            "{tone:?}'s glyph"
+        );
+    }
 }

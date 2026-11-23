@@ -15,7 +15,7 @@ use crate::{
     pool::capacity_for,
     table::sort_value,
     text::TextStyle,
-    tree::{CHECK_ITEM, Element, Extra, Live, NIL, NodeId, Role, rare},
+    tree::{CHECK_ITEM, Element, Extra, Live, NIL, NodeId, PRESENTATION, Role, rare},
     ui::{HoldSlot, ROOT, Side, Ui},
 };
 
@@ -305,9 +305,9 @@ impl<M> Ui<M> {
     }
 
     /// Copies a group, a progress bar's value, a column header's sort, a menu item's being a
-    /// check item, a hold button's Invoke message or a live region's politeness into node `i`,
-    /// clearing what it had of the others. Returns whether a client sees a change, and whether it
-    /// shows.
+    /// check item, a hold button's Invoke message, a live region's politeness or a container's
+    /// presentational children into node `i`, clearing what it had of the others. Returns
+    /// whether a client sees a change, and whether it shows.
     fn update_extra(&mut self, i: u32, extra: Extra<'_, M>) -> (bool, bool) {
         let (group, value, invoke) = match extra {
             Extra::Group(g) => (Some(g), 0.0, None),
@@ -319,6 +319,8 @@ impl<M> Ui<M> {
             Extra::Check => (None, CHECK_ITEM, None),
             // So is a glyph's icon (A3.5 addition 1): it shows, and a named one is an image.
             Extra::Glyph(icon) => (None, crate::tree::glyph_value(icon), None),
+            // And a container's presentational children (addition 9): a client doesn't see them.
+            Extra::Presentation => (None, PRESENTATION, None),
             // A live region's politeness (addition 5, A4.5) is read below.
             Extra::None | Extra::Field { .. } | Extra::Combo { .. } | Extra::Live(_) => {
                 (None, 0.0, None)
@@ -343,11 +345,16 @@ impl<M> Ui<M> {
         // A menu item became or stopped being a check item: every label in its menu moves past
         // the checks' gutter or back, so the menu is laid out again.
         let rechecked = revalued && n.role == Role::MenuItem;
+        // A container's children became presentational or stopped being: the flag follows down.
+        let represented = revalued && n.role == Role::Container;
         if n.hold || invoke.is_some() {
             self.update_hold(i, invoke);
         }
         if rechecked {
             self.mark_dirty(i);
+        }
+        if represented {
+            self.presentation_changed(i);
         }
         (regrouped || revalued || repolite, revalued)
     }

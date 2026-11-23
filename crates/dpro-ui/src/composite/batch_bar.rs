@@ -2,15 +2,23 @@
 //! of them the filter hides, the page's note, its actions and Clear selection.
 //!
 //! It's a toolbar (A3.5 addition 8): one Tab stop after the table, Left and Right between its
-//! buttons. It never applies: an action opens the drawer, with a hold for danger (§5.2). The count
-//! isn't live, because each check box's toggle is already announced.
+//! buttons, named so a page can show a second one. It never applies: an action opens the drawer,
+//! with a hold for danger (§5.2). The count isn't live, because each check box's toggle is already
+//! announced.
+//!
+//! The bar is the inverse of the page (`InverseFill`, `InverseText`), its primary action
+//! `InverseAccent`. The count sits in a slot [`batch::COUNT_W`] wide at 100 % text, so a count
+//! that changes inside it damages the count alone, and the text beside it grows into the room the
+//! buttons leave, so the buttons never move. Appearing or leaving reflows the table's column
+//! once.
 
 use crate::{
     Align, Axis, Cx, Dim, Element, Icon, Insets, Justify, Key, Look, NodeId, Radius, Size, Style,
-    Tone, tokens::SPACE,
+    TextStyle, Tone,
+    tokens::{SPACE, batch, font},
 };
 
-use super::{Emphasis, button_look};
+use super::{Emphasis, STRONG};
 
 /// The count: `ui-batch-selected`.
 pub const BATCH_COUNT: Key = Key::name("dpro-ui.batch.count");
@@ -21,6 +29,7 @@ pub const BATCH_NOTE: Key = Key::name("dpro-ui.batch.note");
 /// Clear selection, a glyph button at the end.
 pub const BATCH_CLEAR: Key = Key::name("dpro-ui.batch.clear");
 
+/// The count, the hidden count and the note, wrapping when they don't fit.
 const TEXT: Key = Key::name("dpro-ui.batch.text");
 const CLEAR_GLYPH: Key = Key::name("dpro-ui.batch.clear.glyph");
 
@@ -37,7 +46,7 @@ pub struct BatchBar<'s, M> {
     pub hidden_text: &'s str,
     /// The page's sentence ("uninstalls run one at a time"); empty for none.
     pub note: &'s str,
-    /// At most three.
+    /// The page's actions, at most three, each [`Emphasis::Primary`] or [`Emphasis::Normal`].
     pub actions: &'s [(&'s str, M, Emphasis)],
     /// Clear selection's name (`ui-batch-clear`) and message.
     pub clear: (&'s str, M),
@@ -52,48 +61,72 @@ impl<M: Clone> Cx<'_, M> {
         if b.count == 0 {
             return None;
         }
+        debug_assert!(
+            b.actions.len() <= MAX_ACTIONS,
+            "a batch bar shows at most {MAX_ACTIONS} actions"
+        );
+        // The count's slot holds as many characters at any text size.
+        let slot = batch::COUNT_W * self.ui.text_scale();
         Some(
             self.add_with(
+                // The buttons go under the text when the slot and they don't fit on one line (a
+                // narrow window at a large text size), so nothing overlaps. What decides it is
+                // the slot, not the count, so a count change never moves them.
                 Element::toolbar(key)
                     .style(Style {
                         axis: Axis::Row,
-                        gap: SPACE[2],
+                        gap: SPACE[1],
                         align: Align::Center,
-                        padding: Insets::xy(PAD_X, PAD_Y),
+                        padding: Insets::xy(batch::PAD_X, batch::PAD_Y),
+                        wrap: true,
                         ..Style::default()
                     })
-                    .look(Look {
-                        fill: Some(Tone::Text),
-                        border: None,
-                        radius: Radius::Card,
-                        ink: Tone::Surface,
-                    })
+                    .look(BAR)
                     .name(b.name),
                 |cx| {
                     cx.add_with(
                         Element::stack(TEXT).style(Style {
                             axis: Axis::Row,
-                            gap: SPACE[1],
-                            grow: 1.0,
+                            gap: SPACE[2],
                             align: Align::Center,
+                            grow: 1.0,
+                            min: Size { w: slot, h: 0.0 },
+                            wrap: true,
                             ..Style::default()
                         }),
                         |cx| {
-                            cx.add(Element::text(BATCH_COUNT, b.selected));
+                            cx.add(
+                                Element::text(BATCH_COUNT, b.selected)
+                                    .text_style(STRONG)
+                                    .style(Style {
+                                        min: Size { w: slot, h: 0.0 },
+                                        ..Style::default()
+                                    })
+                                    .look(INK),
+                            );
                             if b.hidden > 0 {
-                                cx.add(Element::text(BATCH_HIDDEN, b.hidden_text));
+                                cx.add(Element::text(BATCH_HIDDEN, b.hidden_text).look(INK));
                             }
                             if !b.note.is_empty() {
-                                cx.add(Element::text(BATCH_NOTE, b.note));
+                                cx.add(
+                                    Element::text(BATCH_NOTE, b.note)
+                                        .text_style(PROSE)
+                                        .look(INK),
+                                );
                             }
                         },
                     );
                     for (i, (label, msg, emphasis)) in (0..).zip(b.actions.iter().take(MAX_ACTIONS))
                     {
+                        let (look, text_style) = match emphasis {
+                            Emphasis::Primary => (PRIMARY, STRONG),
+                            Emphasis::Normal => (QUIET, TextStyle::default()),
+                        };
                         cx.add(
                             Element::button(Key::index(i), label, msg.clone())
                                 .style(BUTTON)
-                                .look(button_look(*emphasis)),
+                                .text_style(text_style)
+                                .look(look),
                         );
                     }
                     let (name, clear) = &b.clear;
@@ -103,15 +136,16 @@ impl<M: Clone> Cx<'_, M> {
                             .name(name)
                             .style(Style {
                                 padding: Insets::default(),
+                                align: Align::Center,
                                 min: Size {
-                                    w: BUTTON_H,
-                                    h: BUTTON_H,
+                                    w: batch::BUTTON_H,
+                                    h: batch::BUTTON_H,
                                 },
                                 ..BUTTON
                             })
-                            .look(Look::SUBTLE),
+                            .look(QUIET),
                         |cx| {
-                            cx.add(Element::glyph(CLEAR_GLYPH, Icon::Cancel));
+                            cx.add(Element::glyph(CLEAR_GLYPH, Icon::Cancel).look(INK));
                         },
                     );
                 },
@@ -122,14 +156,53 @@ impl<M: Clone> Cx<'_, M> {
 
 /// The most actions a bar shows (A3.5 (11)).
 const MAX_ACTIONS: usize = 3;
-/// Padding 10 × 14 and 34 px buttons (A3.5 (11)), taller when the text size needs it.
-const PAD_X: f32 = 14.0;
-const PAD_Y: f32 = 10.0;
-const BUTTON_H: f32 = 34.0;
+
+/// The bar: the inverse fill, rounded as a card. Its border is the fill's own color, so it
+/// doesn't show, except in high contrast, where the fill is the window and every border
+/// `WindowText` (A3.5 (11)).
+const BAR: Look = Look {
+    fill: Some(Tone::InverseFill),
+    border: Some(Tone::InverseFill),
+    radius: Radius::Card,
+    ink: Tone::InverseText,
+};
+
+/// Text and glyphs on the bar.
+const INK: Look = Look {
+    ink: Tone::InverseText,
+    ..Look::PLAIN
+};
+
+/// The primary action: the inverse accent, its text on it. Semibold.
+const PRIMARY: Look = Look {
+    fill: Some(Tone::InverseAccent),
+    border: None,
+    radius: Radius::Control,
+    ink: Tone::OnInverseAccent,
+};
+
+/// Any other action, and Clear selection: only its text or glyph until hovered or pressed, whose
+/// layer is the bar's ink (`Theme::layer`).
+const QUIET: Look = Look {
+    fill: None,
+    border: None,
+    radius: Radius::Control,
+    ink: Tone::InverseText,
+};
+
+/// The note wraps when the bar is narrow.
+const PROSE: TextStyle = TextStyle {
+    size: font::BODY,
+    weight: font::REGULAR,
+    mono: false,
+    wrap: true,
+};
+
+/// A button: at least [`batch::BUTTON_H`] high, its text [`batch::PAD_X`] from its sides.
 const BUTTON: Style = Style {
     axis: Axis::Column,
     gap: 0.0,
-    padding: Insets::xy(PAD_X, 0.0),
+    padding: Insets::xy(batch::PAD_X, 0.0),
     align: Align::Stretch,
     justify: Justify::Center,
     grow: 0.0,
@@ -137,7 +210,7 @@ const BUTTON: Style = Style {
     height: Dim::Auto,
     min: Size {
         w: 0.0,
-        h: BUTTON_H,
+        h: batch::BUTTON_H,
     },
     max: Size::INFINITE,
     wrap: false,

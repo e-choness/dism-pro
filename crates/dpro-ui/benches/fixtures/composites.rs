@@ -21,7 +21,7 @@
 use std::fmt::Write as _;
 
 use dpro_ui::{
-    Align, Axes, Bytes, Canvas, Cx, Element, FakeText, Input, Insets, InvariantFormats, Key,
+    Align, Axes, Bytes, Canvas, Cx, Dim, Element, FakeText, Input, Insets, InvariantFormats, Key,
     KeyCode, KeyEvent, Landmark, Live, Mods, Motion, Point, RectPx, Size, SizeUnits, Style,
     TextEdit, TextStyle, Theme, Tri, Ui,
     accesskit::{Node, NodeId as AkId, TreeUpdate},
@@ -38,7 +38,8 @@ pub(crate) const START: Size = Size {
     h: 700.0,
 };
 /// Narrow enough that the 4 summary cards wrap two to a line (4 × 220 px and 3 gaps don't fit
-/// in 640 less the page's padding), and settings rows put their control under their text.
+/// in 640 less the page's padding). Settings rows still keep their control at the end: they put it
+/// under their text below 600 px (`tokens::settings::NARROW`).
 pub(crate) const NARROW: Size = Size { w: 640.0, h: 700.0 };
 /// One frame at 60 Hz, rounded down to whole milliseconds.
 pub(crate) const FRAME_MS: u64 = 16;
@@ -554,7 +555,14 @@ fn settings(m: &Model, cx: &mut Cx<'_, Msg>) {
         let [empty, when, keep, days] = &ROWS;
         cx.settings_row(Key::index(0), empty, |cx| {
             let state = if m.empty { Tri::On } else { Tri::Off };
-            let mut el = Element::toggle(CONTROL, empty.label, state, Msg::Empty);
+            // A target at least 24 px high, as the radios are (the caller sizes its control).
+            let mut el = Element::toggle(CONTROL, empty.label, state, Msg::Empty).style(Style {
+                min: Size {
+                    w: 0.0,
+                    h: SPACE[5],
+                },
+                ..Style::default()
+            });
             if let Some(d) = empty.description {
                 el = el.describe(d);
             }
@@ -601,9 +609,19 @@ fn settings(m: &Model, cx: &mut Cx<'_, Msg>) {
             cx.add(el);
         });
         cx.settings_row(Key::index(3), days, |cx| {
+            // A field is as wide as its view makes it.
             let mut el = Element::field(CONTROL, &m.days_text, Msg::Edit)
                 .name(days.label)
-                .step(Msg::Days);
+                .step(Msg::Days)
+                .style(Style {
+                    width: Dim::Fixed(SPACE[5] * 3.0),
+                    padding: Insets::xy(SPACE[1], 0.0),
+                    min: Size {
+                        w: 0.0,
+                        h: SPACE[5],
+                    },
+                    ..Style::default()
+                });
             if let Some(d) = days.description {
                 el = el.describe(d);
             }

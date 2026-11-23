@@ -149,7 +149,7 @@ impl<M> Ui<M> {
         let split = (node.hold && self.hold.node == i && (node.pressed || self.hold.done))
             .then(|| p.hold(rect, corner, self.hold.t, visible));
         if (interactive && button && split.is_none()) || lit {
-            p.state_layer(node, rect, corner, lit);
+            p.state_layer(node, rect, corner, lit, under);
         }
         if let Some(border) = node.look.border {
             p.canvas
@@ -378,19 +378,20 @@ impl Painter<'_, '_> {
         self.canvas.rrect(thumb, half(thumb), ink);
     }
 
-    /// The hover or pressed layer over a control's shape (none in high contrast: see
-    /// [`outline`](Self::outline)).
-    fn state_layer<M>(&mut self, n: &Node<M>, r: RectPx, corner: f32, lit: bool) {
+    /// The hover or pressed layer over a control's shape, on the fill `under` (none in high
+    /// contrast: see [`outline`](Self::outline)). Its ink is the fill's ([`Theme::layer`]), so it
+    /// shows on the batch bar's inverse fill too.
+    fn state_layer<M>(&mut self, n: &Node<M>, r: RectPx, corner: f32, lit: bool, under: Tone) {
         if self.theme.scheme() == Scheme::HighContrast {
             return;
         }
         let layer = if n.pressed {
-            self.theme.color(Tone::Pressed)
+            self.theme.layer(Tone::Pressed, under)
         } else if lit {
             // Fully lit: a focused menu item.
-            self.theme.color(Tone::Hover)
+            self.theme.layer(Tone::Hover, under)
         } else if n.hover_t > 0.0 {
-            let c = self.theme.color(Tone::Hover);
+            let c = self.theme.layer(Tone::Hover, under);
             c.alpha(fraction(c.a, n.hover_t))
         } else {
             return;
@@ -566,7 +567,7 @@ impl Painter<'_, '_> {
                 .ring(r, round, 1, self.theme.stroke(edge, n.enabled));
         }
         if interactive {
-            self.state_layer(n, r, round, false);
+            self.state_layer(n, r, round, false, fill);
             self.outline(n, r, round, fill, false);
         }
         if on {
@@ -629,7 +630,7 @@ impl Painter<'_, '_> {
                 .ring(r, corner, 1, self.theme.stroke(edge, n.enabled));
         }
         if interactive {
-            self.state_layer(n, r, corner, false);
+            self.state_layer(n, r, corner, false, fill);
             self.outline(n, r, corner, fill, false);
         }
         let mark = self.theme.ink(Tone::OnAccent, fill);
