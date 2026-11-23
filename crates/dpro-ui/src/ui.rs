@@ -152,8 +152,8 @@ pub struct Ui<M> {
     pub(crate) queued: Vec<M>,
 }
 
-/// A node's tooltip, and a dropdown's accessible name and step: in a side table, so the nodes
-/// without them (nearly all) carry one index.
+/// A node's tooltip, a dropdown's accessible name and step, and a field's step: in a side table,
+/// so the nodes without them (nearly all) carry one index.
 #[derive(Debug)]
 pub(crate) struct Side<M> {
     pub(crate) node: u32,
@@ -562,11 +562,19 @@ impl<M> Ui<M> {
         let field = std::mem::replace(&mut self.nodes[i as usize].field, NIL);
         if field != NIL {
             self.release_field(field);
+            // A field's step has a side slot without popup state (TD-0009 A3.5 addition 6).
+            if self.nodes[i as usize].rare == 0 {
+                let side = std::mem::replace(&mut self.nodes[i as usize].side, NIL);
+                if side != NIL {
+                    self.release_side(side);
+                }
+            }
         }
         if std::mem::replace(&mut self.nodes[i as usize].hold, false) {
             self.forget_hold(i);
         }
-        // Only a node with popup state (a tooltip, a dropdown) has a side slot: the rest skip it.
+        // Only a node with popup state (a tooltip, a dropdown) has a side slot now: the rest
+        // skip it.
         debug_assert!(
             self.nodes[i as usize].rare != 0 || self.nodes[i as usize].side == NIL,
             "node {i} has a side slot and no popup state"

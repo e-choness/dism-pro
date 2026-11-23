@@ -227,8 +227,9 @@ impl<M> Ui<M> {
                 label,
                 placeholder,
                 on_edit,
+                step,
             } if field != NIL => {
-                seen |= self.update_field(field, label, placeholder, on_edit);
+                seen |= self.update_field(field, label, placeholder, on_edit, step);
                 if field_text {
                     self.field_text_set(i);
                 } else if field_style {
@@ -259,16 +260,19 @@ impl<M> Ui<M> {
         }
     }
 
-    /// Copies a field's name, placeholder and edit handler into its slot `f`. Returns whether a
-    /// client sees a change; a new placeholder shows while the field is empty.
+    /// Copies a field's name, placeholder and edit handler into its slot `f`, and its step into its
+    /// side slot. Returns whether a client sees a change; a new placeholder shows while the field
+    /// is empty.
     fn update_field(
         &mut self,
         f: u32,
         name: &str,
         placeholder: &str,
         on_edit: Option<fn(TextEdit) -> M>,
+        step: Option<fn(bool) -> M>,
     ) -> bool {
         let slot = &mut self.fields[f as usize];
+        let i = slot.node;
         // Becoming read-only, or editable, is seen.
         let mut seen = slot.on_edit.is_some() != on_edit.is_some();
         slot.on_edit = on_edit;
@@ -280,11 +284,17 @@ impl<M> Ui<M> {
         if slot.placeholder != placeholder {
             slot.placeholder.clear();
             slot.placeholder.push_str(placeholder);
-            let i = slot.node;
             if self.nodes[i as usize].text.is_empty() {
                 self.damage_node(i);
             }
             seen = true;
+        }
+        // Its step lives in its side slot, as a dropdown's does (A3.5 addition 6). A field with
+        // popup state had it kept by `update_rare`; one without has no tooltip either, so this
+        // keeps the step alone (and does nothing more after `update_rare`).
+        let n = &self.nodes[i as usize];
+        if n.rare == 0 && (step.is_some() || n.side != NIL) {
+            self.update_side(i, "", "", step);
         }
         seen
     }
@@ -352,6 +362,8 @@ impl<M> Ui<M> {
         n.expanded = expanded;
         let (label, step) = match extra {
             Extra::Combo { label, step } => (label, step),
+            // A field's name is in its field slot; only its step is here.
+            Extra::Field { step, .. } => ("", step),
             _ => ("", None),
         };
         if n.side != NIL || !tip.is_empty() || !label.is_empty() || step.is_some() {
@@ -363,8 +375,9 @@ impl<M> Ui<M> {
         seen
     }
 
-    /// Keeps node `i`'s tooltip, and a dropdown's name and step, in its side slot: a node that
-    /// gained one gets a slot, and one left with none gives it back (and its tooltip goes).
+    /// Keeps node `i`'s tooltip, a dropdown's name and step, and a field's step, in its side
+    /// slot: a node that gained one gets a slot, and one left with none gives it back (and its
+    /// tooltip goes).
     /// Returns whether a client sees a change: the tip is its description, the name its name.
     fn update_side(&mut self, i: u32, tip: &str, label: &str, step: Option<fn(bool) -> M>) -> bool {
         let mut s = self.nodes[i as usize].side;

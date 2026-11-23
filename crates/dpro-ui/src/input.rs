@@ -8,17 +8,23 @@
 //!   build in reading order, wrapping at the ends. Enter activates on the press; Space presses and
 //!   activates on the release, as Windows buttons do. A focused field takes its editing keys and
 //!   typed characters first (`field.rs`). Other keys are left to the caller.
-//! - **Groups** (tabs, radio buttons, lists; TD-0009 §4.3) are one Tab stop each: Tab lands on the
-//!   picked item, or the first (the last, going back). Inside, the arrow keys move focus (Home
-//!   and End to the ends). In tabs and radio groups they wrap and pick the item they reach, as
-//!   Windows does; in a list they move focus only, and Enter or Space opens.
+//! - **Groups** (tabs, radio buttons, lists, toolbars; TD-0009 §4.3) are one Tab stop each: Tab
+//!   lands on the picked item, or the first (the last, going back). Inside, the arrow keys move
+//!   focus (Home and End to the ends). In tabs and radio groups they wrap and pick the item they
+//!   reach, as Windows does; in a list they move focus only, and Enter or Space opens. A toolbar
+//!   (TD-0009 A3.5 addition 8) takes Left and Right whatever its axis, without wrapping.
+//! - **Suggestions** (A3.5 addition 7): a suggestion list's options never take focus, from Tab,
+//!   the pointer, a client or the app. Hovering one only paints it, and a click sends its message
+//!   while focus stays where it was: in the field that drives the list.
 //! - **Menus and dropdown lists** (TD-0009 A1.4): Up and Down move focus through a menu's items,
 //!   wrapping, and through a list's options, not wrapping; Enter or Space invokes or picks.
 //!   Hovering an item focuses it, and a release on an item invokes it, even if the press was on
 //!   another. A disabled item can be focused, never invoked. In a popup with nothing focused yet
 //!   (a menu opened by the pointer), the first arrow focuses its first item.
 //! - **Dropdowns:** a click, Enter, Space, Alt+Down or F4 sends its message (the model opens the
-//!   list); Up and Down, while it's closed, send its step.
+//!   list); Up and Down, while it's closed, send its step: `true` on Down, the next option.
+//! - **Steps on fields** (A3.5 addition 6): Up and Down on a field given a step send it, `true` on
+//!   Up (more) and `false` on Down, instead of going on to the caller.
 //! - **Context requests** (a right-click, Shift+F10, the Menu key; `WM_CONTEXTMENU`): the nearest
 //!   node at or above the target with [`context`](crate::Element::context) set is focused and
 //!   picked if it's selectable, and the request is left for the host
@@ -149,13 +155,14 @@ impl<M: Clone> Ui<M> {
                     self.field_pointer(self.pressed, p, true);
                 }
                 let moved = self.pointer_over(hit);
-                // Hovering a menu item focuses it, as in Windows menus.
+                // Hovering a menu item focuses it, as in Windows menus; a suggestion's only paints.
                 let item = self.pressed == NIL
                     && hit != self.focus
                     && self
                         .nodes
                         .get(hit as usize)
-                        .is_some_and(|n| n.role == Role::MenuItem);
+                        .is_some_and(|n| n.role == Role::MenuItem)
+                    && !self.suggestion(hit);
                 if item {
                     self.hide_focus_ring();
                     self.focus_node(hit);
@@ -242,7 +249,7 @@ impl<M: Clone> Ui<M> {
         // Focus from the pointer scrolls nothing: the node stays under the pointer. A press on a
         // table's row focuses its current row, which the keys act on: the click makes the
         // pressed row current, and focus follows it then; a press that ends elsewhere leaves
-        // both where they were.
+        // both where they were. A press on a suggestion leaves focus in its field.
         let to = self
             .row_place(hit)
             .and_then(|(t, _)| self.current_row_node(t))
@@ -388,17 +395,26 @@ impl<M: Clone> Ui<M> {
                 self.activate(self.focus, out);
                 true
             }
-            // Up and Down change a closed dropdown's value, without opening it.
+            // Up and Down change a closed dropdown's value, without opening it, and step a field
+            // that has a step (it passed them on for it, A3.5 addition 6). A dropdown's `true` is
+            // Down, its next option; a field's is Up, more.
             (KeyCode::Up | KeyCode::Down, true)
-                if !(k.mods.ctrl || k.mods.alt || k.mods.win) && self.focused(Role::ComboBox) =>
+                if !(k.mods.ctrl || k.mods.alt || k.mods.win)
+                    && (self.focused(Role::ComboBox) || self.focused(Role::Field)) =>
             {
                 self.show_focus_ring();
                 let n = &self.nodes[self.focus as usize];
+                let field = n.role == Role::Field;
+                let more = if field {
+                    k.key == KeyCode::Up
+                } else {
+                    k.key == KeyCode::Down
+                };
                 if n.interactive()
-                    && n.expanded != Some(true)
+                    && (field || n.expanded != Some(true))
                     && let Some(step) = self.sides.get(n.side as usize).and_then(|s| s.step)
                 {
-                    out.push(step(k.key == KeyCode::Down));
+                    out.push(step(more));
                 }
                 true
             }
@@ -476,7 +492,8 @@ impl<M: Clone> Ui<M> {
         if group == Group::Rows {
             return false;
         }
-        let row = axis == crate::Axis::Row;
+        // A toolbar takes Left and Right whatever its axis (A3.5 addition 8).
+        let row = axis == crate::Axis::Row || group == Group::Toolbar;
         let step = match key {
             KeyCode::Home => Rove::First,
             KeyCode::End => Rove::Last,
@@ -488,7 +505,8 @@ impl<M: Clone> Ui<M> {
             KeyCode::Down if !row => Rove::Next,
             _ => return false,
         };
-        // Tabs, radio buttons and menus wrap; lists and a dropdown's options stop at their ends.
+        // Tabs, radio buttons and menus wrap; lists, toolbars and a dropdown's options stop at
+        // their ends.
         let wrap = matches!(group, Group::Tabs | Group::Radios | Group::Menu);
         let to = self.rove_target(parent, self.focus, step, wrap);
         self.show_focus_ring();
@@ -545,7 +563,7 @@ impl<M: Clone> Ui<M> {
 
 impl<M> Ui<M> {
     /// Moves focus to `id`, as UI Automation's `SetFocus` does; `None` clears it. A node that
-    /// can't take focus is ignored.
+    /// can't take focus, as a suggestion can't, is ignored.
     pub fn set_focus(&mut self, id: Option<NodeId>) {
         match id.and_then(|id| self.index(id)) {
             Some(i) if self.nodes[i as usize].interactive() || self.lone_viewport(i) => {
@@ -710,7 +728,8 @@ impl<M> Ui<M> {
     }
 
     /// Whether Tab can land on `at`, coming from `from`, and where: an interactive node, or for
-    /// one in a group its [entry](Self::group_entry), unless `from` is in that group already.
+    /// one in a group its [entry](Self::group_entry), unless `from` is in that group already or
+    /// the group is a suggestion list, which Tab skips (A3.5 addition 7).
     fn tab_stop(&self, at: u32, from: u32, forward: bool) -> u32 {
         if !self.nodes[at as usize].interactive() {
             // A viewport with no tab stop inside is one (A2.4).
@@ -723,7 +742,9 @@ impl<M> Ui<M> {
         let g = self.group_of(at);
         if g == NIL {
             at
-        } else if from != NIL && self.nodes[from as usize].parent == g {
+        } else if (from != NIL && self.nodes[from as usize].parent == g)
+            || self.nodes[g as usize].group == Some(Group::Suggestions)
+        {
             NIL
         } else {
             self.group_entry(g, forward)
@@ -780,6 +801,24 @@ impl<M> Ui<M> {
         self.nodes
             .get(i as usize)
             .is_some_and(|n| n.role == Role::Field)
+    }
+
+    /// Whether `i` is an item of a [suggestion list](Group::Suggestions), which never takes
+    /// focus (A3.5 addition 7); false for [`NIL`].
+    pub(crate) fn suggestion(&self, i: u32) -> bool {
+        self.nodes
+            .get(i as usize)
+            .and_then(|n| self.nodes.get(n.parent as usize))
+            .is_some_and(|p| p.group == Some(Group::Suggestions))
+    }
+
+    /// Whether node `i` has a step (a dropdown's, a field's) for Up and Down to send; false for
+    /// [`NIL`].
+    pub(crate) fn has_step(&self, i: u32) -> bool {
+        self.nodes
+            .get(i as usize)
+            .and_then(|n| self.sides.get(n.side as usize))
+            .is_some_and(|s| s.step.is_some())
     }
 
     fn animate_hover(&mut self, i: u32) {
@@ -855,13 +894,16 @@ impl<M> Ui<M> {
     /// app.
     pub(crate) fn move_focus(&mut self, to: u32) {
         self.focus_node(to);
-        self.reveal(to);
+        if self.focus == to {
+            self.reveal(to);
+        }
     }
 
-    /// Moves focus to `to` where it is: from the pointer, which it stays under.
+    /// Moves focus to `to` where it is: from the pointer, which it stays under. A suggestion
+    /// never takes it (A3.5 addition 7): the node that has it keeps it.
     pub(crate) fn focus_node(&mut self, to: u32) {
         let from = self.focus;
-        if from == to {
+        if from == to || self.suggestion(to) {
             return;
         }
         if self.hold.node != NIL && self.hold.node == from {
