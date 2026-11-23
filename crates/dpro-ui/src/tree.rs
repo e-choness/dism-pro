@@ -1475,14 +1475,15 @@ mod tests {
 
     /// TD-0009 A4.5: the heading level, landmark, shortcut and a description beside a tooltip
     /// cost an element 16 bytes over its 168 before slice 6a: their byte fits its padding, and
-    /// their string is one. A node keeps them in its side slot, flagged in its `rare`, and its
-    /// politeness and presentational flag fit its padding: it doesn't grow.
+    /// their string is one. A field's step (A3.5 addition 6) costs its `Extra` 8 more. A node
+    /// keeps the properties in its side slot, flagged in its `rare`, and its politeness and
+    /// presentational flag fit its padding: it doesn't grow.
     #[test]
     fn the_a11y_properties_cost_an_element_a_string_and_a_node_nothing() {
         use std::mem::size_of;
         assert_eq!(size_of::<A11yProps>(), 1);
-        assert_eq!(size_of::<Element<'_, ()>>(), 168 + 16);
-        assert_eq!(size_of::<Element<'_, u64>>(), 184 + 16);
+        assert_eq!(size_of::<Element<'_, ()>>(), 168 + 8 + 16);
+        assert_eq!(size_of::<Element<'_, u64>>(), 184 + 8 + 16);
         assert_eq!((size_of::<Node<()>>(), size_of::<Node<u64>>()), (216, 232));
     }
 

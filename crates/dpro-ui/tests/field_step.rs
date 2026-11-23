@@ -158,6 +158,52 @@ fn the_step_follows_the_view_as_a_tooltip_comes_and_goes() {
 }
 
 #[test]
+fn the_step_follows_the_view_beside_a_shortcut() {
+    // A shortcut (A4.5) shares the side slot without being popup state: the field must keep its
+    // step beside it, and its shortcut when the step goes.
+    let mut ui = built(false);
+    let field = ui.find(&[FIELD]);
+    for (step, keys) in [
+        (true, "Ctrl+F"),
+        (true, ""),
+        (false, "Ctrl+F"),
+        (true, "Ctrl+F"),
+        (false, ""),
+        (true, ""),
+        (false, "Ctrl+F"),
+    ] {
+        ui.build(|cx| {
+            let mut f = Element::field(FIELD, "30", Msg::Edit)
+                .name("Days")
+                .shortcut(keys);
+            if step {
+                f = f.step(Msg::Step);
+            }
+            cx.add(f);
+        });
+        ui.layout(&mut FakeText);
+        assert_eq!(ui.find(&[FIELD]), field, "the same node");
+        let want: &[Msg] = if step { &[Msg::Step(true)] } else { &[] };
+        assert_eq!(
+            press(&mut ui, KeyCode::Up),
+            want,
+            "step {step}, shortcut {keys:?}"
+        );
+        let tree = ui.a11y_tree();
+        let shortcut = tree
+            .nodes
+            .iter()
+            .find(|(ak, _)| ui.a11y_node(*ak) == field)
+            .and_then(|(_, n)| n.keyboard_shortcut());
+        assert_eq!(
+            shortcut,
+            (!keys.is_empty()).then_some(keys),
+            "step {step}, shortcut {keys:?}"
+        );
+    }
+}
+
+#[test]
 fn a_stepped_field_gives_its_slot_back_when_it_goes() {
     // Its side slot has no popup state to find it by: freeing the node must still release it (a
     // debug assertion checks every freed node's slot).

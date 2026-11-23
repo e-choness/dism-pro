@@ -291,9 +291,14 @@ impl<M> Ui<M> {
         }
         // Its step lives in its side slot, as a dropdown's does (A3.5 addition 6). A field with
         // popup state had it kept by `update_rare`; one without has no tooltip either, so this
-        // keeps the step alone (and does nothing more after `update_rare`).
+        // keeps the step alone (and does nothing more after `update_rare`). A4.5's properties
+        // share the slot without being popup state, so they don't stop this.
         let n = &self.nodes[i as usize];
-        if n.rare == 0 && (step.is_some() || n.side != NIL) {
+        let stepped = self
+            .sides
+            .get(n.side as usize)
+            .is_some_and(|s| s.step.is_some());
+        if n.rare & !rare::PROPS == 0 && (step.is_some() || stepped) {
             self.update_side(i, "", "", step);
         }
         seen
