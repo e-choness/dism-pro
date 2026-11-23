@@ -10,6 +10,11 @@ publish.workspace = true
 [dependencies]
 accesskit.workspace = true
 dpro-app.workspace = true
+dpro-core.workspace = true
+
+# The Win32 platform the `platform` module adapts (TD-0009 §5.1).
+[target.'cfg(windows)'.dependencies]
+dpro-win = { workspace = true, features = ["gui"] }
 
 [dev-dependencies]
 criterion.workspace = true
@@ -26,11 +31,22 @@ harness = false
 name = "a11y"
 harness = false
 
+# TD-0009 §7 U1: S-01's fling script on a 100k-row table, its frame times (A2.7).
+[[bench]]
+name = "fling"
+harness = false
+
 # U2 as instruction counts, for `docker compose run --rm bench-gate` (doc 04 §3).
 [[bench]]
 name = "ir"
 harness = false
 bench = false
+
+# TD-0009 §7 U4, U6, U7: G1's probe target until roadmap 3.2 gives dismpro.exe its shell. The
+# benches' synthetic shell in a real window; `.github/scripts/ui-gates.ps1` measures it against
+# dpro-win's bare_window.
+[[example]]
+name = "shell"
 
 [lints]
 workspace = true

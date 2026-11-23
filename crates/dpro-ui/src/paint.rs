@@ -8,22 +8,48 @@
 //!
 //! What each node shows:
 //! - its [`Look`](crate::Look)'s fill, then its border, both with the look's radius;
-//! - buttons: a state layer while hovered (following the hover fade) or pressed;
+//! - buttons and tabs: a state layer while hovered (following the hover fade) or pressed. A hold
+//!   button held shows the part still to go in the permanent fill, its own fill growing from its
+//!   start as the hold runs, and its text in the ink that pairs with each part;
 //! - text in the look's ink (secondary when disabled), centered vertically in the content box,
 //!   and horizontally too in a button. A node with children (a table row) shows no text of its
 //!   own: its text is its accessible name;
 //! - check boxes: a box a line high, with the state layer, then the label half a line after it;
+//!   radio buttons the same with a circle, the accent with a dot in it when picked;
+//! - progress bars: a pill-shaped track, the accent along it as far as its value;
+//! - menu items and a dropdown list's options: their text from the start, and the state layer
+//!   while focused, hovered or pressed, which is all the keyboard focus shows in a menu, as in
+//!   Windows' menus; separators: a hairline across the middle;
+//! - dropdowns: as a button, their value from the start and a chevron at the end;
+//! - tooltips: their text, wrapped, from the start;
+//! - data tables (TD-0009 A2.5): rows with the state layer while hovered or pressed, the current
+//!   one in the selection fill; cells with their text where their column puts it, trimmed, or a
+//!   check box centered in a check cell (none in a row that can't be checked); column headers in
+//!   secondary ink, a sorted one with a chevron at its end (up smallest first); and a hairline
+//!   under the header;
+//! - scroll viewports (TD-0009 A2): their content moved by the offset, in whole pixels, and
+//!   clipped to them; then their bars over it, each thumb a pill in secondary ink (`WindowText`
+//!   in high contrast), and an expanded bar's track under it in the hover layer (a `WindowText`
+//!   outline in high contrast);
 //! - while focus is visible, Windows 11's focus visual over everything else: a ring in text color
 //!   with a one-pixel surface-colored ring inside it, so it shows on any fill, accent included.
+//!
+//! Ink is looked up with the fill under it (the node's own, else its nearest ancestor's), which
+//! is how high contrast gives text the system color paired with its background
+//! ([`Theme::ink`]). High contrast also draws borders in `WindowText` (`GrayText` when disabled),
+//! keeps `Highlight` fills for what can be used, and shows hover and press as an outline instead
+//! of a state layer.
 
-use dpro_app::table::Tri;
+use dpro_app::table::{Order, Tri};
 
 use crate::{
     canvas::Canvas,
     geom::{Rect, RectPx},
+    style::Justify,
+    table::{TABLE_CHECK, sort_of},
     text::{GlyphSink, Icon, TextSystem},
     theme::{
-        Color, Theme, Tone,
+        Color, Scheme, Theme, Tone,
         tokens::{radius, stroke},
     },
     tree::{NIL, Node, Role},
@@ -67,7 +93,8 @@ impl<M> Ui<M> {
             return;
         }
         canvas.set_clip(region);
-        canvas.fill(region, theme.color(Tone::App));
+        // Set, not blended: under glass the background is clear, and the old pixels must go.
+        canvas.clear(region, theme.color(Tone::App));
         let mut p = Painter {
             canvas,
             text,
@@ -76,56 +103,222 @@ impl<M> Ui<M> {
         };
         let mut c = self.nodes[ROOT as usize].first;
         while c != NIL {
-            self.paint_node(c, region, &mut p);
+            self.paint_node(c, region, Tone::App, &mut p);
             c = self.nodes[c as usize].next;
         }
         let all = p.canvas.bounds();
         p.canvas.set_clip(all);
     }
 
-    /// Paints node `i` and its subtree within `clip`.
-    fn paint_node(&self, i: u32, clip: RectPx, p: &mut Painter<'_, '_>) {
+    /// Paints node `i` and its subtree within `clip`, over the fill `under` (its nearest
+    /// ancestor's, which picks high contrast's ink).
+    fn paint_node(&self, i: u32, clip: RectPx, under: Tone, p: &mut Painter<'_, '_>) {
         let node = &self.nodes[i as usize];
+        // In the node's own coordinates; the canvas moves them to where they show.
         let rect = node.rect.snap(p.scale);
-        let visible = rect.intersect(clip);
+        let visible = p.canvas.placed(rect).intersect(clip);
         if visible.is_empty() {
             // Children are clipped to their parent: nothing below shows either.
             return;
         }
         p.canvas.set_clip(visible);
         let corner = node.look.radius.logical() * p.scale;
-        if let Some(fill) = node.look.fill {
+        let fill = node.look.fill.map(|f| p.theme.fill(f, node.enabled));
+        if let Some(fill) = fill {
             p.canvas.rrect(rect, corner, p.theme.color(fill));
         }
+        let under = fill.unwrap_or(under);
         let interactive = node.enabled && node.role.interactive();
-        if interactive && node.role == Role::Button {
-            p.state_layer(node, rect, corner);
+        // A column header that doesn't sort takes focus only: no state layer.
+        let button = matches!(
+            node.role,
+            Role::Button | Role::Tab | Role::MenuItem | Role::ComboBox | Role::Row
+        ) || (node.role == Role::ColumnHeader && node.msg.is_some());
+        // A focused menu item is lit as if hovered, enabled or not: that's its focus.
+        let lit = node.role == Role::MenuItem && self.focus == i;
+        // A hold pressed: the part still to go turns permanent, and its fill grows back from the
+        // start as it's held (doc 05 §4). Where they meet, in physical pixels.
+        let split = (node.hold && self.hold.node == i && (node.pressed || self.hold.done))
+            .then(|| p.hold(rect, corner, self.hold.t, visible));
+        if (interactive && button && split.is_none()) || lit {
+            p.state_layer(node, rect, corner, lit);
         }
         if let Some(border) = node.look.border {
-            p.canvas.ring(rect, corner, 1, p.theme.color(border));
+            p.canvas
+                .ring(rect, corner, 1, p.theme.stroke(border, node.enabled));
         }
-        let ink = p.theme.color(if node.enabled {
-            node.look.ink
-        } else {
-            Tone::TextSecondary
-        });
+        if (interactive && button) || lit {
+            p.outline(node, rect, corner, under, lit);
+        }
+        let ink = p.theme.ink(
+            if node.enabled {
+                node.look.ink
+            } else {
+                Tone::TextSecondary
+            },
+            under,
+        );
         match node.role {
             Role::CheckBox => p.check_box(node, interactive, ink),
-            Role::Label | Role::Button if node.first == NIL && !node.text.is_empty() => {
+            Role::Radio => p.radio(node, interactive, ink),
+            Role::Field => self.paint_field(i, visible, under, ink, p),
+            Role::Progress => p.progress(node, rect),
+            Role::Label | Role::Button | Role::Tab
+                if node.first == NIL && !node.text.is_empty() =>
+            {
                 let content = node.rect.inset(node.style.padding);
-                p.text(node, content, node.role == Role::Button, ink);
+                if let Some(x) = split {
+                    // Each part's text in the ink that pairs with its fill.
+                    let to_go = p.theme.ink(Tone::PermanentText, Tone::PermanentFill);
+                    for (part, ink) in [
+                        (RectPx { x1: x, ..rect }, ink),
+                        (RectPx { x0: x, ..rect }, to_go),
+                    ] {
+                        let clip = p.canvas.placed(part).intersect(visible);
+                        if !clip.is_empty() {
+                            p.canvas.set_clip(clip);
+                            p.text(node, content, button, ink);
+                        }
+                    }
+                    p.canvas.set_clip(visible);
+                } else {
+                    p.text(node, content, button, ink);
+                }
             }
-            Role::Container | Role::Label | Role::Button => {}
+            Role::MenuItem | Role::Tooltip
+                if node.first == NIL && (!node.text.is_empty() || node.is_check_item()) =>
+            {
+                let mut content = node.rect.inset(node.style.padding);
+                if self.in_check_menu(i) {
+                    content = p.menu_check(node, content, ink);
+                }
+                p.text(node, content, false, ink);
+            }
+            Role::ComboBox => p.combo(node, ink),
+            Role::Separator => p.separator(rect),
+            Role::Cell => p.cell(node, ink),
+            Role::ColumnHeader => p.column_header(node, ink),
+            Role::Container if self.is_table_header(i) => p.rule_below(rect),
+            Role::Container
+            | Role::Grid
+            | Role::Row
+            | Role::Label
+            | Role::Button
+            | Role::Tab
+            | Role::MenuItem
+            | Role::Tooltip => {}
         }
-        let mut child = node.first;
-        while child != NIL {
-            self.paint_node(child, visible, p);
-            child = self.nodes[child as usize].next;
-        }
-        if self.focus == i && self.focus_visible {
+        self.paint_children(i, visible, under, p);
+        // A menu item's focus is its light, not a ring.
+        if self.focus == i && self.focus_visible && node.role != Role::MenuItem {
             p.canvas.set_clip(visible);
             p.focus_ring(rect, corner);
         }
+    }
+
+    /// Node `i`'s children within `visible`, over the fill `under`. A viewport's show moved by
+    /// its offset, and its bars go over them, inside its hairline if it has one.
+    fn paint_children(&self, i: u32, visible: RectPx, under: Tone, p: &mut Painter<'_, '_>) {
+        let node = &self.nodes[i as usize];
+        let origin = p.canvas.origin();
+        let mut visible = visible;
+        if node.scroll != NIL {
+            if node.look.border.is_some() {
+                // Content scrolls under the hairline (a pixel wide), not over it, as CSS clips
+                // to the padding box. No viewport is rounded, so the corners need no clip.
+                let r = p.canvas.placed(node.rect.snap(p.scale));
+                visible = visible.intersect(RectPx {
+                    x0: r.x0 + 1,
+                    y0: r.y0 + 1,
+                    x1: r.x1 - 1,
+                    y1: r.y1 - 1,
+                });
+            }
+            // A table's rows are laid out from their base.
+            let o = self.shift_px(node.scroll);
+            p.canvas.set_origin([
+                origin[0].saturating_sub(px_offset(o[0])),
+                origin[1].saturating_sub(px_offset(o[1])),
+            ]);
+        }
+        let mut child = node.first;
+        while child != NIL {
+            self.paint_node(child, visible, under, p);
+            child = self.nodes[child as usize].next;
+        }
+        if node.scroll != NIL {
+            p.canvas.set_origin(origin);
+            p.canvas.set_clip(visible);
+            for axis in [1, 0] {
+                if let Some((track, thumb, expanded)) = self.bar_local(node.scroll, axis) {
+                    p.scroll_bar(track.snap(p.scale), thumb.snap(p.scale), expanded, under);
+                }
+            }
+        }
+    }
+
+    /// A field's content, clipped to its content box: the selection, the visible part of its
+    /// text (or the placeholder while it's empty), then the caret. Selected text keeps its ink;
+    /// high contrast redraws it in `HighlightText` over `Highlight`.
+    fn paint_field(
+        &self,
+        i: u32,
+        visible: RectPx,
+        under: Tone,
+        ink: Color,
+        p: &mut Painter<'_, '_>,
+    ) {
+        let node = &self.nodes[i as usize];
+        let field = &self.fields[node.field as usize];
+        let content = node.rect.inset(node.style.padding);
+        let clip = p.canvas.placed(content.snap(p.scale)).intersect(visible);
+        if clip.is_empty() {
+            return;
+        }
+        p.canvas.set_clip(clip);
+        let line = field.line_box(content);
+        // Where the text starts: scrolled left to keep the caret in view.
+        let origin = line.x - field.scroll;
+        let shows = self.active && self.focused_field() == Some(i);
+        let (start, end) = field.selection();
+        let selection = (shows && start != end).then(|| {
+            let x0 = origin + field.x_of(start);
+            let x1 = origin + field.x_of(end);
+            Rect::new(x0, line.y, x1 - x0, line.h).snap(p.scale)
+        });
+        if let Some(sel) = selection {
+            let fill = p.theme.fill(Tone::Selected, true);
+            p.canvas.fill(sel, p.theme.color(fill));
+        }
+        if node.text.is_empty() {
+            if !field.placeholder.is_empty() {
+                let secondary = p.theme.ink(Tone::TextSecondary, under);
+                p.line(&field.placeholder, node, line, secondary);
+            }
+        } else {
+            let (slice, offset) = field.visible(&node.text);
+            let run = Rect::new(origin + offset, line.y, f32::INFINITY, line.h);
+            p.line(slice, node, run, ink);
+            let selected_ink = p.theme.ink(Tone::Text, Tone::Selected);
+            if let Some(sel) = selection
+                && selected_ink != ink
+            {
+                p.canvas.set_clip(p.canvas.placed(sel).intersect(clip));
+                p.line(slice, node, run, selected_ink);
+                p.canvas.set_clip(clip);
+            }
+        }
+        if shows && self.caret_on {
+            let caret = Rect::new(
+                origin + field.x_of(field.caret as usize),
+                line.y,
+                crate::field::caret_logical(self.caret),
+                line.h,
+            );
+            p.canvas
+                .fill(caret.snap(p.scale), p.theme.ink(Tone::Text, under));
+        }
+        p.canvas.set_clip(visible);
     }
 }
 
@@ -144,8 +337,7 @@ impl Painter<'_, '_> {
         // Whole pixels, at least one.
         let wide = (stroke::FOCUS * self.scale).round().max(1.0);
         let width = px_width(wide);
-        self.canvas
-            .ring(rect, corner, width, self.theme.color(Tone::Text));
+        self.canvas.ring(rect, corner, width, self.theme.focus());
         let inner = RectPx {
             x0: rect.x0 + width,
             y0: rect.y0 + width,
@@ -160,10 +352,34 @@ impl Painter<'_, '_> {
         );
     }
 
-    /// The hover or pressed layer over a control's shape.
-    fn state_layer<M>(&mut self, n: &Node<M>, r: RectPx, corner: f32) {
+    /// A scroll bar over its viewport, on the fill `under`: the track while `expanded`, then the
+    /// thumb. In high contrast they're `COLOR_BTNFACE` and `COLOR_BTNTEXT` (A2.5), a pair whose
+    /// contrast the theme guarantees whatever is under them.
+    fn scroll_bar(&mut self, track: RectPx, thumb: RectPx, expanded: bool, under: Tone) {
+        let high_contrast = self.theme.scheme() == Scheme::HighContrast;
+        let (fill, ink) = if high_contrast {
+            // `Subtle` is ButtonFace in high contrast, and text on it ButtonText.
+            (Tone::Subtle, self.theme.ink(Tone::Text, Tone::Subtle))
+        } else {
+            (Tone::Hover, self.theme.ink(Tone::TextSecondary, under))
+        };
+        if expanded {
+            self.canvas.fill(track, self.theme.color(fill));
+        }
+        self.canvas.rrect(thumb, half(thumb), ink);
+    }
+
+    /// The hover or pressed layer over a control's shape (none in high contrast: see
+    /// [`outline`](Self::outline)).
+    fn state_layer<M>(&mut self, n: &Node<M>, r: RectPx, corner: f32, lit: bool) {
+        if self.theme.scheme() == Scheme::HighContrast {
+            return;
+        }
         let layer = if n.pressed {
             self.theme.color(Tone::Pressed)
+        } else if lit {
+            // Fully lit: a focused menu item.
+            self.theme.color(Tone::Hover)
         } else if n.hover_t > 0.0 {
             let c = self.theme.color(Tone::Hover);
             c.alpha(fraction(c.a, n.hover_t))
@@ -171,6 +387,18 @@ impl Painter<'_, '_> {
             return;
         };
         self.canvas.rrect(r, corner, layer);
+    }
+
+    /// High contrast's hover and press (and a focused menu item): a whole-pixel outline over the
+    /// border, in the color that shows on the fill `under` ([`Theme::hover_outline`]).
+    fn outline<M>(&mut self, n: &Node<M>, r: RectPx, corner: f32, under: Tone, lit: bool) {
+        let Some(color) = self.theme.hover_outline(under) else {
+            return;
+        };
+        if n.pressed || lit || n.hover_t > 0.0 {
+            let width = px_width(self.scale.round().max(1.0));
+            self.canvas.ring(r, corner, width, color);
+        }
     }
 
     /// `n`'s text in `ink`, centered vertically in `content` (and horizontally if `center`).
@@ -191,8 +419,97 @@ impl Painter<'_, '_> {
             .draw(&n.text, &n.text_style, rect, self.scale, &mut sink);
     }
 
-    /// The box, a line high, then the label half a line after it (the size layout measured).
-    fn check_box<M>(&mut self, n: &Node<M>, interactive: bool, ink: Color) {
+    /// `text` on one line in `n`'s text style, from `rect`'s top-left, untrimmed if `rect` is
+    /// unbounded; clipped by the canvas.
+    fn line<M>(&mut self, text: &str, n: &Node<M>, rect: Rect, ink: Color) {
+        let mut sink = Ink {
+            canvas: &mut *self.canvas,
+            color: ink,
+        };
+        self.text
+            .draw(text, &n.text_style, rect, self.scale, &mut sink);
+    }
+
+    /// A hold's two parts over the fill already painted: from `t` of the way along `rect` to its
+    /// end, the permanent fill. Returns where the parts meet. The clip is `visible` again after.
+    fn hold(&mut self, rect: RectPx, corner: f32, t: f32, visible: RectPx) -> i32 {
+        let x = rect.x0 + px_width((t.clamp(0.0, 1.0) * f(rect.x1 - rect.x0)).round());
+        let to_go = self
+            .canvas
+            .placed(RectPx { x0: x, ..rect })
+            .intersect(visible);
+        if !to_go.is_empty() {
+            self.canvas.set_clip(to_go);
+            self.canvas
+                .rrect(rect, corner, self.theme.color(Tone::PermanentFill));
+            self.canvas.set_clip(visible);
+        }
+        x
+    }
+
+    /// A dropdown's value from the start of its content box, trimmed before the chevron, and the
+    /// chevron in a line-high square at the end.
+    fn combo<M>(&mut self, n: &Node<M>, ink: Color) {
+        let content = n.rect.inset(n.style.padding);
+        let line = self.text.measure("", &n.text_style, f32::INFINITY).height;
+        let chevron = Rect::new(
+            (content.right() - line).max(content.x),
+            content.y + ((content.h - line) / 2.0).max(0.0),
+            line.min(content.w),
+            line,
+        );
+        if !n.text.is_empty() {
+            let value = Rect {
+                w: (chevron.x - content.x).max(0.0),
+                ..content
+            };
+            self.text(n, value, false, ink);
+        }
+        let mut sink = Ink {
+            canvas: &mut *self.canvas,
+            color: ink,
+        };
+        self.text
+            .icon(Icon::ChevronDown, chevron, self.scale, &mut sink);
+    }
+
+    /// A separator: a hairline in the border color across the middle of `r`.
+    fn separator(&mut self, r: RectPx) {
+        let y = r.y0 + (r.y1 - r.y0) / 2;
+        let line = RectPx {
+            y0: y,
+            y1: y + 1,
+            ..r
+        };
+        self.canvas
+            .fill(line, self.theme.stroke(Tone::Border, true));
+    }
+
+    /// A progress bar: a pill-shaped track (a ring in high contrast, which has no tints), and the
+    /// accent from its start, as far as its value.
+    fn progress<M>(&mut self, n: &Node<M>, track: RectPx) {
+        let round = half(track);
+        if self.theme.scheme() == Scheme::HighContrast {
+            self.canvas
+                .ring(track, round, 1, self.theme.stroke(Tone::Border, true));
+        } else {
+            self.canvas
+                .rrect(track, round, self.theme.color(Tone::Hover));
+        }
+        let w = px_width((n.value.clamp(0.0, 1.0) * f(track.x1 - track.x0)).round());
+        if w > 0 {
+            let bar = RectPx {
+                x1: track.x0 + w,
+                ..track
+            };
+            let accent = self.theme.fill(Tone::Accent, true);
+            self.canvas.rrect(bar, round, self.theme.color(accent));
+        }
+    }
+
+    /// Where a check box's box (or a radio button's circle) goes: a line high, centered
+    /// vertically in the content box. Returns the content box, the line and the box.
+    fn mark_box<M>(&mut self, n: &Node<M>) -> (Rect, f32, Rect) {
         let content = n.rect.inset(n.style.padding);
         let line = self.text.measure("", &n.text_style, f32::INFINITY).height;
         let b = Rect::new(
@@ -201,6 +518,67 @@ impl Painter<'_, '_> {
             line,
             line,
         );
+        (content, line, b)
+    }
+
+    /// A check box's or radio button's label, half a line after its box.
+    fn mark_label<M>(&mut self, n: &Node<M>, content: Rect, line: f32, ink: Color) {
+        if !n.text.is_empty() {
+            let label = Rect::new(
+                content.x + line * 1.5,
+                content.y,
+                (content.w - line * 1.5).max(0.0),
+                content.h,
+            );
+            self.text(n, label, false, ink);
+        }
+    }
+
+    /// The circle, a line high, then the label half a line after it, as for a check box: picked,
+    /// the accent with a dot in it; else a ring.
+    fn radio<M>(&mut self, n: &Node<M>, interactive: bool, ink: Color) {
+        let (content, line, b) = self.mark_box(n);
+        let r = b.snap(self.scale);
+        let round = half(r);
+        let on = n.selected == Some(true);
+        let fill = match (on, n.enabled) {
+            (true, true) => Tone::Accent,
+            (true, false) => Tone::TextSecondary,
+            (false, _) => Tone::Surface,
+        };
+        self.canvas.rrect(r, round, self.theme.color(fill));
+        if !on {
+            let edge = if n.enabled {
+                Tone::TextSecondary
+            } else {
+                Tone::Border
+            };
+            self.canvas
+                .ring(r, round, 1, self.theme.stroke(edge, n.enabled));
+        }
+        if interactive {
+            self.state_layer(n, r, round, false);
+            self.outline(n, r, round, fill, false);
+        }
+        if on {
+            let dot = Rect::new(b.x + line * 0.3, b.y + line * 0.3, line * 0.4, line * 0.4)
+                .snap(self.scale);
+            self.canvas
+                .rrect(dot, half(dot), self.theme.ink(Tone::OnAccent, fill));
+        }
+        self.mark_label(n, content, line, ink);
+    }
+
+    /// The box, a line high, then the label half a line after it (the size layout measured).
+    fn check_box<M>(&mut self, n: &Node<M>, interactive: bool, ink: Color) {
+        let (content, line, b) = self.mark_box(n);
+        self.check_mark(n, b, interactive);
+        self.mark_label(n, content, line, ink);
+    }
+
+    /// A check box at `b`, a line square, showing `n`'s check state.
+    fn check_mark<M>(&mut self, n: &Node<M>, b: Rect, interactive: bool) {
+        let line = b.h;
         let r = b.snap(self.scale);
         let corner = radius::SMALL * self.scale;
         let on = n.check != Tri::Off;
@@ -216,12 +594,14 @@ impl Painter<'_, '_> {
             } else {
                 Tone::Border
             };
-            self.canvas.ring(r, corner, 1, self.theme.color(edge));
+            self.canvas
+                .ring(r, corner, 1, self.theme.stroke(edge, n.enabled));
         }
         if interactive {
-            self.state_layer(n, r, corner);
+            self.state_layer(n, r, corner, false);
+            self.outline(n, r, corner, fill, false);
         }
-        let mark = self.theme.color(Tone::OnAccent);
+        let mark = self.theme.ink(Tone::OnAccent, fill);
         match n.check {
             Tri::On => {
                 let mut sink = Ink {
@@ -242,15 +622,118 @@ impl Painter<'_, '_> {
             }
             Tri::Off => {}
         }
-        if !n.text.is_empty() {
-            let label = Rect::new(
-                content.x + line * 1.5,
-                content.y,
-                (content.w - line * 1.5).max(0.0),
-                content.h,
-            );
-            self.text(n, label, false, ink);
+    }
+
+    /// A check box a line high, centered in `n` (a table's check cell or check column header).
+    fn centered_box<M>(&mut self, n: &Node<M>) {
+        let line = self.text.measure("", &n.text_style, f32::INFINITY).height;
+        let r = n.rect;
+        let b = Rect::new(
+            r.x + ((r.w - line) / 2.0).max(0.0),
+            r.y + ((r.h - line) / 2.0).max(0.0),
+            line.min(r.w),
+            line,
+        );
+        self.check_mark(n, b, false);
+    }
+
+    /// `n`'s text in `ink`, centered vertically in `content` and placed across it as its style's
+    /// `justify` says; trimmed if it doesn't fit.
+    fn aligned_text<M>(&mut self, n: &Node<M>, content: Rect, ink: Color) {
+        let m = self.text.measure(&n.text, &n.text_style, content.w);
+        let free = (content.w - m.width).max(0.0);
+        let x = content.x
+            + match n.style.justify {
+                Justify::Center => free / 2.0,
+                Justify::End => free,
+                Justify::Start | Justify::SpaceBetween => 0.0,
+            };
+        let y = content.y + ((content.h - m.height) / 2.0).max(0.0);
+        let rect = Rect::new(x, y, content.right() - x, m.height);
+        let mut sink = Ink {
+            canvas: &mut *self.canvas,
+            color: ink,
+        };
+        self.text
+            .draw(&n.text, &n.text_style, rect, self.scale, &mut sink);
+    }
+
+    /// A table cell: its text, or a check cell's box (none in a row that can't be checked).
+    fn cell<M>(&mut self, n: &Node<M>, ink: Color) {
+        if n.key == TABLE_CHECK {
+            if n.enabled {
+                self.centered_box(n);
+            }
+        } else if !n.text.is_empty() {
+            self.aligned_text(n, n.rect.inset(n.style.padding), ink);
         }
+    }
+
+    /// A column header: its text, and a sorted one's chevron in a line-high square at its end;
+    /// the check column's, a check box.
+    fn column_header<M>(&mut self, n: &Node<M>, ink: Color) {
+        if n.key == TABLE_CHECK {
+            self.centered_box(n);
+            return;
+        }
+        let content = n.rect.inset(n.style.padding);
+        let Some(order) = sort_of(n.value) else {
+            self.aligned_text(n, content, ink);
+            return;
+        };
+        let line = self.text.measure("", &n.text_style, f32::INFINITY).height;
+        let chevron = Rect::new(
+            (content.right() - line).max(content.x),
+            content.y + ((content.h - line) / 2.0).max(0.0),
+            line.min(content.w),
+            line,
+        );
+        let label = Rect {
+            w: (chevron.x - content.x).max(0.0),
+            ..content
+        };
+        self.aligned_text(n, label, ink);
+        let icon = match order {
+            Order::Ascending => Icon::ChevronUp,
+            Order::Descending => Icon::ChevronDown,
+        };
+        let mut sink = Ink {
+            canvas: &mut *self.canvas,
+            color: ink,
+        };
+        self.text.icon(icon, chevron, self.scale, &mut sink);
+    }
+
+    /// The checks' gutter at the start of a menu item's `content`, a line and a half wide, with
+    /// a checked check item's check in a line-high square there. Returns where its label goes.
+    fn menu_check<M>(&mut self, n: &Node<M>, content: Rect, ink: Color) -> Rect {
+        let line = self.text.measure("", &n.text_style, f32::INFINITY).height;
+        if n.is_check_item() && n.check == Tri::On {
+            let mark = Rect::new(
+                content.x,
+                content.y + ((content.h - line) / 2.0).max(0.0),
+                line.min(content.w),
+                line,
+            );
+            let mut sink = Ink {
+                canvas: &mut *self.canvas,
+                color: ink,
+            };
+            self.text.icon(Icon::CheckMark, mark, self.scale, &mut sink);
+        }
+        let gutter = (line * 1.5).min(content.w);
+        Rect {
+            x: content.x + gutter,
+            w: content.w - gutter,
+            ..content
+        }
+    }
+
+    /// A table header's rule: a hairline in the border color along the bottom of `r`.
+    fn rule_below(&mut self, r: RectPx) {
+        let line = RectPx { y0: r.y1 - 1, ..r };
+        self.canvas
+            .fill(line, self.theme.stroke(Tone::Border, true));
     }
 }
 
@@ -287,6 +770,25 @@ fn fraction(a: u8, t: f32) -> u8 {
 )]
 fn px_width(w: f32) -> i32 {
     w as i32
+}
+
+/// A pixel count as a float.
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "canvas sizes are far below 2^24"
+)]
+fn f(v: i32) -> f32 {
+    v as f32
+}
+
+/// A scroll offset as a pixel shift; past `i32` it saturates (no content is 2^31 px).
+fn px_offset(v: i64) -> i32 {
+    i32::try_from(v).unwrap_or(i32::MAX)
+}
+
+/// Half of `r`'s shorter side: the radius that rounds it into a circle or a pill.
+fn half(r: RectPx) -> f32 {
+    f((r.x1 - r.x0).min(r.y1 - r.y0).max(0)) / 2.0
 }
 
 #[cfg(test)]
@@ -384,6 +886,226 @@ mod tests {
         assert_eq!(f.at(5, 12), argb(&t, Tone::Accent));
         assert_eq!(f.at(46, 12), argb(&t, Tone::OnAccent));
         assert!((20..80).all(|x| f.at(x, 5) == argb(&t, Tone::Accent)));
+    }
+
+    /// TD-0009 §4.4: only the system's colors, and each text in the color paired with its fill.
+    #[test]
+    fn high_contrast_paints_system_colors_paired_with_their_fills() {
+        use crate::{Color, SysColors};
+        // Distinct values, so every pixel says which system color it is.
+        let sys = SysColors {
+            window: Color::hex(0x00_0001),
+            window_text: Color::hex(0x00_0002),
+            highlight: Color::hex(0x00_0003),
+            highlight_text: Color::hex(0x00_0004),
+            hot_light: Color::hex(0x00_0005),
+            gray_text: Color::hex(0x00_0006),
+            btn_face: Color::hex(0x00_0007),
+            btn_text: Color::hex(0x00_0008),
+        };
+        let t = Theme::high_contrast(sys);
+        let opaque =
+            |c: Color| 0xFF00_0000 | u32::from(c.r) << 16 | u32::from(c.g) << 8 | u32::from(c.b);
+        let mut ui = window(1.0);
+        let f = paint(&ui, &t);
+        // The card: a WindowText border around Window.
+        assert_eq!(f.at(50, 0), opaque(sys.window_text));
+        assert_eq!(f.at(50, 2), opaque(sys.window));
+        assert_eq!(f.at(50, 50), opaque(sys.window));
+        // The accent button is Highlight, and its label HighlightText (the "Go" glyph box at 46).
+        assert_eq!(f.at(5, 12), opaque(sys.highlight));
+        assert_eq!(f.at(46, 12), opaque(sys.highlight_text));
+        // No color outside the system's, anywhere.
+        let allowed: Vec<u32> = [
+            sys.window,
+            sys.window_text,
+            sys.highlight,
+            sys.highlight_text,
+            sys.hot_light,
+            sys.gray_text,
+            sys.btn_face,
+            sys.btn_text,
+        ]
+        .into_iter()
+        .map(opaque)
+        .collect();
+        assert!(
+            f.px.iter().all(|p| allowed.contains(p)),
+            "a color that isn't a system color"
+        );
+        // Hovering tints nothing: the accent button gets a HighlightText outline, and the rest
+        // of it stays as it was.
+        let center = button(&ui).center();
+        let go = button(&ui).snap(1.0);
+        let mut msgs = Vec::new();
+        ui.dispatch(Input::PointerMove(center), &mut msgs);
+        ui.repaint_all();
+        let hovered = paint(&ui, &t);
+        assert_eq!(hovered.at(go.x0, 12), opaque(sys.highlight_text));
+        assert_eq!(hovered.at(go.x0 + 1, 12), opaque(sys.highlight));
+        assert!(hovered.px.iter().all(|p| allowed.contains(p)));
+        let outside = |x: i32, y: i32| x < go.x0 || x >= go.x1 || y < go.y0 || y >= go.y1;
+        for (k, (now, was)) in hovered.px.iter().zip(&f.px).enumerate() {
+            let (x, y) = (
+                i32::try_from(k % 100).unwrap(),
+                i32::try_from(k / 100).unwrap(),
+            );
+            if outside(x, y) {
+                assert_eq!(now, was, "({x}, {y}) changed");
+            }
+        }
+        ui.dispatch(Input::PointerLeave, &mut msgs);
+        let tab = Input::Key(KeyEvent {
+            key: KeyCode::Tab,
+            down: true,
+            mods: Mods::default(),
+        });
+        ui.dispatch(tab, &mut msgs);
+        let focused = paint(&ui, &t);
+        let r = button(&ui).snap(1.0);
+        assert_eq!(
+            focused.at(r.x0, i32::midpoint(r.y0, r.y1)),
+            opaque(sys.highlight)
+        );
+    }
+
+    /// A danger hold button 0..200 × 0..20, a progress bar 0..200 × 20..26 at 41 %, and a picked
+    /// radio button from y 26, its circle 16 px across.
+    fn controls() -> Ui<u8> {
+        let mut ui = Ui::new(Size { w: 200.0, h: 60.0 }, 1.0, Motion::default());
+        let high = |h| Style {
+            height: crate::Dim::Fixed(h),
+            ..Style::default()
+        };
+        ui.build(|cx| {
+            cx.add(
+                Element::button(Key(1), "Hold", 1)
+                    .hold(|| 2)
+                    .look(Look::DANGER)
+                    .style(high(20.0)),
+            );
+            cx.add(Element::progress(Key(2), 0.41).style(high(6.0)));
+            cx.add(Element::radio(Key(3), "On", true, 3));
+        });
+        ui.layout(&mut FakeText);
+        ui
+    }
+
+    fn opaque(c: crate::Color) -> u32 {
+        0xFF00_0000 | u32::from(c.r) << 16 | u32::from(c.g) << 8 | u32::from(c.b)
+    }
+
+    #[test]
+    fn a_held_button_fills_from_its_start_and_a_bar_to_its_value() {
+        let t = Theme::LIGHT;
+        let mut ui = controls();
+        let f = paint(&ui, &t);
+        // At rest, the danger fill (above the text, clear of the corners).
+        assert_eq!(
+            (f.at(50, 2), f.at(150, 2)),
+            (argb(&t, Tone::Danger), argb(&t, Tone::Danger))
+        );
+        // The bar: the accent to 41 % of 200 px, then the track.
+        assert_eq!(f.at(40, 23), argb(&t, Tone::Accent));
+        // Clear of its rounded end, which ends at 82.
+        assert_eq!(f.at(78, 23), argb(&t, Tone::Accent));
+        // The track: the hover tint over the window, within the canvas's rounding of it.
+        let track = opaque(t.color(Tone::Hover).over(t.color(Tone::App)));
+        let near = |p: u32| {
+            (0..3).all(|k| ((p >> (8 * k)) & 0xFF).abs_diff((track >> (8 * k)) & 0xFF) <= 1)
+        };
+        assert!(
+            near(f.at(83, 23)) && f.at(150, 23) == f.at(83, 23),
+            "{:x}",
+            f.at(83, 23)
+        );
+        // The radio button: an accent circle with an on-accent dot.
+        assert_eq!(
+            (f.at(3, 34), f.at(8, 34)),
+            (argb(&t, Tone::Accent), argb(&t, Tone::OnAccent))
+        );
+
+        // Pressed: all of it still to go, in the permanent fill; then the fill grows back.
+        let mut out = Vec::new();
+        ui.dispatch(
+            Input::PointerDown(crate::Point { x: 100.0, y: 10.0 }),
+            &mut out,
+        );
+        let f = paint(&ui, &t);
+        assert_eq!(
+            (f.at(50, 2), f.at(150, 2)),
+            (argb(&t, Tone::PermanentFill), argb(&t, Tone::PermanentFill))
+        );
+        ui.tick(0, &mut out);
+        ui.tick(750, &mut out);
+        let f = paint(&ui, &t);
+        assert_eq!(
+            (f.at(99, 2), f.at(100, 2)),
+            (argb(&t, Tone::Danger), argb(&t, Tone::PermanentFill))
+        );
+        ui.tick(1_500, &mut out);
+        let f = paint(&ui, &t);
+        assert_eq!(
+            (out.as_slice(), f.at(150, 2)),
+            (&[1_u8] as &[u8], argb(&t, Tone::Danger))
+        );
+        // Let go, and the pointer gone (so no hover layer): as it was.
+        ui.dispatch(
+            Input::PointerUp(crate::Point { x: 100.0, y: 10.0 }),
+            &mut out,
+        );
+        ui.dispatch(Input::PointerLeave, &mut out);
+        assert_eq!(paint(&ui, &t).at(150, 2), argb(&t, Tone::Danger));
+    }
+
+    /// High contrast mid-hold: still only the system's colors.
+    #[test]
+    fn controls_in_high_contrast_paint_only_system_colors() {
+        use crate::{Color, SysColors};
+        let sys = SysColors {
+            window: Color::hex(0x00_0001),
+            window_text: Color::hex(0x00_0002),
+            highlight: Color::hex(0x00_0003),
+            highlight_text: Color::hex(0x00_0004),
+            hot_light: Color::hex(0x00_0005),
+            gray_text: Color::hex(0x00_0006),
+            btn_face: Color::hex(0x00_0007),
+            btn_text: Color::hex(0x00_0008),
+        };
+        let t = Theme::high_contrast(sys);
+        let allowed = [
+            sys.window,
+            sys.window_text,
+            sys.highlight,
+            sys.highlight_text,
+            sys.hot_light,
+            sys.gray_text,
+            sys.btn_face,
+            sys.btn_text,
+        ]
+        .map(opaque);
+        let mut ui = controls();
+        let mut out = Vec::new();
+        ui.dispatch(
+            Input::PointerDown(crate::Point { x: 100.0, y: 10.0 }),
+            &mut out,
+        );
+        ui.tick(0, &mut out);
+        ui.tick(750, &mut out);
+        let f = paint(&ui, &t);
+        assert!(
+            f.px.iter().all(|p| allowed.contains(p)),
+            "a color that isn't a system color"
+        );
+        // The elapsed part is Highlight, the rest Window; the bar's track is a WindowText ring.
+        assert_eq!(
+            (f.at(50, 2), f.at(150, 2)),
+            (opaque(sys.highlight), opaque(sys.window))
+        );
+        assert_eq!(
+            (f.at(150, 20), f.at(150, 23)),
+            (opaque(sys.window_text), opaque(sys.window))
+        );
     }
 
     #[test]

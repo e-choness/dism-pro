@@ -10,18 +10,21 @@
 //! into the node's own buffer, so a warm window reconciles without allocating (§7 U8).
 
 use crate::{
+    field::TextEdit,
     pool::capacity_for,
-    tree::{Element, NIL, NodeId},
-    ui::{ROOT, Ui},
+    table::sort_value,
+    text::TextStyle,
+    tree::{CHECK_ITEM, Element, Extra, NIL, NodeId, Role, rare},
+    ui::{HoldSlot, ROOT, Side, Ui},
 };
 
 /// Builds one parent's children for this frame.
 #[derive(Debug)]
 pub struct Cx<'u, M> {
-    ui: &'u mut Ui<M>,
-    parent: u32,
+    pub(crate) ui: &'u mut Ui<M>,
+    pub(crate) parent: u32,
     /// The first retained child not matched yet; everything before it is this frame's.
-    next: u32,
+    pub(crate) next: u32,
 }
 
 impl<M> Ui<M> {
@@ -69,7 +72,17 @@ impl<M> Cx<'_, M> {
         self.id(i)
     }
 
-    fn id(&self, i: u32) -> NodeId {
+    /// Builds node `i`'s children: the rest of this frame's description goes under it.
+    pub(crate) fn child(&mut self, i: u32) -> Cx<'_, M> {
+        let next = self.ui.nodes[i as usize].first;
+        Cx {
+            ui: &mut *self.ui,
+            parent: i,
+            next,
+        }
+    }
+
+    pub(crate) fn id(&self, i: u32) -> NodeId {
         NodeId {
             index: i,
             generation: self.ui.nodes[i as usize].generation,
@@ -78,7 +91,7 @@ impl<M> Cx<'_, M> {
 
     /// Matches, moves or creates the node for `el` at the cursor, and updates it.
     #[inline]
-    fn place(&mut self, el: Element<'_, M>) -> u32 {
+    pub(crate) fn place(&mut self, el: Element<'_, M>) -> u32 {
         let ui = &mut *self.ui;
         let matches = |ui: &Ui<M>, c: u32| {
             let n = &ui.nodes[c as usize];
@@ -105,11 +118,13 @@ impl<M> Cx<'_, M> {
                 ui.mark_dirty(self.parent);
                 ui.a11y_touch(i);
                 ui.a11y_touch(self.parent);
+                if el.role.interactive() {
+                    ui.stop_changed(i);
+                }
                 i
             } else {
                 // Moved: its old place is damaged, and layout finds its new one.
-                let rect = ui.nodes[found as usize].rect;
-                ui.damage_rect(rect);
+                ui.damage_view(found);
                 ui.unlink(found);
                 ui.link_before(self.parent, found, self.next);
                 ui.mark_dirty(self.parent);
@@ -122,7 +137,7 @@ impl<M> Cx<'_, M> {
     }
 
     /// Removes the children no description matched.
-    fn finish(self) {
+    pub(crate) fn finish(self) {
         let mut c = self.next;
         while c != NIL {
             let next = self.ui.nodes[c as usize].next;
@@ -142,14 +157,25 @@ impl<M> Ui<M> {
         let mut layout = false;
         // Check state and enabled show, and a client sees them.
         let state = n.check != el.check || n.enabled != el.enabled;
-        let mut seen = state || n.selected != el.selected;
+        let picked = n.selected != el.selected;
+        let mut seen = state || picked;
+        // A field's text never changes its size: the view sets its width, and it's a line high.
+        let field = n.field;
+        let (mut field_text, mut field_style) = (false, false);
         if n.style != el.style {
             n.style = el.style;
             layout = true;
         }
-        if n.text_style != el.text_style {
-            n.text_style = el.text_style;
+        // Windows' text size multiplies every style here, so measuring, caret stops, painting and
+        // the accessibility tree all see one size. At 100 % the product is exact.
+        let text_style = TextStyle {
+            size: el.text_style.size * self.text_scale,
+            ..el.text_style
+        };
+        if n.text_style != text_style {
+            n.text_style = text_style;
             layout = true;
+            field_style = true;
         }
         if n.text != el.text {
             n.text.clear();
@@ -157,18 +183,55 @@ impl<M> Ui<M> {
                 n.text.reserve_exact(capacity_for(el.text.len()));
             }
             n.text.push_str(el.text);
-            layout = true;
+            if field == NIL {
+                layout = true;
+            } else {
+                field_text = true;
+            }
             seen = true;
         }
-        let looks = state || n.look != el.look;
+        // A radio button shows whether it's picked.
+        let mut looks = state || n.look != el.look || (picked && n.role == Role::Radio);
         n.look = el.look;
         n.check = el.check;
         n.selected = el.selected;
         n.msg = el.msg;
+        let special = n.special;
+        // Popup state, now or last frame: few nodes have any, so the rest skip it here.
+        let rare = n.rare | el.rare;
         if n.enabled != el.enabled {
             n.enabled = el.enabled;
             if !el.enabled {
                 self.lose_input(i);
+            }
+            if self.nodes[i as usize].role.interactive() {
+                self.stop_changed(i);
+            }
+        }
+        if rare != 0 {
+            seen |= self.update_rare(i, el.rare, el.tip, el.extra);
+        }
+        match el.extra {
+            // Most nodes: nothing more.
+            Extra::None if !special => {}
+            // Only a field describes one, and every field has its slot.
+            Extra::Field {
+                label,
+                placeholder,
+                on_edit,
+            } if field != NIL => {
+                seen |= self.update_field(field, label, placeholder, on_edit);
+                if field_text {
+                    self.field_text_set(i);
+                } else if field_style {
+                    // The same text in another size: new caret stops, the caret where it was.
+                    self.fields[field as usize].stops_valid = false;
+                }
+            }
+            extra => {
+                let (s, l) = self.update_extra(i, extra);
+                seen |= s;
+                looks |= l;
             }
         }
         if layout {
@@ -183,8 +246,183 @@ impl<M> Ui<M> {
         }
     }
 
-    /// A node that became disabled lets go of focus, hover and presses.
+    /// Copies a field's name, placeholder and edit handler into its slot `f`. Returns whether a
+    /// client sees a change; a new placeholder shows while the field is empty.
+    fn update_field(
+        &mut self,
+        f: u32,
+        name: &str,
+        placeholder: &str,
+        on_edit: Option<fn(TextEdit) -> M>,
+    ) -> bool {
+        let slot = &mut self.fields[f as usize];
+        // Becoming read-only, or editable, is seen.
+        let mut seen = slot.on_edit.is_some() != on_edit.is_some();
+        slot.on_edit = on_edit;
+        if slot.name != name {
+            slot.name.clear();
+            slot.name.push_str(name);
+            seen = true;
+        }
+        if slot.placeholder != placeholder {
+            slot.placeholder.clear();
+            slot.placeholder.push_str(placeholder);
+            let i = slot.node;
+            if self.nodes[i as usize].text.is_empty() {
+                self.damage_node(i);
+            }
+            seen = true;
+        }
+        seen
+    }
+
+    /// Copies a group, a progress bar's value, a column header's sort, a menu item's being a
+    /// check item or a hold button's Invoke message into node `i`, clearing what it had of the
+    /// others. Returns whether a client sees a change, and whether it shows.
+    fn update_extra(&mut self, i: u32, extra: Extra<'_, M>) -> (bool, bool) {
+        let (group, value, invoke) = match extra {
+            Extra::Group(g) => (Some(g), 0.0, None),
+            Extra::Progress(v) => (None, v, None),
+            Extra::Hold(m) => (None, 0.0, Some(m)),
+            // A column header's sort is its value: a client reads it, and its glyph shows it.
+            Extra::Sort(order) => (None, sort_value(order), None),
+            // So is a menu item's being a check item: a client sees it, and the check shows.
+            Extra::Check => (None, CHECK_ITEM, None),
+            Extra::None | Extra::Field { .. } | Extra::Combo { .. } => (None, 0.0, None),
+        };
+        let n = &mut self.nodes[i as usize];
+        // The group sets a client's role (a tab list, a radio group, a list).
+        let regrouped = n.group != group;
+        // A progress bar's fill shows, and a client reads it as its value.
+        let revalued = n.value.to_bits() != value.to_bits();
+        n.group = group;
+        n.value = value;
+        n.special = group.is_some() || invoke.is_some() || value.to_bits() != 0;
+        // A menu item became or stopped being a check item: every label in its menu moves past
+        // the checks' gutter or back, so the menu is laid out again.
+        let rechecked = revalued && n.role == Role::MenuItem;
+        if n.hold || invoke.is_some() {
+            self.update_hold(i, invoke);
+        }
+        if rechecked {
+            self.mark_dirty(i);
+        }
+        (regrouped || revalued, revalued)
+    }
+
+    /// Node `i`'s popup state from its element's [`rare`] flags `r`, tooltip `tip` and `extra`:
+    /// whether it takes context requests, whether what it opens is open, and its side slot.
+    /// Returns whether a client sees a change.
+    #[inline(never)]
+    fn update_rare(&mut self, i: u32, r: u8, tip: &str, extra: Extra<'_, M>) -> bool {
+        let n = &mut self.nodes[i as usize];
+        let scrolled = (n.rare | r) & rare::SCROLL != 0;
+        n.rare = r;
+        n.context = r & rare::CONTEXT != 0;
+        // Whether its popup is open: a client sees it (ExpandCollapse).
+        let expanded = rare::expanded(r);
+        let mut seen = n.expanded != expanded;
+        n.expanded = expanded;
+        let (label, step) = match extra {
+            Extra::Combo { label, step } => (label, step),
+            _ => ("", None),
+        };
+        if n.side != NIL || !tip.is_empty() || !label.is_empty() || step.is_some() {
+            seen |= self.update_side(i, tip, label, step);
+        }
+        if scrolled {
+            seen |= self.update_scroll(i, r);
+        }
+        seen
+    }
+
+    /// Keeps node `i`'s tooltip, and a dropdown's name and step, in its side slot: a node that
+    /// gained one gets a slot, and one left with none gives it back (and its tooltip goes).
+    /// Returns whether a client sees a change: the tip is its description, the name its name.
+    fn update_side(&mut self, i: u32, tip: &str, label: &str, step: Option<fn(bool) -> M>) -> bool {
+        let mut s = self.nodes[i as usize].side;
+        if tip.is_empty() && label.is_empty() && step.is_none() {
+            if s == NIL {
+                return false;
+            }
+            self.nodes[i as usize].side = NIL;
+            self.release_side(s);
+            self.tip_forget(i);
+            return true;
+        }
+        let mut seen = false;
+        if s == NIL {
+            s = self.alloc_side(i);
+            self.nodes[i as usize].side = s;
+            seen = true;
+        }
+        let side = &mut self.sides[s as usize];
+        side.step = step;
+        if side.tip != tip {
+            side.tip.clear();
+            side.tip.push_str(tip);
+            seen = true;
+        }
+        if side.label != label {
+            side.label.clear();
+            side.label.push_str(label);
+            seen = true;
+        }
+        if tip.is_empty() {
+            self.tip_forget(i);
+        }
+        seen
+    }
+
+    /// A side slot for node `i`, a freed one if there is one.
+    fn alloc_side(&mut self, i: u32) -> u32 {
+        if let Some(s) = self.free_sides.pop() {
+            self.sides[s as usize].node = i;
+            s
+        } else {
+            self.sides.push(Side {
+                node: i,
+                tip: String::new(),
+                label: String::new(),
+                step: None,
+            });
+            u32::try_from(self.sides.len() - 1).unwrap_or(NIL)
+        }
+    }
+
+    /// Frees side slot `s`, keeping its buffers for the next.
+    pub(crate) fn release_side(&mut self, s: u32) {
+        if let Some(side) = self.sides.get_mut(s as usize) {
+            side.node = NIL;
+            side.tip.clear();
+            side.label.clear();
+            side.step = None;
+            self.free_sides.push(s);
+        }
+    }
+
+    /// Keeps hold button `i`'s Invoke message in the hold table: a button that became a hold
+    /// button gets a slot, and one that stopped being one loses it, with its hold if one runs.
+    fn update_hold(&mut self, i: u32, invoke: Option<fn() -> M>) {
+        let slot = self.holds.iter().position(|s| s.node == i);
+        match (slot, invoke) {
+            (Some(k), Some(invoke)) => self.holds[k].invoke = invoke,
+            (None, Some(invoke)) => {
+                self.holds.push(HoldSlot { node: i, invoke });
+                self.nodes[i as usize].hold = true;
+            }
+            (_, None) => {
+                self.nodes[i as usize].hold = false;
+                self.forget_hold(i);
+            }
+        }
+    }
+
+    /// A node that became disabled lets go of focus, hover, presses and holds.
     fn lose_input(&mut self, i: u32) {
+        if self.hold.node == i {
+            self.end_hold();
+        }
         if self.focus == i {
             self.focus = NIL;
         }

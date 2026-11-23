@@ -122,6 +122,52 @@ jobs:
             Write-Host "::$kind title=$($run.Title) (real Windows, exit $code)::$text"
           }
           exit $failed
+      - name: T3 GUI platform (window, DirectWrite)
+        # What Wine only approximates: a real window station, and DirectWrite with Windows' fonts.
+        # The output names the font families picked (TD-0009 §5.2).
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          $out = & dist-t3/dpro-win-tests.exe gui:: --test-threads 1 --nocapture 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          Write-Host $out
+          $kind = if ($code) { 'error' } else { 'notice' }
+          $text = $out.Trim().Replace('%', '%25').Replace("`r", '').Replace("`n", '%0A')
+          Write-Host "::$kind title=dpro-win GUI tests (real Windows, exit $code)::$text"
+          exit $code
+      - name: T3 accessibility adapter (UI Automation)
+        # The vendored accesskit_windows's tests (TD-0009 A2.9): a real window, served to UIA's
+        # client in this process. Upstream's tests, then the patterns DISM Pro adds.
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          $out = & dist-t3/accesskit-windows-tests.exe --test-threads 1 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          Write-Host $out
+          $kind = if ($code) { 'error' } else { 'notice' }
+          $text = $out.Trim().Replace('%', '%25').Replace("`r", '').Replace("`n", '%0A')
+          Write-Host "::$kind title=accesskit_windows tests (real Windows, exit $code)::$text"
+          exit $code
+      - name: G1 UI gates (startup, idle)
+        # TD-0009 §7 against bare_window in this job: U4 startup <= 3x, U6 no timer or paint once
+        # settled, U7 idle working set <= 40 MiB.
+        if: ${{ !cancelled() }}
+        timeout-minutes: 10
+        shell: pwsh
+        run: ./.github/scripts/ui-gates.ps1 -Bin dist-t3 -Out ui-gates
+      - name: G1 reports and popup screenshots
+        # The probes' raw reports, and the popups as the screen shows them: TD-0009 A1.3's DWM
+        # shadow and small rounded corners are checked by hand. Only the toolkit's own pixels and
+        # numbers, no Microsoft files (decision #29).
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ui-gates
+          path: ui-gates/
+          if-no-files-found: warn
+          retention-days: 7
       - name: T3 WIMGAPI (wim_t3 probe)
         # Wine has no wimgapi.dll: WimFile against WIMs and an ESD that dism.exe captures (roadmap 2.3).
         if: ${{ !cancelled() }}

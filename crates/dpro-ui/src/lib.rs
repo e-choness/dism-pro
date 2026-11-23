@@ -8,7 +8,7 @@
 //! flexbox-subset layout, pointer and keyboard input, focus, damage tracking and an animation
 //! clock. It paints on a software [`Canvas`] in [`Theme`] colors and describes itself to assistive
 //! technology as an [`accesskit`] tree. It is platform-free, has no `unsafe`, and runs in T1 against
-//! [`FakeText`]. The Win32 platform builds on it in a later slice (TD-0009 §11).
+//! [`FakeText`]. On Windows, `platform` hosts it in a `dpro_win::gui` window (TD-0009 §5.1).
 //!
 //! A frame, on the UI thread:
 //! 1. [`Ui::dispatch`] turns input into the view's messages, and the app updates its view-model.
@@ -54,25 +54,43 @@ mod a11y;
 mod build;
 mod canvas;
 mod damage;
+mod field;
 mod geom;
 mod input;
 mod layout;
+pub mod materials;
 mod paint;
+#[cfg(windows)]
+pub mod platform;
 mod pool;
+mod popup;
+mod scroll;
 mod style;
+mod table;
 mod text;
 mod theme;
+mod tooltip;
 mod tree;
 mod ui;
+mod values;
 
 pub use accesskit;
 pub use build::Cx;
 pub use canvas::Canvas;
-pub use dpro_app::table::Tri;
+pub use dpro_app::table::{ColumnId, ColumnLayout, Order, Pick, RowKey, Tri, Width};
+pub use dpro_core::units::{Bytes, UnixMillis};
+pub use field::{Caret, ClipboardRequest, Cursor, FieldInfo, Insert, MAX_FIELD_LEN, TextEdit};
 pub use geom::{Insets, Point, Rect, RectPx, Size};
 pub use input::{Input, KeyCode, KeyEvent, Mods};
+pub use popup::{Placement, Popup, PopupKind, place};
+pub use scroll::{Axes, ScrollBar, ScrollInfo};
 pub use style::{Align, Axis, Dim, Justify, Style};
-pub use text::{FakeText, GlyphSink, Icon, TextMetrics, TextStyle, TextSystem};
-pub use theme::{Color, Scheme, Theme, Tone, tokens};
-pub use tree::{Element, Key, Look, NodeId, NodeInfo, Radius, Role};
-pub use ui::{Motion, Ui};
+pub use table::{
+    COLUMN_FIT, COLUMN_FIT_ALL, COLUMN_RESET, Cells, Column, ColumnMenuLabels, Row, Status,
+    TABLE_BODY, TABLE_CHECK, TABLE_HEADER, Table, TableEvent, Track,
+};
+pub use text::{CaretStop, FakeText, GlyphSink, Icon, TextMetrics, TextStyle, TextSystem};
+pub use theme::{Color, Scheme, SysColors, Theme, Tone, tokens};
+pub use tree::{Element, Group, Key, Look, NodeId, NodeInfo, Radius, Role};
+pub use ui::{MAX_TEXT_SCALE, Motion, Ui};
+pub use values::{Formats, InvariantFormats, SizeUnits, format_size};

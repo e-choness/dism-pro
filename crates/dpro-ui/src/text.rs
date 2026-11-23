@@ -46,6 +46,22 @@ pub struct TextMetrics {
 pub enum Icon {
     /// A check box's check.
     CheckMark,
+    /// A dropdown's chevron, and a column sorted largest first.
+    ChevronDown,
+    /// A column sorted smallest first.
+    ChevronUp,
+}
+
+impl Icon {
+    /// Its code point in both icon fonts.
+    #[must_use]
+    pub const fn codepoint(self) -> u32 {
+        match self {
+            Self::CheckMark => 0xE73E,
+            Self::ChevronDown => 0xE70D,
+            Self::ChevronUp => 0xE70E,
+        }
+    }
 }
 
 /// Where drawn text and icons go. The painter tints whatever it receives with the current ink and
@@ -76,6 +92,21 @@ pub trait TextSystem {
 
     /// Draws `icon` centered in `rect`, as large as fits.
     fn icon(&mut self, icon: Icon, rect: Rect, scale: f32, sink: &mut dyn GlyphSink);
+
+    /// Replaces `out` with the caret stops of `text` set on one line in `style`, untrimmed: every
+    /// place a caret can sit, in logical order, each a cluster boundary (a caret never splits a
+    /// base character from its marks, or a surrogate pair), from index 0 at x 0 to `text.len()`.
+    /// Reuses `out`'s buffer.
+    fn caret_stops(&mut self, text: &str, style: &TextStyle, out: &mut Vec<CaretStop>);
+}
+
+/// A place in a line of text where a caret can sit.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CaretStop {
+    /// Byte offset in the text.
+    pub index: u32,
+    /// Logical pixels from the line's start.
+    pub x: f32,
 }
 
 /// Deterministic metrics for T1: every character advances half the font size (six tenths in
@@ -207,6 +238,26 @@ impl TextSystem for FakeText {
         let c = rect.center();
         sink.fill(Rect::new(c.x - side / 2.0, c.y - side / 2.0, side, side).snap(scale));
     }
+
+    /// A stop at every character boundary, an advance apart.
+    fn caret_stops(&mut self, text: &str, style: &TextStyle, out: &mut Vec<CaretStop>) {
+        let advance = Self::advance(*style);
+        out.clear();
+        let mut x = 0.0;
+        for (k, _) in text.char_indices() {
+            out.push(CaretStop { index: index(k), x });
+            x += advance;
+        }
+        out.push(CaretStop {
+            index: index(text.len()),
+            x,
+        });
+    }
+}
+
+/// A byte offset as a stop's index: a field holds at most 64 KiB, so it always fits.
+fn index(k: usize) -> u32 {
+    u32::try_from(k).unwrap_or(u32::MAX)
 }
 
 /// A count as `f32`, exact up to 65,535 and saturating beyond (more characters than a UI line

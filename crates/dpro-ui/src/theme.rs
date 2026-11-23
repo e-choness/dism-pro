@@ -6,8 +6,14 @@
 //! rebuild.
 //!
 //! The colors are doc 05's solid-fallback values, which every contrast check is made against
-//! (tested below: WCAG 2.2 AA). The glass materials and high contrast's system colors come with
-//! the Win32 platform.
+//! (tested below: WCAG 2.2 AA). [`Theme::glass`] turns light or dark into the glass materials
+//! (ADR-0007), for a composed window over Mica.
+//!
+//! **High contrast** ([`Theme::high_contrast`], TD-0009 §4.4) shows the system's colors only: no
+//! tints, no state layers. Text takes the color the system pairs with the fill under it
+//! ([`Theme::ink`]): `HighlightText` on the highlight fills (accent, danger, selection),
+//! `ButtonText` on `ButtonFace`, else `WindowText`, with `GrayText` for secondary text and
+//! `HotLight` for accent text. The focus ring is `Highlight`.
 
 /// An sRGB color with straight (not premultiplied) alpha.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -122,11 +128,25 @@ impl Tone {
     ];
 }
 
-/// Light or dark.
+/// Light, dark, or the system's high-contrast colors.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Scheme {
     Light,
     Dark,
+    HighContrast,
+}
+
+/// The system colors high contrast shows (`GetSysColor`), the only colors in that mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SysColors {
+    pub window: Color,
+    pub window_text: Color,
+    pub highlight: Color,
+    pub highlight_text: Color,
+    pub hot_light: Color,
+    pub gray_text: Color,
+    pub btn_face: Color,
+    pub btn_text: Color,
 }
 
 /// The colors of every [`Tone`] in one scheme.
@@ -134,6 +154,8 @@ pub enum Scheme {
 pub struct Theme {
     scheme: Scheme,
     colors: [Color; Tone::ALL.len()],
+    /// High contrast's system colors, which pick the ink by the fill under it.
+    sys: Option<SysColors>,
 }
 
 /// The state layers' ink alphas: 6 % and 4 % (15 and 10 of 255).
@@ -168,6 +190,7 @@ impl Theme {
                 ink.alpha(HOVER_ALPHA),
                 ink.alpha(PRESSED_ALPHA),
             ],
+            sys: None,
         }
     };
 
@@ -199,17 +222,155 @@ impl Theme {
                 ink.alpha(HOVER_ALPHA),
                 ink.alpha(PRESSED_ALPHA),
             ],
+            sys: None,
         }
     };
+
+    /// High contrast: the system's colors only. Fills map to `Window`, `ButtonFace` (quiet
+    /// fills) and `Highlight` (accent, danger, selection); borders to `WindowText`; the state
+    /// layers vanish. Text goes through [`ink`](Self::ink).
+    #[must_use]
+    pub const fn high_contrast(sys: SysColors) -> Self {
+        let none = Color {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 0,
+        };
+        Self {
+            scheme: Scheme::HighContrast,
+            colors: [
+                sys.window,
+                sys.window,
+                sys.btn_face,
+                sys.window_text,
+                sys.window_text,
+                sys.gray_text,
+                sys.highlight,
+                sys.highlight_text,
+                sys.window_text,
+                sys.window_text,
+                sys.window_text,
+                sys.window_text,
+                sys.highlight,
+                sys.window_text,
+                sys.window,
+                sys.highlight,
+                none,
+                none,
+            ],
+            sys: Some(sys),
+        }
+    }
+
+    /// The glass materials (ADR-0007, doc 05 §4) of light or dark: the window's background is
+    /// clear, so Mica shows; cards (`layer.card`), quiet fills (`layer.control`), their hairlines
+    /// and the selection are translucent layers over it. Text, accent, status colors, badges and
+    /// buttons stay opaque, as do the state layers. High contrast is never glass, and comes back
+    /// as it is.
+    #[must_use]
+    pub const fn glass(self) -> Self {
+        // Doc 05's percentages of 255, rounded: 62, 70, 78 % light; 5, 6, 8 % dark.
+        let (card, control, border, selected) = match self.scheme {
+            Scheme::Light => (158, 179, 199, 34),
+            Scheme::Dark => (13, 15, 20, 36),
+            Scheme::HighContrast => return self,
+        };
+        let white = Color::hex(0xFF_FFFF);
+        let mut colors = self.colors;
+        colors[Tone::App as usize] = white.alpha(0);
+        colors[Tone::Surface as usize] = white.alpha(card);
+        colors[Tone::Subtle as usize] = white.alpha(control);
+        colors[Tone::Border as usize] = white.alpha(border);
+        // `fill.selected` unflattened: accent at 13–14 % over whatever is under it.
+        colors[Tone::Selected as usize] = self.color(Tone::Accent).alpha(selected);
+        Self { colors, ..self }
+    }
+
+    /// Whether this is [`glass`](Self::glass): its background is clear.
+    #[must_use]
+    pub const fn is_glass(&self) -> bool {
+        self.color(Tone::App).a == 0
+    }
 
     #[must_use]
     pub const fn scheme(&self) -> Scheme {
         self.scheme
     }
 
+    /// `tone` as a fill.
     #[must_use]
     pub const fn color(&self, tone: Tone) -> Color {
         self.colors[tone as usize]
+    }
+
+    /// The tone a fill of `tone` shows as. High contrast keeps `Highlight` for what can be used:
+    /// a disabled accent, danger or selected fill shows as the window, so its `GrayText` reads
+    /// as disabled. Light and dark: `tone`.
+    #[must_use]
+    pub const fn fill(&self, tone: Tone, enabled: bool) -> Tone {
+        if self.sys.is_some()
+            && !enabled
+            && matches!(tone, Tone::Accent | Tone::Danger | Tone::Selected)
+        {
+            Tone::Surface
+        } else {
+            tone
+        }
+    }
+
+    /// `tone` as a border or outline. High contrast: `WindowText`, or `GrayText` when disabled.
+    #[must_use]
+    pub const fn stroke(&self, tone: Tone, enabled: bool) -> Color {
+        match self.sys {
+            Some(sys) if enabled => sys.window_text,
+            Some(sys) => sys.gray_text,
+            None => self.color(tone),
+        }
+    }
+
+    /// High contrast has no tints, so a hovered or pressed control on a fill of `under` shows an
+    /// outline instead of a state layer: `Highlight`, or `HighlightText` on a highlight fill.
+    /// `None` in light and dark.
+    #[must_use]
+    pub const fn hover_outline(&self, under: Tone) -> Option<Color> {
+        match self.sys {
+            Some(sys) if matches!(under, Tone::Accent | Tone::Danger | Tone::Selected) => {
+                Some(sys.highlight_text)
+            }
+            Some(sys) => Some(sys.highlight),
+            None => None,
+        }
+    }
+
+    /// `tone` as text or a glyph over a fill of `under`. Light and dark: the tone's own color,
+    /// whose contrast on every fill it's used on is tested. High contrast: the color the system
+    /// pairs with that fill.
+    #[must_use]
+    pub const fn ink(&self, tone: Tone, under: Tone) -> Color {
+        let Some(sys) = self.sys else {
+            return self.color(tone);
+        };
+        match under {
+            Tone::Accent | Tone::Danger | Tone::Selected => sys.highlight_text,
+            Tone::Subtle => sys.btn_text,
+            // A disabled, checked box: GrayText's partner.
+            Tone::TextSecondary => sys.window,
+            _ => match tone {
+                Tone::TextSecondary => sys.gray_text,
+                Tone::Accent => sys.hot_light,
+                _ => sys.window_text,
+            },
+        }
+    }
+
+    /// The keyboard focus ring: text color, or `Highlight` in high contrast (TD-0009 §4.4).
+    #[must_use]
+    pub const fn focus(&self) -> Color {
+        match self.sys {
+            Some(sys) => sys.highlight,
+            None => self.color(Tone::Text),
+        }
     }
 }
 
@@ -245,6 +406,35 @@ pub mod tokens {
         pub const FOCUS: f32 = 2.0;
     }
 
+    /// Menus, dropdown lists and tooltips (TD-0009 A1.10 item 1: the metrics of `WinUI`, until the
+    /// canvas draws them).
+    pub mod popup {
+        /// Inside a menu's or a list's edge.
+        pub const PADDING: f32 = 4.0;
+        /// An item's least height, and a dropdown's.
+        pub const ITEM_HEIGHT: f32 = 32.0;
+        /// An item's text from its sides.
+        pub const ITEM_PAD: f32 = 12.0;
+        /// A separator: a hairline with 4 px above and below.
+        pub const SEPARATOR: f32 = 9.0;
+        /// Between a popup and its anchor.
+        pub const GAP: f32 = 4.0;
+        /// A tooltip's text from its sides, and from its top and bottom.
+        pub const TIP_PAD_X: f32 = 8.0;
+        pub const TIP_PAD_Y: f32 = 5.0;
+        /// A tooltip's widest; longer text wraps.
+        pub const TIP_MAX_W: f32 = 320.0;
+        /// A menu's tallest, as a share of the work area's height.
+        pub const MAX_HEIGHT: f32 = 0.5;
+        /// Autopop: a tooltip hides after this many of its delays (Windows' `TTDT_AUTOPOP`).
+        pub const TIP_SHOWS_FOR: u32 = 10;
+        /// Reshow: moving to a neighbor within this share of the delay shows its tip at once
+        /// (Windows' `TTDT_RESHOW`, a fifth).
+        pub const TIP_RESHOW_DIV: u32 = 5;
+        /// The delay when Windows hasn't said: its default double-click time.
+        pub const TIP_DELAY_MS: u32 = 500;
+    }
+
     /// Durations; "Show animations" off makes them all 0.
     pub mod motion {
         /// Hover and press.
@@ -252,6 +442,44 @@ pub mod tokens {
         pub const DRAWER_MS: u16 = 180;
         /// Hold to apply.
         pub const HOLD_MS: u16 = 1_500;
+    }
+
+    /// Scroll bars (TD-0009 A2.10 item 3, accepted 2026-11-06). No fade, so no timer: the bar is
+    /// an indicator or expanded, by where the pointer is.
+    pub mod scroll {
+        /// The indicator's width at rest, while the content overflows.
+        pub const INDICATOR: f32 = 2.0;
+        /// The bar's width with its track: the pointer on its strip, or auto-hide off.
+        pub const BAR: f32 = 8.0;
+        /// The strip along the viewport's edge that's the bar's: the pointer there expands it.
+        pub const STRIP: f32 = 12.0;
+        /// The thumb's least length, so it stays a 24 px target (§4.4) however long the content
+        /// (a proposal for design, TD-0009 §13).
+        pub const MIN_THUMB: f32 = 24.0;
+        /// The indicator and the bar from the viewport's edge, so the bar is centered in its strip
+        /// (a proposal for design, TD-0009 §13).
+        pub const INSET: f32 = 2.0;
+    }
+
+    /// The data table (TD-0009 A2.10 item 2: proposals for design until the canvas's artboard 08
+    /// gives them; the canvas wins).
+    pub mod table {
+        /// A row's least height, and the header's.
+        pub const ROW: f32 = 36.0;
+        /// Above and below a row's text: a row is its line and these, at least [`ROW`].
+        pub const ROW_PAD_Y: f32 = 9.0;
+        /// A cell's text from its sides.
+        pub const CELL_PAD_X: f32 = 12.0;
+        /// The column headers' text size.
+        pub const HEADER_TEXT: f32 = 12.0;
+        /// The check column's width.
+        pub const CHECK_COL: f32 = 28.0;
+        /// The empty table's status line from the view's edge, and its action from it.
+        pub const STATUS_PAD: f32 = 16.0;
+        pub const STATUS_GAP: f32 = 8.0;
+        /// A column divider's strip in the header, centred on the column's right edge: where the
+        /// pointer shows the left-right arrows and a press drags the column's width.
+        pub const DIVIDER: f32 = 8.0;
     }
 }
 
@@ -309,6 +537,68 @@ mod tests {
         }
     }
 
+    /// TD-0009 §4.4: high contrast shows the system's colors only, and each text in the color
+    /// the system pairs with what's under it.
+    #[test]
+    fn high_contrast_pairs_every_ink_with_its_fill() {
+        use Tone::{Accent, App, OnAccent, Selected, Subtle, Surface, Text, TextSecondary};
+        let sys = SysColors {
+            window: Color::hex(0x00_0001),
+            window_text: Color::hex(0x00_0002),
+            highlight: Color::hex(0x00_0003),
+            highlight_text: Color::hex(0x00_0004),
+            hot_light: Color::hex(0x00_0005),
+            gray_text: Color::hex(0x00_0006),
+            btn_face: Color::hex(0x00_0007),
+            btn_text: Color::hex(0x00_0008),
+        };
+        let t = Theme::high_contrast(sys);
+        assert_eq!(t.scheme(), Scheme::HighContrast);
+        let system = [
+            sys.window,
+            sys.window_text,
+            sys.highlight,
+            sys.highlight_text,
+            sys.hot_light,
+            sys.gray_text,
+            sys.btn_face,
+            sys.btn_text,
+        ];
+        for tone in Tone::ALL {
+            let c = t.color(tone);
+            assert!(c.a == 0 || system.contains(&c), "{tone:?} is {c:?}");
+        }
+        // No tints: the state layers are clear.
+        assert_eq!((t.color(Tone::Hover).a, t.color(Tone::Pressed).a), (0, 0));
+        // Fills and their text.
+        assert_eq!(t.color(Accent), sys.highlight);
+        assert_eq!(t.ink(OnAccent, Accent), sys.highlight_text);
+        assert_eq!(t.ink(Text, Selected), sys.highlight_text);
+        assert_eq!(t.color(Subtle), sys.btn_face);
+        assert_eq!(t.ink(Text, Subtle), sys.btn_text);
+        assert_eq!(t.ink(Text, Surface), sys.window_text);
+        assert_eq!(t.ink(TextSecondary, App), sys.gray_text);
+        assert_eq!(t.ink(Accent, Surface), sys.hot_light);
+        // A disabled highlight fill shows as the window, so its gray text reads as disabled.
+        assert_eq!(t.fill(Accent, true), Accent);
+        assert_eq!(t.fill(Accent, false), Surface);
+        assert_eq!(t.ink(TextSecondary, t.fill(Accent, false)), sys.gray_text);
+        // Borders, focus and hover.
+        assert_eq!(t.stroke(TextSecondary, true), sys.window_text);
+        assert_eq!(t.stroke(Tone::Border, false), sys.gray_text);
+        assert_eq!(t.focus(), sys.highlight);
+        assert_eq!(t.hover_outline(Surface), Some(sys.highlight));
+        assert_eq!(t.hover_outline(Accent), Some(sys.highlight_text));
+        // Light and dark are unchanged by all of it.
+        for theme in [Theme::LIGHT, Theme::DARK] {
+            assert_eq!(theme.ink(Text, Accent), theme.color(Text));
+            assert_eq!(theme.fill(Accent, false), Accent);
+            assert_eq!(theme.stroke(Tone::Border, false), theme.color(Tone::Border));
+            assert_eq!(theme.focus(), theme.color(Text));
+            assert_eq!(theme.hover_outline(Surface), None);
+        }
+    }
+
     /// Doc 05 §6: WCAG 2.2 AA (4.5:1) for every text color on every background it's used on, in
     /// both schemes, including under the hover and pressed state layers.
     #[test]
@@ -354,5 +644,118 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// ADR-0007: glass changes only the layers; everything opaque, and high contrast, stays.
+    #[test]
+    fn glass_layers_are_translucent_and_the_rest_unchanged() {
+        use Tone::{App, Border, Selected, Subtle, Surface};
+        for theme in [Theme::LIGHT, Theme::DARK] {
+            let glass = theme.glass();
+            assert!(glass.is_glass() && !theme.is_glass());
+            assert_eq!(glass.scheme(), theme.scheme());
+            assert_eq!(glass.color(App).a, 0);
+            for tone in Tone::ALL {
+                let layer = matches!(tone, App | Surface | Subtle | Border | Selected);
+                assert_eq!(glass.color(tone) == theme.color(tone), !layer, "{tone:?}");
+            }
+            // `fill.selected`: 13 % light, 14 % dark, of the accent itself.
+            let selected = if theme.scheme() == Scheme::Light {
+                34
+            } else {
+                36
+            };
+            assert_eq!(
+                glass.color(Selected),
+                theme.color(Tone::Accent).alpha(selected)
+            );
+        }
+        assert_eq!(
+            (
+                Theme::LIGHT.glass().color(Surface).a,
+                Theme::DARK.glass().color(Surface).a
+            ),
+            (158, 13),
+            "layer.card: 62 % and 5 % white"
+        );
+        let hc = Theme::high_contrast(SysColors {
+            window: Color::hex(0),
+            window_text: Color::hex(0xFF_FFFF),
+            highlight: Color::hex(0x1A_EBFF),
+            highlight_text: Color::hex(0),
+            hot_light: Color::hex(0xFF_FF00),
+            gray_text: Color::hex(0x3F_F23F),
+            btn_face: Color::hex(0),
+            btn_text: Color::hex(0xFF_FFFF),
+        });
+        assert_eq!(hc.glass(), hc);
+        assert!(!hc.is_glass());
+    }
+
+    /// Over untinted Mica (#F3F3F3 light, #202020 dark), glass text keeps WCAG 2.2 AA wherever
+    /// the solid fallback does, except the pairs listed. Real Mica is tinted by the wallpaper, so
+    /// the gate is the solid fallback (ADR-0007, tested above); this records how far glass strays
+    /// from it, so a token change that moves any pair shows here. The listed ones are secondary
+    /// text where white layers stack (a card, a control or the selection, a state layer); they
+    /// wait on the design source (doc 05) for glass's own `text.secondary`.
+    #[test]
+    fn glass_text_contrast_over_untinted_mica() {
+        use Tone::{
+            Accent, App, Danger, Hover, Image, Offline, Ok, Pressed, Selected, Subtle, Surface,
+            Text, TextSecondary, Warn,
+        };
+        let mut short = Vec::new();
+        for (theme, mica) in [
+            (Theme::LIGHT.glass(), Color::hex(0xF3_F3F3)),
+            (Theme::DARK.glass(), Color::hex(0x20_2020)),
+        ] {
+            // Each background as it's stacked: on the window, on a card, a selection on a card.
+            let flat = |stack: &[Tone]| {
+                stack
+                    .iter()
+                    .fold(mica, |under, t| theme.color(*t).over(under))
+            };
+            let mut pairs: Vec<(Tone, Vec<Tone>)> = Vec::new();
+            let stacks = [
+                vec![App],
+                vec![Surface],
+                vec![Subtle],
+                vec![Surface, Subtle],
+                vec![Surface, Selected],
+            ];
+            for stack in &stacks {
+                for fg in [Text, TextSecondary] {
+                    pairs.push((fg, stack.clone()));
+                    for layer in [Hover, Pressed] {
+                        let mut layered = stack.clone();
+                        layered.push(layer);
+                        pairs.push((fg, layered));
+                    }
+                }
+            }
+            for stack in [vec![App], vec![Surface]] {
+                for fg in [Accent, Offline, Image, Ok, Warn, Danger] {
+                    pairs.push((fg, stack.clone()));
+                }
+            }
+            for (fg, stack) in pairs {
+                let ratio = contrast(theme.color(fg), flat(&stack));
+                if ratio < 4.5 {
+                    short.push(format!(
+                        "{:?} {fg:?} on {stack:?}: {ratio:.2}",
+                        theme.scheme()
+                    ));
+                }
+            }
+        }
+        let known = [
+            "Light TextSecondary on [Surface, Selected, Hover]: 4.38",
+            "Dark TextSecondary on [Surface, Subtle, Hover]: 3.89",
+            "Dark TextSecondary on [Surface, Subtle, Pressed]: 4.14",
+            "Dark TextSecondary on [Surface, Selected]: 4.37",
+            "Dark TextSecondary on [Surface, Selected, Hover]: 3.67",
+            "Dark TextSecondary on [Surface, Selected, Pressed]: 3.87",
+        ];
+        assert_eq!(short, known, "glass pairs below 4.5:1");
     }
 }

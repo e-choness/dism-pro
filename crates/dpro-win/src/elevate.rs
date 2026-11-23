@@ -3,7 +3,7 @@
 
 use std::{
     borrow::Cow,
-    ffi::{CStr, c_void},
+    ffi::c_void,
     os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
     path::Path,
     ptr,
@@ -12,13 +12,9 @@ use std::{
 use windows_sys::{
     Win32::{
         Foundation::{
-            ERROR_CANCELLED, ERROR_NO_ASSOCIATION, GetLastError, HMODULE, WAIT_OBJECT_0,
-            WAIT_TIMEOUT,
+            ERROR_CANCELLED, ERROR_NO_ASSOCIATION, GetLastError, WAIT_OBJECT_0, WAIT_TIMEOUT,
         },
-        System::{
-            LibraryLoader::{GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW},
-            Threading::{GetExitCodeProcess, WaitForSingleObject},
-        },
+        System::Threading::{GetExitCodeProcess, WaitForSingleObject},
         UI::Shell::{
             SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
         },
@@ -29,6 +25,7 @@ use windows_sys::{
 use dpro_core::OsError;
 
 use crate::{
+    dll::{self, Proc},
     error::{Result, last_error_if_false, last_os_error},
     wide::WideCString,
 };
@@ -98,14 +95,14 @@ pub fn run_elevated(exe: &Path, args: &[&str]) -> Result<Elevated> {
 }
 
 fn shell_execute(verb: &WideCString, file: &WideCString, params: &WideCString) -> Result<Elevated> {
-    let ole32 = system_dll("ole32.dll")?;
-    let shell32 = system_dll("shell32.dll")?;
+    let ole32 = dll::system("ole32.dll")?;
+    let shell32 = dll::system("shell32.dll")?;
     // SAFETY: the exports have these signatures (objbase.h, shellapi.h).
     let (co_initialize, co_uninitialize, shell_execute_ex) = unsafe {
         (
-            std::mem::transmute::<Proc, CoInitializeEx>(export(ole32, c"CoInitializeEx")?),
-            std::mem::transmute::<Proc, CoUninitialize>(export(ole32, c"CoUninitialize")?),
-            std::mem::transmute::<Proc, ShellExecuteExW>(export(shell32, c"ShellExecuteExW")?),
+            std::mem::transmute::<Proc, CoInitializeEx>(dll::export(ole32, c"CoInitializeEx")?),
+            std::mem::transmute::<Proc, CoUninitialize>(dll::export(ole32, c"CoUninitialize")?),
+            std::mem::transmute::<Proc, ShellExecuteExW>(dll::export(shell32, c"ShellExecuteExW")?),
         )
     };
     // SAFETY: no preconditions; a success (S_OK or S_FALSE) is balanced by CoUninitialize below,
@@ -145,26 +142,6 @@ fn shell_execute(verb: &WideCString, file: &WideCString, params: &WideCString) -
         unsafe { co_uninitialize() };
     }
     result
-}
-
-type Proc = unsafe extern "system" fn() -> isize;
-
-/// A DLL from System32 only (never the current or application folder); it stays loaded.
-fn system_dll(name: &str) -> Result<HMODULE> {
-    let wide = WideCString::new(name)?;
-    // SAFETY: `wide` is NUL-terminated; a null file handle is what the call expects.
-    let module =
-        unsafe { LoadLibraryExW(wide.as_ptr(), ptr::null_mut(), LOAD_LIBRARY_SEARCH_SYSTEM32) };
-    if module.is_null() {
-        return Err(last_os_error("LoadLibraryExW").into());
-    }
-    Ok(module)
-}
-
-fn export(module: HMODULE, name: &CStr) -> Result<Proc> {
-    // SAFETY: `module` is loaded and stays loaded; `name` is NUL-terminated.
-    unsafe { GetProcAddress(module, name.as_ptr().cast()) }
-        .ok_or_else(|| last_os_error("GetProcAddress").into())
 }
 
 /// Arguments joined into one command line that `CommandLineToArgvW` (and Rust's `args()`)

@@ -4,12 +4,20 @@
 //! Input goes through `dispatch`, and animations through `tick` (`input.rs`). Damage collects in
 //! physical pixels until the presenter takes it.
 
+use std::rc::Rc;
+
 use crate::{
     a11y::A11y,
     damage::Damage,
+    field::{Caret, ClipboardRequest, Field},
     geom::{Point, Rect, RectPx, Size},
+    layout::Shown,
     pool::TextPool,
+    scroll::{Drag, Scroll},
+    table::{DRAG_DISTANCE, Divider, Press, TableState},
+    tooltip::Tip,
     tree::{Key, NIL, Node, NodeId, NodeInfo, Role},
+    values::{Formats, InvariantFormats, Shared},
 };
 
 /// Motion settings, from the theme's motion tokens (doc 05 §4). Durations of 0 turn animation off
@@ -20,15 +28,42 @@ pub struct Motion {
     pub hover_ms: u16,
 }
 
+impl Motion {
+    /// The motion tokens' durations.
+    pub const STANDARD: Self = Self {
+        hover_ms: crate::tokens::motion::HOVER_MS,
+    };
+    /// Reduced motion: every duration 0.
+    pub const REDUCED: Self = Self { hover_ms: 0 };
+
+    /// [`STANDARD`](Self::STANDARD) while Windows' *Animation effects* are on, else
+    /// [`REDUCED`](Self::REDUCED) (TD-0009 §5.2).
+    #[must_use]
+    pub const fn system(animations: bool) -> Self {
+        if animations {
+            Self::STANDARD
+        } else {
+            Self::REDUCED
+        }
+    }
+}
+
 /// The UI of one window: a retained tree of nodes reconciled from views each frame.
 ///
 /// `M` is the view's message type: input on a node yields the message the view gave it.
 #[derive(Debug)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent window states (active, focus shown, caret on, bars hidden)"
+)]
 pub struct Ui<M> {
     pub(crate) nodes: Vec<Node<M>>,
     pub(crate) free: Vec<u32>,
     pub(crate) viewport: Size,
     pub(crate) scale: f32,
+    /// Windows' text size, 1 to [`MAX_TEXT_SCALE`]: every text style's size is multiplied by it
+    /// (TD-0009 §12 item 7).
+    pub(crate) text_scale: f32,
     pub(crate) motion: Motion,
     pub(crate) damage: Damage,
     pub(crate) focus: u32,
@@ -47,14 +82,129 @@ pub struct Ui<M> {
     pub(crate) texts: TextPool,
     /// What the next accessibility update sends.
     pub(crate) a11y: A11y,
+    /// The state of field nodes, by their `field` slot; freed slots keep their buffers.
+    pub(crate) fields: Vec<Field<M>>,
+    pub(crate) free_fields: Vec<u32>,
+    /// Windows' caret settings.
+    pub(crate) caret: Caret,
+    /// The caret is in its on phase (it shows only where a field has focus).
+    pub(crate) caret_on: bool,
+    /// When the caret's blink started: at the first caret timer after it was last used.
+    pub(crate) caret_epoch: Option<u64>,
+    /// The window has keyboard focus.
+    pub(crate) active: bool,
+    /// What the last input asked of the clipboard.
+    pub(crate) clipboard: Option<ClipboardRequest>,
+    /// Hold buttons' Invoke messages, one per node with `hold` set.
+    pub(crate) holds: Vec<HoldSlot<M>>,
+    /// The hold running or spent, or none (`input.rs`).
+    pub(crate) hold: Hold,
+    /// What few nodes have (tooltips, a dropdown's name and step), by their `side` slot; freed
+    /// slots keep their buffers.
+    pub(crate) sides: Vec<Side<M>>,
+    pub(crate) free_sides: Vec<u32>,
+    /// The tooltip (`tooltip.rs`).
+    pub(crate) tip: Tip,
+    /// Where the last popup was asked for, in logical pixels: a context request's point (or its
+    /// node, from the keyboard), or the node that opens a popup, activated (`popup.rs`).
+    pub(crate) anchor: Option<Rect>,
+    /// The node [`anchor`](Self::anchor) is for: when it goes, so does the anchor, and the host
+    /// closes the popup that was anchored there (A1.8).
+    pub(crate) anchor_node: u32,
+    /// The node a context request found since [`take_context`](Self::take_context); [`NIL`] if
+    /// none did.
+    pub(crate) context: u32,
+    /// Scroll viewports' state, by their `scroll` slot; freed slots are reused (`scroll.rs`).
+    pub(crate) scrolls: Vec<Scroll>,
+    pub(crate) free_scrolls: Vec<u32>,
+    /// Windows' wheel characters and lines a notch, by axis (x, y).
+    pub(crate) wheel: [u32; 2],
+    /// "Automatically hide scroll bars".
+    pub(crate) auto_hide_bars: bool,
+    /// A scroll bar's thumb being dragged.
+    pub(crate) drag: Option<Drag>,
+    /// The bar whose strip the pointer is on: its viewport's slot and axis.
+    pub(crate) bar_hot: Option<(u32, usize)>,
+    /// A node to scroll into view once layout has placed it: it was revealed while layout was
+    /// pending ([`NIL`] if none).
+    pub(crate) reveal_after: u32,
+    /// While layout runs, where the subtree it's arranging shows (`layout.rs`).
+    pub(crate) shown: Shown,
+    /// Data tables' state, by their rows' viewport's `table` slot; freed slots are reused
+    /// (`table.rs`).
+    pub(crate) tables: Vec<TableState<M>>,
+    pub(crate) free_tables: Vec<u32>,
+    /// A table row's cells as the view gives them, while it's built: their text end to end, and
+    /// where each ends. Kept, so a warm table builds without allocating.
+    pub(crate) cell_text: String,
+    pub(crate) cell_ends: Vec<usize>,
+    /// How value cells read (`values.rs`), and its generation: new formats drop every table's
+    /// kept text.
+    pub(crate) formats: Shared,
+    pub(crate) formats_generation: u32,
+    /// The last press: where, with which modifiers, and whether it was a double-click's second.
+    pub(crate) press: Press,
+    /// A table column's divider being dragged (`table.rs`).
+    pub(crate) divider: Option<Divider>,
+    /// How far the pointer moves, in logical pixels, before a press becomes a drag.
+    pub(crate) drag_distance: f32,
+    /// Messages layout made (a column's fit), for the host to take ([`Ui::take_messages`]).
+    pub(crate) queued: Vec<M>,
+}
+
+/// A node's tooltip, and a dropdown's accessible name and step: in a side table, so the nodes
+/// without them (nearly all) carry one index.
+#[derive(Debug)]
+pub(crate) struct Side<M> {
+    pub(crate) node: u32,
+    pub(crate) tip: String,
+    pub(crate) label: String,
+    pub(crate) step: Option<fn(bool) -> M>,
+}
+
+/// A hold button's Invoke message.
+#[derive(Debug)]
+pub(crate) struct HoldSlot<M> {
+    pub(crate) node: u32,
+    pub(crate) invoke: fn() -> M,
+}
+
+/// The one hold a window can have: one pointer, one keyboard.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Hold {
+    /// The hold button pressed, or [`NIL`].
+    pub(crate) node: u32,
+    /// The key holding it, if it's the keyboard's: only that key's release ends it.
+    pub(crate) key: Option<crate::KeyCode>,
+    /// When the press started counting: the first tick while it's pressed. A pointer that
+    /// slides off the button and back starts it again.
+    pub(crate) start: Option<u64>,
+    /// How far it has come, 0 to 1, as painted.
+    pub(crate) t: f32,
+    /// It came to the end and sent its message; it does nothing more until let go.
+    pub(crate) done: bool,
+}
+
+impl Hold {
+    pub(crate) const NONE: Self = Self {
+        node: NIL,
+        key: None,
+        start: None,
+        t: 0.0,
+        done: false,
+    };
 }
 
 /// The root: index 0, never freed.
 pub(crate) const ROOT: u32 = 0;
 
+/// Windows' largest text size, 225 % (Settings › Accessibility › Text size).
+pub const MAX_TEXT_SCALE: f32 = 2.25;
+
 impl<M> Ui<M> {
     /// An empty window of `viewport` logical pixels at `scale` physical pixels per logical pixel.
-    /// The whole window is damaged for its first paint.
+    /// The whole window is damaged for its first paint. It's inactive, so a focused field shows
+    /// no caret, until [`set_active`](Self::set_active) says it has keyboard focus.
     #[must_use]
     pub fn new(viewport: Size, scale: f32, motion: Motion) -> Self {
         let mut ui = Self {
@@ -62,6 +212,7 @@ impl<M> Ui<M> {
             free: Vec::new(),
             viewport,
             scale,
+            text_scale: 1.0,
             motion,
             damage: Damage::new(),
             focus: NIL,
@@ -73,6 +224,39 @@ impl<M> Ui<M> {
             anims: Vec::new(),
             texts: TextPool::default(),
             a11y: A11y::new(),
+            fields: Vec::new(),
+            free_fields: Vec::new(),
+            caret: Caret::WINDOWS,
+            caret_on: true,
+            caret_epoch: None,
+            active: false,
+            clipboard: None,
+            holds: Vec::new(),
+            hold: Hold::NONE,
+            sides: Vec::new(),
+            free_sides: Vec::new(),
+            tip: Tip::new(),
+            anchor: None,
+            anchor_node: NIL,
+            context: NIL,
+            scrolls: Vec::new(),
+            free_scrolls: Vec::new(),
+            wheel: [3, 3],
+            auto_hide_bars: true,
+            drag: None,
+            bar_hot: None,
+            reveal_after: NIL,
+            shown: Shown::default(),
+            tables: Vec::new(),
+            free_tables: Vec::new(),
+            cell_text: String::new(),
+            cell_ends: Vec::new(),
+            formats: Shared(Rc::new(InvariantFormats::default())),
+            formats_generation: 0,
+            press: Press::default(),
+            divider: None,
+            drag_distance: DRAG_DISTANCE,
+            queued: Vec::new(),
         };
         ui.damage_all();
         ui
@@ -90,10 +274,52 @@ impl<M> Ui<M> {
     /// bounds go to assistive technology again.
     pub fn set_scale(&mut self, scale: f32) {
         if self.scale.to_bits() != scale.to_bits() {
-            self.scale = scale;
+            let from = std::mem::replace(&mut self.scale, scale);
+            self.rescale_scrolls(from);
             self.damage_all();
             self.a11y.all = true;
         }
+    }
+
+    /// Windows' text size changed (Settings › Accessibility › Text size), as a factor: clamped to
+    /// 1 to [`MAX_TEXT_SCALE`], and 1 if it isn't a number. The next [`build`](Self::build) gives
+    /// every node its scaled text style, so the page is laid out again, and the whole window is
+    /// repainted. The same size again changes nothing.
+    pub fn set_text_scale(&mut self, text_scale: f32) {
+        let text_scale = if text_scale.is_nan() {
+            1.0
+        } else {
+            text_scale.clamp(1.0, MAX_TEXT_SCALE)
+        };
+        if self.text_scale.to_bits() != text_scale.to_bits() {
+            self.text_scale = text_scale;
+            self.damage_all();
+        }
+    }
+
+    /// How tables show sizes, days and moments from the next build: the user's formats, which
+    /// the host reads at start and when Windows says they changed (TD-0009 A2.5). Every value
+    /// cell is formatted again.
+    pub fn set_formats(&mut self, formats: impl Formats + 'static) {
+        self.formats = Shared(Rc::new(formats));
+        self.formats_generation = self.formats_generation.wrapping_add(1);
+    }
+
+    /// Windows' text size, as a factor.
+    #[must_use]
+    pub fn text_scale(&self) -> f32 {
+        self.text_scale
+    }
+
+    /// The durations changed (*Animation effects* toggled). A running animation finishes on its
+    /// next tick if its duration is now 0.
+    pub fn set_motion(&mut self, motion: Motion) {
+        self.motion = motion;
+    }
+
+    #[must_use]
+    pub fn motion(&self) -> Motion {
+        self.motion
     }
 
     #[must_use]
@@ -172,15 +398,18 @@ impl<M> Ui<M> {
         Some(NodeInfo {
             role: n.role,
             key: n.key,
-            rect: n.rect,
+            rect: self.window_rect(i),
             text: &n.text,
+            text_style: n.text_style,
             enabled: n.enabled,
             check: n.check,
             selected: n.selected,
+            expanded: n.expanded,
             hovered: n.hovered,
             pressed: n.pressed,
             focused: self.focus == i,
             hover: n.hover_t,
+            scroll: self.scroll_info(i),
         })
     }
 
@@ -211,14 +440,19 @@ impl<M> Ui<M> {
     /// `text_len` bytes when there is one.
     pub(crate) fn alloc(&mut self, key: Key, role: Role, text_len: usize) -> u32 {
         let text = self.texts.take(text_len);
-        if let Some(i) = self.free.pop() {
+        let i = if let Some(i) = self.free.pop() {
             self.nodes[i as usize].reuse(key, role, text);
-            return i;
+            i
+        } else {
+            let i = u32::try_from(self.nodes.len()).unwrap_or(NIL);
+            let mut node = Node::new(key, role);
+            node.text = text;
+            self.nodes.push(node);
+            i
+        };
+        if role == Role::Field {
+            self.nodes[i as usize].field = self.alloc_field(i);
         }
-        let i = u32::try_from(self.nodes.len()).unwrap_or(NIL);
-        let mut node = Node::new(key, role);
-        node.text = text;
-        self.nodes.push(node);
         i
     }
 
@@ -229,11 +463,14 @@ impl<M> Ui<M> {
         } else {
             self.nodes[before as usize].prev
         };
+        let p = &self.nodes[parent as usize];
+        let in_viewport = p.in_viewport || p.scroll != NIL;
         {
             let c = &mut self.nodes[child as usize];
             c.parent = parent;
             c.prev = prev;
             c.next = before;
+            c.in_viewport = in_viewport;
         }
         if prev == NIL {
             self.nodes[parent as usize].first = child;
@@ -270,13 +507,39 @@ impl<M> Ui<M> {
 
     /// Unlinks and frees `child` with its subtree, damaging where it was.
     pub(crate) fn remove(&mut self, child: u32) {
-        let rect = self.nodes[child as usize].rect;
-        self.damage_rect(rect);
+        self.damage_view(child);
+        // The stops it takes with it may have been its viewport's only ones.
+        self.stop_changed(child);
         let parent = self.nodes[child as usize].parent;
         self.unlink(child);
         self.free_subtree(child);
+        self.forget_freed();
         self.mark_dirty(parent);
         self.a11y_touch(parent);
+    }
+
+    /// Drops what pointed into a subtree just freed (nothing has reused its slots yet). Once per
+    /// removal rather than per freed node: a filter that removes every row frees ~400 nodes.
+    fn forget_freed(&mut self) {
+        let nodes = &self.nodes;
+        let gone = |i: u32| i != NIL && !nodes[i as usize].live;
+        for slot in [
+            &mut self.focus,
+            &mut self.hover,
+            &mut self.pressed,
+            &mut self.key_pressed,
+            &mut self.context,
+            &mut self.reveal_after,
+        ] {
+            if gone(*slot) {
+                *slot = NIL;
+            }
+        }
+        if gone(self.anchor_node) {
+            self.anchor = None;
+            self.anchor_node = NIL;
+        }
+        self.tip_forget_freed();
     }
 
     fn free_subtree(&mut self, i: u32) {
@@ -286,20 +549,32 @@ impl<M> Ui<M> {
             self.free_subtree(c);
             c = next;
         }
-        for slot in [
-            &mut self.focus,
-            &mut self.hover,
-            &mut self.pressed,
-            &mut self.key_pressed,
-        ] {
-            if *slot == i {
-                *slot = NIL;
-            }
-        }
         if self.nodes[i as usize].animating
             && let Some(k) = self.anims.iter().position(|a| a.index == i)
         {
             self.anims.swap_remove(k);
+        }
+        let field = std::mem::replace(&mut self.nodes[i as usize].field, NIL);
+        if field != NIL {
+            self.release_field(field);
+        }
+        if std::mem::replace(&mut self.nodes[i as usize].hold, false) {
+            self.forget_hold(i);
+        }
+        // Only a node with popup state (a tooltip, a dropdown) has a side slot: the rest skip it.
+        debug_assert!(
+            self.nodes[i as usize].rare != 0 || self.nodes[i as usize].side == NIL,
+            "node {i} has a side slot and no popup state"
+        );
+        if self.nodes[i as usize].rare != 0 {
+            let side = std::mem::replace(&mut self.nodes[i as usize].side, NIL);
+            if side != NIL {
+                self.release_side(side);
+            }
+            let scroll = std::mem::replace(&mut self.nodes[i as usize].scroll, NIL);
+            if scroll != NIL {
+                self.release_scroll(scroll);
+            }
         }
         let n = &mut self.nodes[i as usize];
         n.live = false;
@@ -339,10 +614,10 @@ impl<M> Ui<M> {
     }
 
     /// The node's look changed but not its layout (hover, press, focus, check state).
+    /// Inside a scroll viewport, where it shows.
     pub(crate) fn damage_node(&mut self, i: u32) {
-        if let Some(n) = self.nodes.get(i as usize) {
-            let rect = n.rect;
-            self.damage_rect(rect);
+        if (i as usize) < self.nodes.len() {
+            self.damage_view(i);
         }
     }
 

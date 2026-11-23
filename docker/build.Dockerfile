@@ -90,13 +90,15 @@ RUN rustup component add rustfmt clippy llvm-tools \
 # artifacts) holds a file we can't redistribute, so a fork's workflow has nothing to take.
 # docker/task.sh downloads them from Microsoft into the `xwin` volume on first use, at these
 # versions, and checks the files against XWIN_SPLAT_SHA256. Bump the three together; on a
-# mismatch task.sh prints the hash it got.
+# mismatch task.sh prints the hash it got. Microsoft also services an SDK under its version
+# (10.0.26100, between 2026-11-08 and 11-10: headers and import libraries, not the CRT), which is
+# a mismatch with no bump: see what changed, then pin the new hash.
 ENV XWIN_CACHE_DIR=/opt/xwin \
     XWIN_ARCH=x86_64,aarch64 \
     XWIN_VERSION=17 \
     XWIN_SDK_VERSION=10.0.26100 \
     XWIN_CRT_VERSION=14.44.17.14 \
-    XWIN_SPLAT_SHA256=12b8cd0acbe9d9b2b67ff8d380d50a36b257fd196e8bb56171b7b93407fd72db
+    XWIN_SPLAT_SHA256=bb67668e58d68553fd5223c40255ff4386a5de670ffd2517603d808d97ebfea2
 # Writable by any user: cargo-xwin also drops tool symlinks into it at run time.
 RUN mkdir -p /opt/xwin && chmod a+rwx /opt/xwin
 

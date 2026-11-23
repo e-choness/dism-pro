@@ -10,6 +10,10 @@
 //! freed chunks (`malloc_consolidate`): 21.9 M of the 25.4 M instructions first counted for
 //! `apply`, whose setup had dropped the 100k rows.
 //!
+//! A refresh (TD-0009 A2.5, written before the code) is the new data's key map, built off the UI
+//! thread, then installed on it: the checks, the current row and the Shift anchor carried over by
+//! key, the view kept in its order.
+//!
 //! C1: `docker compose run --rm bench-gate` fails when a count is more than 5 % over
 //! `benches/baseline.json`; `bench-gate -- --update` rewrites that file from the run.
 
@@ -25,7 +29,10 @@ use std::hint::black_box;
 use apps::{Apps, NAME, ROWS, SEARCHED, SIZE};
 use dpro_app::{
     palette::{PaletteEntry, Score, rank},
-    table::{ColumnId, FilterIndex, Order, Query, SortKeys, TableModel},
+    table::{
+        Cell, ColumnId, FilterIndex, Order, Pick, Query, RowKey, RowMap, RowSource, SortKeys,
+        TableModel,
+    },
 };
 use gungraun::{
     Callgrind, LibraryBenchmarkConfig, library_benchmark, library_benchmark_group, main,
@@ -186,10 +193,89 @@ fn apply(r: Results) -> (TableModel, (Apps, SortKeys, FilterIndex)) {
     (model, fixture)
 }
 
+/// The U11 table refreshed (TD-0009 A2.5): the same 100k programs, 500 gone from the top, 500 new
+/// at the end, so every other row moves 500 places. Row `r` has key `r + 500`.
+struct Refreshed(u32);
+
+impl RowSource for Refreshed {
+    fn len(&self) -> u32 {
+        self.0
+    }
+    fn key(&self, row: u32) -> RowKey {
+        RowKey(u64::from(row) + 500)
+    }
+    fn cell(&self, _row: u32, _col: ColumnId) -> Cell<'_> {
+        Cell::Empty
+    }
+}
+
+/// The model of [`Apps`] with every tenth row checked and row 50,000 current, sorted by name,
+/// and the refreshed data's key map, built off the UI thread.
+struct Refresh {
+    model: TableModel,
+    map: RowMap,
+    fixture: (Apps, Refreshed),
+}
+
+fn refresh() -> Refresh {
+    let apps = Apps::new(ROWS);
+    let mut model = TableModel::with_keys(RowMap::build(&apps));
+    let s = model.begin_sort();
+    model.finish_sort(
+        s,
+        (NAME, Order::Ascending),
+        SortKeys::build(&apps, NAME).order(Order::Ascending),
+    );
+    for at in (0..ROWS).step_by(10) {
+        model.pick(at, Pick::Toggle);
+    }
+    model.set_current(ROWS / 2);
+    let new = Refreshed(ROWS);
+    Refresh {
+        model,
+        map: RowMap::build(&new),
+        fixture: (apps, new),
+    }
+}
+
+fn refreshed() -> Refreshed {
+    Refreshed(ROWS)
+}
+
+// Off the UI thread: the new data's keys, as a map from key to row.
+#[library_benchmark]
+#[bench::keys_100k(setup = refreshed)]
+fn refresh_map(new: Refreshed) -> (RowMap, Refreshed) {
+    (RowMap::build(black_box(&new)), new)
+}
+
+// On the UI thread: the checks, the current row and the anchor carried over by key, and the view
+// kept in its order with the new rows after it.
+#[library_benchmark]
+#[bench::checks_10k(setup = refresh)]
+fn refresh_apply(r: Refresh) -> (TableModel, (Apps, Refreshed)) {
+    let Refresh {
+        mut model,
+        map,
+        fixture,
+    } = r;
+    let g = model.begin_refresh();
+    model.finish_refresh(g, black_box(map));
+    (model, fixture)
+}
+
 library_benchmark_group!(name = palette_1000, benchmarks = keystroke);
 library_benchmark_group!(
     name = table_100k,
-    benchmarks = [sort_first, sort_again, filter_index, filter_rows, apply]
+    benchmarks = [
+        sort_first,
+        sort_again,
+        filter_index,
+        filter_rows,
+        apply,
+        refresh_map,
+        refresh_apply
+    ]
 );
 
 main!(

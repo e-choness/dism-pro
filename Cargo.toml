@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = ["crates/*", "xtask"]
+# Vendored crates keep upstream's code and lints: they're dependencies, patched in below.
+exclude = ["vendor"]
 
 [workspace.package]
 version = "0.1.0"
@@ -23,21 +25,50 @@ dpro-win = { path = "crates/dpro-win" }
 # Win32 FFI for dpro-win (coding standards §7: windows-sys over windows). MIT OR Apache-2.0.
 windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_Security_Cryptography",
     "Win32_Storage_FileSystem",
     "Win32_System_Console",
+    "Win32_System_DataExchange",
     "Win32_System_Diagnostics_Debug",
     "Win32_System_IO",
     "Win32_System_Kernel",
     "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
     "Win32_System_Pipes",
+    "Win32_System_Power",
+    "Win32_System_ProcessStatus",
     "Win32_System_Registry",
+    "Win32_System_RemoteDesktop",
     "Win32_System_SystemInformation",
     "Win32_System_Threading",
+    "Win32_System_Time",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
 ] }
+# COM for dpro-win's GUI (TD-0009 §5.5): DirectWrite, the composition presenter (Direct3D 11,
+# DXGI and DirectComposition, loaded at run time), and the UI Automation types that
+# accesskit_windows shares (this release) and HIGHCONTRASTW. windows-sys has no COM interfaces.
+# MIT OR Apache-2.0. Exact: the version S-01 built.
+windows = { version = "=0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_DirectComposition",
+    "Win32_Graphics_DirectWrite",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_UI_Accessibility",
+] }
+# Already in the tree through `windows`; named directly because `#[implement]` (our DirectWrite
+# renderer) expands to `windows_core::` paths. MIT OR Apache-2.0.
+windows-core = "=0.62.2"
 # Error enums per crate (coding standards §3). MIT OR Apache-2.0, proc-macro only.
 thiserror = "2.0.21"
 # Plan/JSON model (TD-0001 G1). MIT OR Apache-2.0.
@@ -51,6 +82,9 @@ serde_json = "1.0.154"
 # The accessibility tree (TD-0009 §5.5): platform-neutral types that dpro-ui builds and
 # accesskit_windows serves to UI Automation. MIT OR Apache-2.0. Exact: the version S-01 built.
 accesskit = "=0.25.2"
+# Serves that tree to UI Automation (TD-0009 §5.5), from dpro-win's GUI. Uses `windows` 0.62, the
+# release dpro-win names. MIT OR Apache-2.0. Exact: the version S-01 built, vendored (below).
+accesskit_windows = "=0.35.2"
 # Dev/bench only.
 criterion = "0.8.2"
 # Bench only: instruction counts under Callgrind, the deterministic gate (doc 04 §3). Apache-2.0 OR
@@ -83,6 +117,12 @@ dbg_macro = "deny"
 print_stdout = "deny"
 undocumented_unsafe_blocks = "deny"
 cast_possible_truncation = "deny"
+
+# The Windows adapter, vendored to add the UI Automation patterns AccessKit lacks (TD-0009 A2.5,
+# ADR-0002's amendment). vendor/accesskit_windows/PATCHES.md lists the changes. accesskit and
+# accesskit_consumer stay on crates.io at their exact pins.
+[patch.crates-io]
+accesskit_windows = { path = "vendor/accesskit_windows" }
 
 [profile.release]
 # A panic is a bug that produces a minidump (coding standards §3).

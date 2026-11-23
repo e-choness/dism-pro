@@ -9,6 +9,8 @@
 //! - The arithmetic is integer except that distance, so results are the same on every machine
 //!   (T1 compares pixels exactly).
 //! - Drawing never allocates (§7 U8), and every draw is clipped to the clip rectangle.
+//! - Coordinates are moved by the canvas's origin, which a scroll viewport sets for its content
+//!   (TD-0009 A2); the clip is always in the canvas's own pixels.
 
 use crate::{
     geom::RectPx,
@@ -27,6 +29,8 @@ pub struct Canvas<'a> {
     width: u32,
     height: u32,
     clip: RectPx,
+    /// Added to every coordinate drawn (not to the clip), x then y.
+    origin: [i32; 2],
 }
 
 impl<'a> Canvas<'a> {
@@ -45,7 +49,27 @@ impl<'a> Canvas<'a> {
                 x1: w,
                 y1: h,
             },
+            origin: [0, 0],
         })
+    }
+
+    /// Every later draw is moved by `origin` pixels (a scroll viewport's content). The clip isn't.
+    pub(crate) fn set_origin(&mut self, origin: [i32; 2]) {
+        self.origin = origin;
+    }
+
+    pub(crate) fn origin(&self) -> [i32; 2] {
+        self.origin
+    }
+
+    /// `r` moved by the origin: where it lands in the canvas's own pixels.
+    pub(crate) fn placed(&self, r: RectPx) -> RectPx {
+        RectPx {
+            x0: r.x0.saturating_add(self.origin[0]),
+            y0: r.y0.saturating_add(self.origin[1]),
+            x1: r.x1.saturating_add(self.origin[0]),
+            y1: r.y1.saturating_add(self.origin[1]),
+        }
     }
 
     #[must_use]
@@ -84,9 +108,23 @@ impl<'a> Canvas<'a> {
         self.clip
     }
 
+    /// Sets `rect` to `color`, replacing what's there instead of blending over it: the window's
+    /// background, which under glass is clear, so the backdrop shows through (ADR-0007).
+    pub fn clear(&mut self, rect: RectPx, color: Color) {
+        let area = self.placed(rect).intersect(self.clip);
+        if area.is_empty() {
+            return;
+        }
+        let px = premultiplied(color);
+        for y in area.y0..area.y1 {
+            let row = self.row(y);
+            row[idx(area.x0)..idx(area.x1)].fill(px);
+        }
+    }
+
     /// Fills `rect`.
     pub fn fill(&mut self, rect: RectPx, color: Color) {
-        let area = rect.intersect(self.clip);
+        let area = self.placed(rect).intersect(self.clip);
         if area.is_empty() || color.a == 0 {
             return;
         }
@@ -98,6 +136,11 @@ impl<'a> Canvas<'a> {
 
     /// Fills `rect` with its corners rounded to `radius` physical pixels.
     pub fn rrect(&mut self, rect: RectPx, radius: f32, color: Color) {
+        let rect = self.placed(rect);
+        self.rrect_placed(rect, radius, color);
+    }
+
+    fn rrect_placed(&mut self, rect: RectPx, radius: f32, color: Color) {
         let area = rect.intersect(self.clip);
         if area.is_empty() || color.a == 0 {
             return;
@@ -128,6 +171,7 @@ impl<'a> Canvas<'a> {
     /// A ring `width` physical pixels wide inside the edge of `rect`, whose outer corners are
     /// rounded to `radius` (the inner ones to `radius - width`): a border, or a focus ring.
     pub fn ring(&mut self, rect: RectPx, radius: f32, width: i32, color: Color) {
+        let rect = self.placed(rect);
         let width = width.max(1);
         let inner = RectPx {
             x0: rect.x0 + width,
@@ -136,7 +180,7 @@ impl<'a> Canvas<'a> {
             y1: rect.y1 - width,
         };
         if inner.is_empty() {
-            self.rrect(rect, radius, color);
+            self.rrect_placed(rect, radius, color);
             return;
         }
         let area = rect.intersect(self.clip);
@@ -156,9 +200,23 @@ impl<'a> Canvas<'a> {
                 }
                 continue;
             }
-            // Beside the hole: outer coverage minus the hole's, in the two side bands.
-            let (left, right) = (inner.x0 + hole.k, inner.x1 - hole.k);
             let row = self.row(y);
+            if !outer.corner_row(y) && !hole.corner_row(y) {
+                // Away from both shapes' corners, they're rectangles on this row: the ring is the
+                // band between their edges on either side, wholly covered.
+                for (x0, x1) in [
+                    (area.x0, area.x1.min(inner.x0)),
+                    (area.x0.max(inner.x1), area.x1),
+                ] {
+                    if x0 < x1 {
+                        span(&mut row[idx(x0)..idx(x1)], color);
+                    }
+                }
+                continue;
+            }
+            // Beside the hole, in a corner's rows: outer coverage minus the hole's, in the two
+            // side bands.
+            let (left, right) = (inner.x0 + hole.k, inner.x1 - hole.k);
             for x in (area.x0..area.x1.min(left)).chain(area.x0.max(right).max(left)..area.x1) {
                 let cut = if inner.contains_px(x, y) {
                     hole.coverage(x, y)
@@ -180,6 +238,10 @@ impl<'a> Canvas<'a> {
         if width == 0 || color.a == 0 {
             return;
         }
+        let (left, top) = (
+            left.saturating_add(self.origin[0]),
+            top.saturating_add(self.origin[1]),
+        );
         let stride = idx_u(width);
         let target = RectPx {
             x0: left,
@@ -259,6 +321,14 @@ impl Shape {
 }
 
 /// Fills a run of pixels with `c` at full coverage.
+///
+/// Always inlined, as [`blend_px`] is: a glyph's or a rectangle's rows call it, and the ring's
+/// bands calling it too once made LLVM call it 1.7 M times in the fling (+5.9 %).
+#[expect(
+    clippy::inline_always,
+    reason = "measured: out of line, the fling's frames cost 5.9 % more (C1)"
+)]
+#[inline(always)]
 fn span(run: &mut [u32], c: Color) {
     if c.a == 255 {
         run.fill(opaque(c));
@@ -274,7 +344,24 @@ fn opaque(c: Color) -> u32 {
     0xFF00_0000 | u32::from(c.r) << 16 | u32::from(c.g) << 8 | u32::from(c.b)
 }
 
+/// Any color as a pixel: its channels scaled by its alpha.
+fn premultiplied(c: Color) -> u32 {
+    let a = u32::from(c.a);
+    a << 24
+        | div255(u32::from(c.r) * a) << 16
+        | div255(u32::from(c.g) * a) << 8
+        | div255(u32::from(c.b) * a)
+}
+
 /// Source-over of `c` at coverage `k` (0–255) onto the premultiplied pixel `d`.
+///
+/// Always inlined: it's every shape's per-pixel step. One call site more (the ring's bands)
+/// once made LLVM call it instead, and `rrect`'s loop cost five times as much (C1, slice 5b1).
+#[expect(
+    clippy::inline_always,
+    reason = "measured: out of line, an unchanged painted frame cost twice as much (C1)"
+)]
+#[inline(always)]
 fn blend_px(d: &mut u32, c: Color, k: u32) {
     let sa = div255(u32::from(c.a) * k);
     if sa == 0 {
@@ -381,6 +468,21 @@ mod tests {
         assert_eq!(at(&c, 0, 0), 0xFFFF_8080);
     }
 
+    /// The background under glass: set, premultiplied, whatever was there; clipped like a fill.
+    #[test]
+    fn clearing_replaces_pixels_instead_of_blending() {
+        let mut px = Vec::new();
+        let mut c = canvas(&mut px, 4, 4);
+        c.fill(c.bounds(), RED);
+        c.set_clip(rect(0, 0, 2, 4));
+        c.clear(c.bounds(), Color::hex(0xFF_FFFF).alpha(0));
+        assert_eq!((at(&c, 1, 3), at(&c, 2, 3)), (0, 0xFFFF_0000));
+        c.clear(rect(0, 0, 1, 1), Color::hex(0xFF_FFFF).alpha(128));
+        assert_eq!(at(&c, 0, 0), 0x8080_8080);
+        c.clear(rect(0, 0, 1, 1), RED);
+        assert_eq!(at(&c, 0, 0), 0xFFFF_0000);
+    }
+
     #[test]
     fn rounded_corners_are_antialiased_and_symmetric() {
         let mut px = Vec::new();
@@ -443,6 +545,76 @@ mod tests {
         let mut c = canvas(&mut px3, 6, 6);
         c.ring(rect(0, 0, 6, 6), 0.0, 3, RED);
         assert!(c.pixels().iter().all(|&p| p == 0xFFFF_0000));
+    }
+
+    /// A ring's straight rows fill their bands whole; everywhere they match the definition, the
+    /// outer shape's coverage less the hole's, pixel for pixel, at any size, corner, width, clip
+    /// and alpha.
+    #[test]
+    fn a_ring_is_the_outer_shape_less_the_hole() {
+        let colors = [RED, Color::hex(0x20_80FF).alpha(100)];
+        let clips = [rect(0, 0, 40, 40), rect(5, 7, 33, 30), rect(0, 12, 40, 13)];
+        let mut px = Vec::new();
+        let mut want = Vec::new();
+        for (w, h) in [(30, 30), (36, 9), (8, 34), (3, 3)] {
+            for radius in [0.0, 1.0, 2.5, 6.0, 40.0] {
+                for width in 1..=3 {
+                    for clip in clips {
+                        for color in colors {
+                            let r = rect(3, 2, 3 + w, 2 + h);
+                            let mut c = canvas(&mut px, 40, 40);
+                            c.fill(c.bounds(), Color::hex(0x40_4040));
+                            c.set_clip(clip);
+                            c.ring(r, radius, width, color);
+                            let got = c.pixels().to_vec();
+                            let mut c = canvas(&mut want, 40, 40);
+                            c.fill(c.bounds(), Color::hex(0x40_4040));
+                            c.set_clip(clip);
+                            ring_by_definition(&mut c, r, radius, width, color);
+                            assert_eq!(
+                                got,
+                                c.pixels(),
+                                "{w}x{h}, radius {radius}, width {width}, clip {clip:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// [`Canvas::ring`] pixel by pixel: the outer shape's coverage less the hole's.
+    fn ring_by_definition(c: &mut Canvas<'_>, rect: RectPx, radius: f32, width: i32, color: Color) {
+        let inner = RectPx {
+            x0: rect.x0 + width,
+            y0: rect.y0 + width,
+            x1: rect.x1 - width,
+            y1: rect.y1 - width,
+        };
+        if inner.is_empty() {
+            c.rrect(rect, radius, color);
+            return;
+        }
+        let (outer, hole) = (
+            Shape::new(rect, radius),
+            Shape::new(inner, radius - f(width)),
+        );
+        let area = rect.intersect(c.clip);
+        for y in area.y0..area.y1 {
+            for x in area.x0..area.x1 {
+                let cut = if inner.contains_px(x, y) {
+                    hole.coverage(x, y)
+                } else {
+                    0
+                };
+                let row = c.row(y);
+                blend_px(
+                    &mut row[idx(x)],
+                    color,
+                    outer.coverage(x, y).saturating_sub(cut),
+                );
+            }
+        }
     }
 
     #[test]

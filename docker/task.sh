@@ -74,9 +74,23 @@ case "${task}" in
     exec cargo test --doc --workspace --locked
     ;;
   test-win)
-    # T2: x86_64 only; the Wine runner is set in the t2 image.
+    # T2: x86_64 only; the Wine runner is set in the t2 image. Wine's null display driver lets
+    # dpro-win's GUI tests create windows (hidden) with no X server; it lasts as long as the
+    # container.
     xwin_splat
-    exec cargo xwin test --workspace --locked --target x86_64-pc-windows-msvc "$@"
+    if ! wine reg add 'HKCU\Software\Wine\Drivers' /v Graphics /d null /f > /dev/null 2>&1; then
+      echo "test-win: couldn't select Wine's null display driver" >&2
+      exit 1
+    fi
+    wineserver --wait
+    # Then the vendored accessibility adapter, outside the workspace: its tests, less the
+    # upstream ones that go through UI Automation's core, which Wine doesn't implement enough of
+    # (T3 runs them all). Both runs happen even if the first fails.
+    status=0
+    cargo xwin test --workspace --locked --target x86_64-pc-windows-msvc "$@" || status=$?
+    cargo xwin test -p accesskit_windows --locked --target x86_64-pc-windows-msvc \
+      -- --skip tests::simple || status=$?
+    exit "${status}"
     ;;
   bench)
     # criterion, advisory timings. The `ir` benches aren't run by default (bench = false).
@@ -106,29 +120,40 @@ case "${task}" in
     # dpro-broker test binaries, whose
     # crash-dump, pipe and peer tests need real Windows (dbghelp.dll, WER, integrity labels);
     # dismpro-cli's MCP stdio test, which needs dismapi.dll and runs the release CLI (DISMPRO_CLI);
-    # and ffi-check-source, which prints the S-03 checks that .github/scripts/adk.ps1 compiles
-    # against the ADK headers on the runner, so those headers never leave it (decision #22).
+    # ffi-check-source, which prints the S-03 checks that .github/scripts/adk.ps1 compiles
+    # against the ADK headers on the runner, so those headers never leave it (decision #22); and
+    # G1's UI probes for .github/scripts/ui-gates.ps1 (TD-0009 §7): bare_window, the raw-API
+    # baseline, and shell, the probe target until dismpro.exe has its shell (roadmap 3.2); and
+    # the vendored accesskit_windows's tests, a real window served to a UI Automation client
+    # (TD-0009 A2.9), which Wine's UIA can't stand in for.
     xwin_splat
     t=x86_64-pc-windows-msvc
     cargo xwin build --locked --release -p dpro-engine --example regf_dump --target "${t}" "$@"
     cargo xwin build --locked --release -p dpro-sys --example ffi-check-source --target "${t}" "$@"
     cargo xwin build --locked --release -p dpro-win --example pipe_t3 --example wim_t3 \
       --example drivers_t3 --target "${t}" "$@"
+    cargo xwin build --locked --release -p dpro-win --features gui --example bare_window \
+      --target "${t}" "$@"
+    cargo xwin build --locked --release -p dpro-ui --example shell --target "${t}" "$@"
     # The unit-test binary of package $1: cargo prints "Executable unittests src/lib.rs (<path>)".
     test_exe() {
       cargo xwin test --color never --locked --no-run -p "$1" --target "${t}" "${@:2}" 2>&1 \
         | tee /dev/stderr | sed -n 's/^ *Executable unittests src\/lib\.rs (\(.*\))$/\1/p'
     }
-    win_tests=$(test_exe dpro-win "$@")
+    # With the GUI's tests: windows and DirectWrite with the runner's own fonts.
+    win_tests=$(test_exe dpro-win --features gui "$@")
     broker_tests=$(test_exe dpro-broker "$@")
+    adapter_tests=$(test_exe accesskit_windows "$@")
     mcp_tests=$(cargo xwin test --color never --locked --no-run -p dismpro-cli --test mcp_stdio \
       --target "${t}" "$@" 2>&1 \
       | tee /dev/stderr | sed -n 's/^ *Executable tests\/mcp_stdio\.rs (\(.*\))$/\1/p')
     rm -rf dist-t3
     mkdir -p dist-t3
-    cp "target/${t}/release/examples/"{regf_dump,pipe_t3,wim_t3,drivers_t3,ffi-check-source}.exe dist-t3/
+    cp "target/${t}/release/examples/"{regf_dump,pipe_t3,wim_t3,drivers_t3,ffi-check-source}.exe \
+      "target/${t}/release/examples/"{bare_window,shell}.exe dist-t3/
     cp "${win_tests:?no dpro-win test binary}" dist-t3/dpro-win-tests.exe
     cp "${broker_tests:?no dpro-broker test binary}" dist-t3/dpro-broker-tests.exe
+    cp "${adapter_tests:?no accesskit_windows test binary}" dist-t3/accesskit-windows-tests.exe
     cp "${mcp_tests:?no dismpro-cli mcp test binary}" dist-t3/dismpro-cli-mcp-tests.exe
     ;;
   build)
