@@ -15,6 +15,7 @@ x-toolchain: &toolchain
   volumes:
     - .:/src
     # target/ and the cargo caches live in named volumes, not the bind mount (fast on Windows hosts).
+    # The caches are shared by every checkout; target/ is per checkout (see `volumes:` below).
     - target:/src/target
     - cargo-registry:/usr/local/cargo/registry
     - cargo-git:/usr/local/cargo/git
@@ -86,8 +87,17 @@ services:
       DPRO_FFI_INCLUDE: ${DPRO_FFI_INCLUDE:-}
 
 volumes:
+  # Each checkout builds into its own target/ (compose prefixes it with the directory name), so
+  # worktrees building at once don't wait on each other's build lock. The caches have fixed names
+  # and are shared by every checkout on the machine, so a new worktree starts warm. Sharing is safe:
+  # cargo locks its registry, task.sh downloads xwin once under flock, and sccache writes each entry
+  # to a temp file and renames it into place.
   target:
   cargo-registry:
+    name: dism-pro-cargo-registry
   cargo-git:
+    name: dism-pro-cargo-git
   sccache:
+    name: dism-pro-sccache
   xwin:
+    name: dism-pro-xwin
