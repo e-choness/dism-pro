@@ -974,10 +974,16 @@ impl<'s, M> Element<'s, M> {
         self
     }
 
-    /// Makes a container a landmark that a screen reader jumps to (A4.4): the rail is
+    /// Makes a plain container a landmark that a screen reader jumps to (A4.4): the rail's is
     /// [`Landmark::Navigation`], the page [`Landmark::Main`] named by its title. Give it a
     /// [name](Self::name): a [region](Landmark::Region) without one is no landmark. A client
-    /// sees the landmark in place of what the container would be (a list, a group).
+    /// sees the landmark in place of the group the container would be.
+    ///
+    /// A list, toolbar or tab list that is a landmark goes inside a plain container that
+    /// carries the landmark, as a web `<nav>` holds a `<ul>`: it keeps its role, so a screen
+    /// reader reads an item's place in it ("3 of 12"). Given to a container with a role of its
+    /// own (one whose arrow keys move through its items), the landmark isn't applied, and a
+    /// debug build asserts when a client reads the tree.
     ///
     /// Other roles ignore it.
     #[must_use]

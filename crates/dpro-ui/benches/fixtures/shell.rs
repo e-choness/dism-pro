@@ -656,31 +656,44 @@ pub(crate) fn view(s: &Shell, cx: &mut Cx<'_, Msg>) {
     );
 }
 
-/// A list: one Tab stop, the arrow keys move through its pages, Enter or Space opens one.
+/// A list: one Tab stop, the arrow keys move through its pages, Enter or Space opens one. A plain
+/// container around it is the Navigation landmark, as a web `<nav>` holds a `<ul>`, so the list
+/// keeps its role and a screen reader reads a page's place in it (TD-0009 A4.5, A4.9's N-2). The
+/// container is a row that stretches the list, and as wide as it, so the list is where it was.
 fn rail(s: &Shell, cx: &mut Cx<'_, Msg>) {
     cx.add_with(
-        Element::list(Key::name("rail"))
+        Element::stack(Key::name("nav"))
             .style(Style {
-                width: Dim::Fixed(200.0),
-                padding: Insets::all(8.0),
-                align: Align::Stretch,
-                ..column(4.0)
-            })
-            .look(Look {
-                fill: Some(Tone::Subtle),
-                ..Look::PLAIN
+                axis: Axis::Row,
+                ..Style::default()
             })
             .name("Pages")
             .landmark(Landmark::Navigation),
         |cx| {
-            for (p, label) in (0..RAIL).zip(PAGES) {
-                cx.add(
-                    Element::button(Key::index(u64::from(p)), label, Msg::Page(p))
-                        .style(sized(36.0, 12.0))
-                        .look(control((p == s.page).then_some(Tone::Selected)))
-                        .selected(p == s.page),
-                );
-            }
+            cx.add_with(
+                Element::list(Key::name("rail"))
+                    .style(Style {
+                        width: Dim::Fixed(200.0),
+                        padding: Insets::all(8.0),
+                        align: Align::Stretch,
+                        ..column(4.0)
+                    })
+                    .look(Look {
+                        fill: Some(Tone::Subtle),
+                        ..Look::PLAIN
+                    })
+                    .name("Pages"),
+                |cx| {
+                    for (p, label) in (0..RAIL).zip(PAGES) {
+                        cx.add(
+                            Element::button(Key::index(u64::from(p)), label, Msg::Page(p))
+                                .style(sized(36.0, 12.0))
+                                .look(control((p == s.page).then_some(Tone::Selected)))
+                                .selected(p == s.page),
+                        );
+                    }
+                },
+            );
         },
     );
 }
@@ -1483,6 +1496,15 @@ impl Run {
         [Key::name("start-pages"), Key::index(p)]
     }
 
+    /// The rail's list of pages, its path from the root: in the rail's Navigation landmark.
+    pub(crate) const RAIL_LIST: [Key; 3] = [Key::name("body"), Key::name("nav"), Key::name("rail")];
+
+    /// Page `p`'s item in the rail, its path from the root.
+    pub(crate) fn page(p: u64) -> [Key; 4] {
+        let [body, nav, rail] = Self::RAIL_LIST;
+        [body, nav, rail, Key::index(p)]
+    }
+
     /// Tab `t`'s path from the root.
     pub(crate) fn tab(t: u64) -> [Key; 5] {
         [
@@ -1714,7 +1736,7 @@ impl Run {
         let body = [Key::name("body")];
         let mut steps = Vec::new();
         for p in 0..u64::from(RAIL) {
-            let at = self.center(&[body[0], Key::name("rail"), Key::index(p)]);
+            let at = self.center(&Self::page(p));
             steps.push(Step::Input(Input::PointerMove(at)));
         }
         steps.push(Step::Input(Input::PointerLeave));

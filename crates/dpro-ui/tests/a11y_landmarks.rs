@@ -1,7 +1,8 @@
 //! Headings and landmarks (TD-0009 A4.4, A4.5, A4.9), slice 7a: one level-1 heading per page and
-//! level 2 for its sections; exactly one Main landmark, named by the page's title; the rail is
-//! Navigation; the drawer a region with its kind; landmarks in visual order. On the shell's
-//! summary page with the drawer open, and on the composites page.
+//! level 2 for its sections; exactly one Main landmark, named by the page's title; the rail is a
+//! Navigation landmark around its list, which keeps its role; the drawer a region with its kind;
+//! landmarks in visual order. On the shell's summary page with the drawer open, and on the
+//! composites page.
 //!
 //! AccessKit's level is zero-based (aria-level less one): a level-1 heading has `level()` 0, and
 //! the adapter reports `HeadingLevel` 80050 + level + 1 (patch 8).
@@ -14,7 +15,7 @@ mod composites;
 mod shell;
 
 use dpro_ui::{
-    Element, FakeText, Key, Landmark, Motion, Size, Ui,
+    Element, FakeText, Key, Landmark, Motion, Rect, Size, Ui,
     accesskit::{Node, NodeId as AkId, Role, TreeUpdate},
     tokens,
 };
@@ -119,6 +120,62 @@ fn the_shells_landmarks_are_in_visual_order_and_regions_have_a_kind() {
         found.iter().all(|(_, name, _)| !name.is_empty()),
         "{found:?}"
     );
+}
+
+/// The rail is a Navigation landmark around its list, as a web `<nav>` holds a `<ul>` (A4.5):
+/// the list keeps its role, so UI Automation sees a List of the 12 pages, "Overview" first, as
+/// G1's U12 check finds it (run 45127764360 found none when the landmark replaced the list's
+/// role), and Narrator reads a page's place in it (A4.9's N-2).
+#[test]
+fn the_rail_is_a_navigation_landmark_around_the_list_of_pages() {
+    let mut run = shell::Run::accessible(shell::Shell::new());
+    let tree = run.ui.a11y_tree();
+    let ak = |id: AkId| {
+        tree.nodes
+            .iter()
+            .find(|(ak, _)| *ak == id)
+            .map(|(_, n)| n)
+            .expect("a node of the tree")
+    };
+    let navs: Vec<_> = order(&tree)
+        .into_iter()
+        .filter(|(_, n)| n.role() == Role::Navigation)
+        .collect();
+    let [(nav, rail)] = navs.as_slice() else {
+        panic!("one Navigation landmark: {navs:?}");
+    };
+    assert_eq!(rail.label(), Some("Pages"));
+    let wrapper = run.ui.find(&shell::Run::RAIL_LIST[..2]);
+    assert_eq!(
+        run.ui.a11y_node(*nav),
+        wrapper,
+        "the container around the list"
+    );
+    let [list_id] = rail.children() else {
+        panic!("the landmark holds the list alone: {:?}", rail.children());
+    };
+    let list = ak(*list_id);
+    assert_eq!((list.role(), list.label()), (Role::List, Some("Pages")));
+    assert_eq!(
+        run.ui.a11y_node(*list_id),
+        run.ui.find(&shell::Run::RAIL_LIST)
+    );
+    let pages: Vec<_> = list.children().iter().map(|&c| ak(c)).collect();
+    assert_eq!(pages.len(), 12);
+    assert!(pages.iter().all(|p| p.role() == Role::ListItem));
+    assert_eq!(pages[0].label(), Some("Overview"));
+    assert_eq!(pages[0].is_selected(), Some(true));
+
+    // The landmark is the list's box, so the list is where it was without one: the body's left
+    // 200 px, its whole height.
+    let rect = |path: &[Key]| {
+        let id = run.ui.find(path).expect("built");
+        run.ui.info(id).expect("live").rect
+    };
+    let body = rect(&shell::Run::RAIL_LIST[..1]);
+    let list = rect(&shell::Run::RAIL_LIST);
+    assert_eq!(rect(&shell::Run::RAIL_LIST[..2]), list);
+    assert_eq!(list, Rect { w: 200.0, ..body });
 }
 
 #[test]

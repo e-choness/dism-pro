@@ -44,10 +44,15 @@
 //!   - a label that's a [heading](crate::Element::heading) is a heading at its level, named by
 //!     its text. AccessKit's level is zero-based (aria-level less one), so a level-1 heading is
 //!     sent as level 0 and the adapter reports `HeadingLevel1` (PATCHES.md 8);
-//!   - a container that's a [landmark](crate::Element::landmark) is the main, navigation or
-//!     search landmark, in place of the group, list or other role it would have; a named region
-//!     is a region with its kind as role description, which the adapter reports as a custom
-//!     landmark of that type (PATCHES.md 9). An unnamed region is no landmark;
+//!   - a plain container that's a [landmark](crate::Element::landmark) is the main, navigation
+//!     or search landmark, in place of the group it would be; a named region is a region with
+//!     its kind as role description, which the adapter reports as a custom landmark of that
+//!     type (PATCHES.md 9). An unnamed region is no landmark. Only a plain container is one: a
+//!     list, toolbar or tab list that is a landmark goes inside a plain container that carries
+//!     the landmark, as a web `<nav>` holds a `<ul>`, so it keeps its role and a screen reader
+//!     reads an item's place in it ("3 of 12"). A landmark on a container with a role of its
+//!     own (a list, a toolbar, a tab list, a table's header) is a mistake: a debug build
+//!     asserts, and the container keeps its role;
 //!   - a [live](crate::Element::live) label or container carries its politeness;
 //!   - a [shortcut](crate::Element::shortcut) is the node's keyboard shortcut, which the adapter
 //!     reports as `AcceleratorKey` (PATCHES.md 10).
@@ -377,7 +382,8 @@ impl<M> Ui<M> {
             return AkRole::Window;
         }
         let n = &self.nodes[i as usize];
-        // A heading or a landmark (A4.5) is that, whatever else the node would be.
+        // A heading, or a plain container's landmark (A4.5), is that in place of a label or a
+        // group.
         if n.has_props()
             && let Some(role) = self.ak_structure(i)
         {
@@ -425,16 +431,35 @@ impl<M> Ui<M> {
     }
 
     /// Node `i`'s heading or landmark role (A4.5), if it has one: a named label's heading, or a
-    /// container's landmark. A region needs a name.
+    /// plain container's landmark. A region needs a name.
+    ///
+    /// A container with a role of its own (a list, a toolbar, a tab list, a table's header)
+    /// keeps it, and a debug build asserts: its landmark goes on a plain container around it, as
+    /// a web `<nav>` holds a `<ul>`. Replacing a list's role hid the rail's pages from UI
+    /// Automation's List (G1, run 45127764360) and took their place in it ("3 of 12") from
+    /// Narrator (A4.9's N-2).
     fn ak_structure(&self, i: u32) -> Option<AkRole> {
         let n = &self.nodes[i as usize];
         let p = self.sides.get(n.side as usize)?.props.props;
         let named = !n.text.is_empty();
         match (n.role, p.landmark()) {
-            (Role::Container, Some(LandmarkKind::Main)) => Some(AkRole::Main),
-            (Role::Container, Some(LandmarkKind::Navigation)) => Some(AkRole::Navigation),
-            (Role::Container, Some(LandmarkKind::Search)) => Some(AkRole::Search),
-            (Role::Container, Some(LandmarkKind::Region)) if named => Some(AkRole::Region),
+            (Role::Container, Some(kind)) => {
+                let plain = n.group.is_none() && !self.is_table_header(i);
+                debug_assert!(
+                    plain,
+                    "node {i}: a landmark goes on a plain container around a list, toolbar or \
+                     tab list, not on it"
+                );
+                if !plain {
+                    return None;
+                }
+                match kind {
+                    LandmarkKind::Main => Some(AkRole::Main),
+                    LandmarkKind::Navigation => Some(AkRole::Navigation),
+                    LandmarkKind::Search => Some(AkRole::Search),
+                    LandmarkKind::Region => named.then_some(AkRole::Region),
+                }
+            }
             (Role::Label, _) if p.heading() > 0 && named => Some(AkRole::Heading),
             _ => None,
         }
@@ -1364,5 +1389,78 @@ mod tests {
             0,
             "both slots given back"
         );
+    }
+
+    /// A4.5: a plain container that's a landmark is the landmark in place of a group, and a list
+    /// inside it keeps its role, as a web `<nav>` holds a `<ul>`: a client reads the list and an
+    /// item's place in it (A4.9's N-2).
+    #[test]
+    fn a_plain_container_is_the_landmark_around_a_list() {
+        let mut ui: Ui<u8> = Ui::new(Size { w: 300.0, h: 300.0 }, 1.0, Motion::default());
+        ui.build(|cx| {
+            cx.add_with(
+                Element::stack(Key::name("nav"))
+                    .name("Pages")
+                    .landmark(crate::Landmark::Navigation),
+                |cx| {
+                    cx.add_with(Element::list(Key::name("rail")).name("Pages"), |cx| {
+                        cx.add(Element::button(Key::index(0), "Overview", 1).selected(true));
+                        cx.add(Element::button(Key::index(1), "Clean", 2).selected(false));
+                    });
+                },
+            );
+        });
+        ui.layout(&mut FakeText);
+        let tree = ui.a11y_tree();
+        let node = |path: &[Key]| {
+            let want = id(&ui, path);
+            &tree.nodes.iter().find(|(id, _)| *id == want).unwrap().1
+        };
+        let rail = [Key::name("nav"), Key::name("rail")];
+        let nav = node(&rail[..1]);
+        assert_eq!(
+            (nav.role(), nav.label()),
+            (AkRole::Navigation, Some("Pages"))
+        );
+        assert_eq!(nav.children(), [id(&ui, &rail)]);
+        let list = node(&rail);
+        assert_eq!((list.role(), list.label()), (AkRole::List, Some("Pages")));
+        assert_eq!(list.children().len(), 2);
+        let first = node(&[rail[0], rail[1], Key::index(0)]);
+        assert_eq!(
+            (first.role(), first.label(), first.is_selected()),
+            (AkRole::ListItem, Some("Overview"), Some(true))
+        );
+    }
+
+    /// A landmark on a list is a mistake: a debug build asserts, and the list keeps its role,
+    /// so UI Automation still sees a List (G1, run 45127764360, found none when the landmark
+    /// replaced it).
+    #[test]
+    #[cfg_attr(
+        debug_assertions,
+        should_panic(expected = "a landmark goes on a plain container")
+    )]
+    fn a_list_that_is_given_a_landmark_keeps_its_role() {
+        let mut ui: Ui<u8> = Ui::new(Size { w: 300.0, h: 300.0 }, 1.0, Motion::default());
+        ui.build(|cx| {
+            cx.add_with(
+                Element::list(Key::name("rail"))
+                    .name("Pages")
+                    .landmark(crate::Landmark::Navigation),
+                |cx| {
+                    cx.add(Element::button(Key::index(0), "Overview", 1).selected(true));
+                },
+            );
+        });
+        ui.layout(&mut FakeText);
+        let tree = ui.a11y_tree();
+        let rail = id(&ui, &[Key::name("rail")]);
+        let role = tree
+            .nodes
+            .iter()
+            .find(|(id, _)| *id == rail)
+            .map(|(_, n)| n.role());
+        assert_eq!(role, Some(AkRole::List));
     }
 }
