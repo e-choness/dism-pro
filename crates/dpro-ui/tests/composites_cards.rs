@@ -1,11 +1,11 @@
 //! Summary and scan cards (TD-0009 A3.5 (4), (5), A3.9).
 //!
 //! Summary cards: a clickable card is a Button named by its label, described by "{value}.
-//! {detail}", with presentational children; a static one is a Group named by its label; a grid
-//! wraps them at 220 px each, a loading card's skeleton shows in high contrast, and its value
-//! arriving repaints the value alone. Scan cards: Space toggles, Mixed shows, Details only when the
-//! scan failed, a size update damages only its slot at any text size, and a scan starting or ending
-//! repaints its slot alone, its bar under the size.
+//! {detail}" and its delta, with presentational children; a static one is a Group named by its
+//! label; a grid wraps them at 220 px each, a loading card's skeleton shows in high contrast, and
+//! its value arriving repaints the value alone. Scan cards: Space toggles, Mixed shows, Details only
+//! when the scan failed, a busy box's reason is heard, a size update damages only its slot at any
+//! text size, and a scan starting or ending repaints its slot alone, its bar under the size.
 
 #![allow(missing_docs)]
 
@@ -13,7 +13,7 @@
 mod composites;
 
 use composites::{
-    CARDS, CATEGORIES, Model, Msg, NARROW, PAGE, Run, SCANS, START, Step, key, key_up,
+    BUSY, CARDS, CATEGORIES, LABELS, Model, Msg, NARROW, PAGE, Run, SCANS, START, Step, key, key_up,
 };
 use dpro_ui::{
     Canvas, Color, FakeText, Input, Key, KeyCode, Mods, Motion, Rect, Role, Size, SysColors, Theme,
@@ -82,7 +82,11 @@ fn a_clickable_card_is_named_by_its_label_and_described_by_value_and_detail() {
     let node = run.ak(&tree, id).expect("in the tree");
     assert_eq!(node.role(), AkRole::Button);
     assert_eq!(node.label(), Some("Space to free"));
-    assert_eq!(node.description(), Some("5.6 GB. Across 4 categories"));
+    // Then its delta, which is presentational too, so a client hears it only here.
+    assert_eq!(
+        node.description(),
+        Some("5.6 GB. Across 4 categories. 1.1 GB more than last week")
+    );
     // Its parts are presentational: read once, as the button.
     assert_eq!(
         node.children(),
@@ -165,6 +169,34 @@ fn a_scan_cards_box_is_described_by_description_size_and_badge() {
     );
     // The name and the description inside the box are presentational (A3.5 addition 9).
     assert_eq!(node.children(), &[]);
+}
+
+/// A busy box's reason is its tooltip, and its description ends with it: a description takes
+/// the tooltip's place for a client (A3.5 addition 4), which must still hear why the box is
+/// disabled (A3.4, `ui-busy-target`).
+#[test]
+fn a_busy_scan_cards_box_shows_its_reason_and_a_client_hears_it() {
+    let mut run = Run::accessible(Model::new());
+    let tree = run.ui.a11y_tree();
+    let check = run.part(&scan(6), SCAN_CHECK).expect("its box");
+    let node = run.ak(&tree, check).expect("in the tree");
+    assert!(node.is_disabled());
+    let description = node.description().expect("a description");
+    let reason = format!("{}{BUSY}", LABELS.separator);
+    assert!(description.ends_with(&reason), "{description:?}");
+    // The tooltip still shows the reason alone, in a window tall enough to show the card.
+    run.step(Step::Resize(Size {
+        w: START.w,
+        h: START.h * 3.0,
+    }));
+    let at = run.ui.info(check).expect("its box").rect.center();
+    run.step(Step::Input(Input::PointerMove(at)));
+    run.settle();
+    let due = run.wake().expect("a pending tip's wake");
+    run.step(Step::Tick(due));
+    // The platform runs the tip's one-shot timer when it's due.
+    assert!(run.wake().is_some(), "a showing tip's wake, to hide it");
+    assert_eq!(run.ui.tooltip().map(|(_, text)| text), Some(BUSY));
 }
 
 #[test]

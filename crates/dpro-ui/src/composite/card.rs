@@ -2,12 +2,14 @@
 //!
 //! - A **summary card** (Overview, artboard 01): a label, a large metric or a status dot with a
 //!   word, and a detail line. A clickable one is a button named by its label and described by
-//!   "{value}. {detail}", its parts presentational; a static one is a group named by its label,
-//!   which is a level-2 heading. [`Cx::card_grid`] wraps cards at [`card::MIN_W`] each.
+//!   "{value}. {detail}" (then its delta, if any), its parts presentational; a static one is a
+//!   group named by its label, which is a level-2 heading. [`Cx::card_grid`] wraps cards at
+//!   [`card::MIN_W`] each.
 //! - A **category scan card** (Clean, artboard 02): a check box named by the category, holding its
-//!   name and description, and described by "{description}. {size}. {badge}"; a risk badge; the
-//!   size in a fixed slot at the end, so a size update while scanning damages that slot alone,
-//!   with a 2 px bar under it while its category scans; and Details when the scan failed.
+//!   name and description, and described by "{description}. {size}. {badge}" (then why it's
+//!   busy, while it is); a risk badge; the size in a fixed slot at the end, so a size update
+//!   while scanning damages that slot alone, with a 2 px bar under it while its category scans;
+//!   and Details when the scan failed.
 //!
 //!   A3.5 (5) draws the bar along the card's bottom. That needs a row inside the card for the
 //!   parts and a bar node beside it in every card, 14 more nodes on the composites page:
@@ -89,7 +91,7 @@ pub struct SummaryCard<'s, M> {
     pub delta: Option<(&'s str, StatusTone)>,
     /// A clickable card's message, which opens its page; `None` for a static card.
     pub open: Option<M>,
-    /// What joins the value and the detail in a clickable card's description:
+    /// What joins the value, the detail and the delta in a clickable card's description:
     /// `ui-description-separator` (". " in en-US).
     pub separator: &'s str,
 }
@@ -99,7 +101,7 @@ pub struct SummaryCard<'s, M> {
 pub enum ScanSize {
     /// Not scanned: `ui-size-unknown`.
     Unknown,
-    /// Scanning: `ui-scan-scanning`, and a bar along the card's bottom.
+    /// Scanning: `ui-scan-scanning`, and a 2 px bar under it, in the size's slot.
     Scanning,
     /// Scanned, in the window's formats; 0 is "Nothing to clean", and the box is disabled.
     Bytes(Bytes),
@@ -136,7 +138,8 @@ pub struct ScanCard<'s, M> {
     /// The risk badge (its levels and words come from the rule packs, `clean-`).
     pub badge: Option<BadgeSpec<'s>>,
     pub size: ScanSize,
-    /// While a job holds the target: why the box is disabled (`ui-busy-target`).
+    /// While a job holds the target: why the box is disabled (`ui-busy-target`), its tooltip and
+    /// the end of its description.
     pub busy: Option<&'s str>,
     pub toggle: M,
     /// Details' message, when the scan failed.
@@ -191,8 +194,11 @@ impl<M: Clone> Cx<'_, M> {
             }
         };
         if let Some(open) = &c.open {
+            // "{value}. {detail}" (A3.5 (4)), and the delta a client otherwise wouldn't hear:
+            // the parts are presentational.
+            let delta = c.delta.map_or("", |(d, _)| d);
             let mut description = mem::take(&mut self.ui.cell_text);
-            join(&mut description, c.separator, &[value, c.detail]);
+            join(&mut description, c.separator, &[value, c.detail, delta]);
             let id = self.add_with(
                 // Named explicitly, so its parts are presentational (A3.5 addition 9).
                 Element::button(key, "", open.clone())
@@ -253,6 +259,12 @@ impl<M: Clone> Cx<'_, M> {
         if let Some(b) = c.badge {
             text.push_str(labels.separator);
             text.push_str(b.text);
+        }
+        // A busy box's reason is its tooltip, which a description takes the place of for a
+        // client (A3.5 addition 4): the description says it too, so the reason is heard.
+        if let Some(reason) = c.busy {
+            text.push_str(labels.separator);
+            text.push_str(reason);
         }
         let (size, description) = text.split_at(size_end);
         // The size's slot is a size's width at the user's text size, so sizes arriving while the
