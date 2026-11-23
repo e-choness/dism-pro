@@ -130,6 +130,11 @@ trap {
 $Bin = (Resolve-Path $Bin).Path
 $null = New-Item -ItemType Directory -Force $Out
 $Out = (Resolve-Path $Out).Path
+# The parameters are fixed from here on. PowerShell's names ignore case: Value cells' `$size = ...`
+# once replaced -Size, and the Data table's shell then got `--size '37.0 MB'` and exited.
+# (Set-Variable, not .Options: CI calls the script from another, where parameters are optimized
+# locals whose Options can't be set.)
+Set-Variable -Name Bin, Out, Rounds, Size -Option ReadOnly -Force
 $exe = [ordered]@{ bare = Join-Path $Bin 'bare_window.exe'; shell = Join-Path $Bin 'shell.exe' }
 foreach ($path in $exe.Values) {
     if (-not (Test-Path $path)) { throw "missing $path (docker compose run --rm t3-tools builds it)" }
@@ -325,7 +330,7 @@ try {
         $script:hwnd = [UiaGateWin32]::FindWindowW('dismpro.window', 'DISM Pro shell probe')
         $script:hwnd -ne [IntPtr]::Zero -and [UiaGateWin32]::IsWindowVisible($script:hwnd)
     } 30000
-    if (-not $shown) { throw "the shell showed no window in 30 s (exited: $($p.HasExited))" }
+    if (-not $shown) { throw "the shell showed no window in 30 s ($(if ($p.HasExited) { "exited with code $($p.ExitCode)" } else { 'still running' }))" }
     $sw = [Diagnostics.Stopwatch]::StartNew()
     $root = $ae::FromHandle($hwnd)
     $review = $null
@@ -453,7 +458,7 @@ try {
         $script:hwnd = [UiaGateWin32]::FindWindowW('dismpro.window', 'DISM Pro shell probe')
         $script:hwnd -ne [IntPtr]::Zero -and [UiaGateWin32]::IsWindowVisible($script:hwnd)
     } 30000
-    if (-not $shown) { throw "the shell showed no window in 30 s (exited: $($p.HasExited))" }
+    if (-not $shown) { throw "the shell showed no window in 30 s ($(if ($p.HasExited) { "exited with code $($p.ExitCode)" } else { 'still running' }))" }
     $sw = [Diagnostics.Stopwatch]::StartNew()
     $script:startLum = -1
     $checks['starts light'] = Wait-Until { $script:startLum = [ThemeGateWin32]::Luminance($hwnd); $script:startLum -gt 0.5 } 5000
@@ -585,7 +590,7 @@ try {
         $script:hwnd = [UiaGateWin32]::FindWindowW('dismpro.window', 'DISM Pro shell probe')
         $script:hwnd -ne [IntPtr]::Zero -and [UiaGateWin32]::IsWindowVisible($script:hwnd)
     } 30000
-    if (-not $shown) { throw "the glass shell showed no window in 30 s (exited: $($p.HasExited))" }
+    if (-not $shown) { throw "the glass shell showed no window in 30 s ($(if ($p.HasExited) { "exited with code $($p.ExitCode)" } else { 'still running' }))" }
     $active = [GlassGateWin32]::Activate($hwnd)
     Start-Sleep -Milliseconds 1500 # the first frames, and DWM's backdrop transition
     $glass = Get-Base $hwnd
@@ -766,7 +771,7 @@ try {
         $script:hwnd = [UiaGateWin32]::FindWindowW('dismpro.window', 'DISM Pro shell probe')
         $script:hwnd -ne [IntPtr]::Zero -and [UiaGateWin32]::IsWindowVisible($script:hwnd)
     } 30000
-    if (-not $shown) { throw "the shell showed no window in 30 s (exited: $($p.HasExited))" }
+    if (-not $shown) { throw "the shell showed no window in 30 s ($(if ($p.HasExited) { "exited with code $($p.ExitCode)" } else { 'still running' }))" }
     $root = $ae::FromHandle($hwnd)
     $edit = $null
     $found = Wait-Until {
@@ -887,7 +892,7 @@ try {
         $script:hwnd = [UiaGateWin32]::FindWindowW('dismpro.window', 'DISM Pro shell probe')
         $script:hwnd -ne [IntPtr]::Zero -and [UiaGateWin32]::IsWindowVisible($script:hwnd)
     } 30000
-    if (-not $shown) { throw "the shell showed no window in 30 s (exited: $($p.HasExited))" }
+    if (-not $shown) { throw "the shell showed no window in 30 s ($(if ($p.HasExited) { "exited with code $($p.ExitCode)" } else { 'still running' }))" }
     $root = $ae::FromHandle($hwnd)
     $store = $null
     $found = Wait-Until { $script:store = Find-First $root $types::TabItem 'Store apps'; $null -ne $script:store } 10000
@@ -988,7 +993,7 @@ try {
         $script:hwnd = [UiaGateWin32]::FindWindowW('dismpro.window', 'DISM Pro shell probe')
         $script:hwnd -ne [IntPtr]::Zero -and [UiaGateWin32]::IsWindowVisible($script:hwnd)
     } 30000
-    if (-not $shown) { throw "the shell showed no window in 30 s (exited: $($p.HasExited))" }
+    if (-not $shown) { throw "the shell showed no window in 30 s ($(if ($p.HasExited) { "exited with code $($p.ExitCode)" } else { 'still running' }))" }
     $root = $ae::FromHandle($hwnd)
     $title = $null
     $found = Wait-Until {
@@ -1163,7 +1168,7 @@ try {
         $script:hwnd = [UiaGateWin32]::FindWindowW('dismpro.window', 'DISM Pro shell probe')
         $script:hwnd -ne [IntPtr]::Zero -and [UiaGateWin32]::IsWindowVisible($script:hwnd)
     } 30000
-    if (-not $shown) { throw "the shell showed no window in 30 s (exited: $($p.HasExited))" }
+    if (-not $shown) { throw "the shell showed no window in 30 s ($(if ($p.HasExited) { "exited with code $($p.ExitCode)" } else { 'still running' }))" }
     $root = $ae::FromHandle($hwnd)
     $rows = @()
     $found = Wait-Until {
@@ -1434,7 +1439,7 @@ try {
         $script:hwnd = [UiaGateWin32]::FindWindowW('dismpro.window', 'DISM Pro shell probe')
         $script:hwnd -ne [IntPtr]::Zero -and [UiaGateWin32]::IsWindowVisible($script:hwnd)
     } 30000
-    if (-not $shown) { throw "the shell showed no window in 30 s (exited: $($p.HasExited))" }
+    if (-not $shown) { throw "the shell showed no window in 30 s ($(if ($p.HasExited) { "exited with code $($p.ExitCode)" } else { 'still running' }))" }
     $root = $ae::FromHandle($hwnd)
     $table = $null
     $found = Wait-Until { $script:table = Find-First $root $types::DataGrid 'Programs'; $null -ne $script:table } 10000
@@ -1540,7 +1545,7 @@ try {
         $script:hwnd = [UiaGateWin32]::FindWindowW('dismpro.window', 'DISM Pro shell probe')
         $script:hwnd -ne [IntPtr]::Zero -and [UiaGateWin32]::IsWindowVisible($script:hwnd)
     } 30000
-    if (-not $shown) { throw "the shell showed no window in 30 s (exited: $($p.HasExited))" }
+    if (-not $shown) { throw "the shell showed no window in 30 s ($(if ($p.HasExited) { "exited with code $($p.ExitCode)" } else { 'still running' }))" }
     $root = $ae::FromHandle($hwnd)
     $publisher = $null
     $found = Wait-Until { $script:publisher = Get-Header $root 'Publisher'; $null -ne $script:publisher } 10000
@@ -1682,16 +1687,16 @@ try {
         $script:hwnd = [UiaGateWin32]::FindWindowW('dismpro.window', 'DISM Pro shell probe')
         $script:hwnd -ne [IntPtr]::Zero -and [UiaGateWin32]::IsWindowVisible($script:hwnd)
     } 30000
-    if (-not $shown) { throw "the shell showed no window in 30 s (exited: $($p.HasExited))" }
+    if (-not $shown) { throw "the shell showed no window in 30 s ($(if ($p.HasExited) { "exited with code $($p.ExitCode)" } else { 'still running' }))" }
     $root = $ae::FromHandle($hwnd)
-    $size = "37${oldDecimal}0 MB"
+    $sizeText = "37${oldDecimal}0 MB"
     $day = [ValuesGateWin32]::Date(2026, 1, 2)
     $lines += "the runner's formats: decimal '$oldDecimal', short date '$oldDate' ($day)"
     $names = @()
     $read = Wait-Until { $script:names = Get-CellNames $root $valueRow; $script:names.Count -gt 0 } 10000
     if (-not $read) { throw "no row ""$valueRow"" in 10 s" }
     $lines += "  $valueRow`: $($names -join ' | ')"
-    $checks['a size reads in the user''s decimal separator'] = $names -contains $size
+    $checks['a size reads in the user''s decimal separator'] = $names -contains $sizeText
     $checks['a day reads in the user''s short date'] = $names -contains $day
 
     # New formats, as Settings › Time & language › Region writes them.
@@ -1707,7 +1712,7 @@ try {
 
     $restored = [ValuesGateWin32]::Set([ValuesGateWin32]::Decimal, $oldDecimal) -and [ValuesGateWin32]::Set([ValuesGateWin32]::ShortDate, $oldDate)
     $changed = -not $restored
-    $checks['the old formats come back'] = $restored -and (Wait-Until { $n = Get-CellNames $root $valueRow; ($n -contains $size) -and ($n -contains $day) } 2000)
+    $checks['the old formats come back'] = $restored -and (Wait-Until { $n = Get-CellNames $root $valueRow; ($n -contains $sizeText) -and ($n -contains $day) } 2000)
 } catch {
     $lines += "value cells FAILED: $($_.Exception.Message)"
     $checks['client'] = $false
@@ -1749,7 +1754,7 @@ try {
         $script:hwnd = [UiaGateWin32]::FindWindowW('dismpro.window', 'DISM Pro shell probe')
         $script:hwnd -ne [IntPtr]::Zero -and [UiaGateWin32]::IsWindowVisible($script:hwnd)
     } 30000
-    if (-not $shown) { throw "the shell showed no window in 30 s (exited: $($p.HasExited))" }
+    if (-not $shown) { throw "the shell showed no window in 30 s ($(if ($p.HasExited) { "exited with code $($p.ExitCode)" } else { 'still running' }))" }
     $root = $ae::FromHandle($hwnd)
     $table = $null
     $found = Wait-Until { $script:table = Find-First $root $types::DataGrid 'Programs'; $null -ne $script:table } 10000
