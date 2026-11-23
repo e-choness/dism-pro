@@ -279,6 +279,10 @@ impl<M> Ui<M> {
     /// Copies a group, a progress bar's value, a column header's sort, a menu item's being a
     /// check item or a hold button's Invoke message into node `i`, clearing what it had of the
     /// others. Returns whether a client sees a change, and whether it shows.
+    #[allow(
+        clippy::match_same_arms,
+        reason = "slice 6a's layout and a11y tracks each fill their own arm (TD-0009 A3.5)"
+    )]
     fn update_extra(&mut self, i: u32, extra: Extra<'_, M>) -> (bool, bool) {
         let (group, value, invoke) = match extra {
             Extra::Group(g) => (Some(g), 0.0, None),
@@ -289,6 +293,11 @@ impl<M> Ui<M> {
             // So is a menu item's being a check item: a client sees it, and the check shows.
             Extra::Check => (None, CHECK_ITEM, None),
             Extra::None | Extra::Field { .. } | Extra::Combo { .. } => (None, 0.0, None),
+            // A glyph's icon (A3.5 addition 1): dropped until slice 6a's layout track keeps it.
+            Extra::Glyph(_) => (None, 0.0, None),
+            // A live region's politeness (addition 5, A4.5): dropped until slice 6a's a11y track
+            // keeps it.
+            Extra::Live(_) => (None, 0.0, None),
         };
         let n = &mut self.nodes[i as usize];
         // The group sets a client's role (a tab list, a radio group, a list).

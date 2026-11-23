@@ -658,7 +658,10 @@ impl QueuedEvents {
     /// It's not clear whether this is a strict requirement of UIA itself,
     /// but based on the known behavior of UIA, MSAA, and some ATs,
     /// it's strongly recommended.
-    pub fn raise(self) {
+    // dpro: returns how many raises failed (PATCHES.md, planned item 11; TD-0009 A4.5). The
+    // signature lands first, with slice 6a's tests; until patch 11 a failed raise still panics,
+    // so the count is always 0.
+    pub fn raise(self) -> usize {
         for event in self.0 {
             match event {
                 QueuedEvent::Simple { element, event_id } => {
@@ -682,6 +685,15 @@ impl QueuedEvents {
                 }
             }
         }
+        0
+    }
+}
+
+// dpro: the raise count's tests build a queue of their own (PATCHES.md, planned item 11).
+#[cfg(test)]
+impl QueuedEvents {
+    pub(crate) fn of(events: Vec<QueuedEvent>) -> Self {
+        Self(events)
     }
 }
 

@@ -1,6 +1,6 @@
 //! Layout style: a flexbox subset (TD-0009 §5.1). Rows and columns with gap, padding, cross-axis
-//! alignment, main-axis justification and grow; fixed sizes; min/max constraints. Grid tracks and
-//! wrapping come with the data table and card grids.
+//! alignment, main-axis justification and grow; fixed sizes; min/max constraints. The data table
+//! has its own grid tracks; card grids wrap ([`Style::wrap`]).
 
 use crate::geom::{Insets, Size};
 
@@ -58,6 +58,12 @@ pub struct Style {
     pub height: Dim,
     pub min: Size,
     pub max: Size,
+    /// A row whose children go on as many lines as they need (TD-0009 §5's wrap, A3.5 addition
+    /// 3): each child's `min.w` is its basis, and on each line the growing children split what's
+    /// left; card grids use it. Off by default, so no existing layout changes.
+    ///
+    /// Slice 6a's layout track lays it out; until then a wrapping row lays out as one line.
+    pub wrap: bool,
 }
 
 impl Default for Style {
@@ -74,6 +80,7 @@ impl Default for Style {
             height: Dim::Auto,
             min: Size::ZERO,
             max: Size::INFINITE,
+            wrap: false,
         }
     }
 }

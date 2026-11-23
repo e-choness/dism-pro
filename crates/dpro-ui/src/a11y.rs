@@ -235,10 +235,15 @@ impl<M> Ui<M> {
                 Some(Group::Radios) => AkRole::RadioGroup,
                 Some(Group::List) => AkRole::List,
                 Some(Group::Menu) => AkRole::Menu,
-                Some(Group::Options) => AkRole::ListBox,
+                // A dropdown's options and a field's suggestions (TD-0009 A3.5 addition 7).
+                Some(Group::Options | Group::Suggestions) => AkRole::ListBox,
+                Some(Group::Toolbar) => AkRole::Toolbar,
                 None if n.text.is_empty() => AkRole::GenericContainer,
                 None => AkRole::Group,
             },
+            // A named glyph is an image; an unnamed one is hidden, as an empty label is (A3.5
+            // addition 1).
+            Role::Label if n.glyph().is_some() && !n.text.is_empty() => AkRole::Image,
             Role::Label => AkRole::Label,
             Role::Button if n.selected.is_some() => AkRole::ListItem,
             Role::Button => AkRole::Button,

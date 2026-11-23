@@ -1037,6 +1037,29 @@ mod tests {
     }
 
     #[test]
+    fn every_composite_icon_has_a_glyph_when_the_icon_font_exists() {
+        // TD-0009 A3.5 addition 1's code points (`dpro_ui::Icon`): Search, Cancel, ChevronRight,
+        // Completed, ErrorBadge, Warning, Info, Undo, Folder, Up, More. Both fonts have each one
+        // (A3.3); Wine has neither font, and then nothing is drawn (T3 checks the glyphs).
+        const ICONS: [u32; 11] = [
+            0xE721, 0xE711, 0xE76C, 0xE930, 0xEA39, 0xE7BA, 0xE946, 0xE7A7, 0xE8B7, 0xE74A, 0xE712,
+        ];
+        let mut text = Text::new().expect("DirectWrite");
+        let font = text.icon_face().is_some();
+        let rect = RectF {
+            x: 0.0,
+            y: 0.0,
+            w: 16.0,
+            h: 16.0,
+        };
+        for code in ICONS {
+            let mut ink = Ink::default();
+            text.icon(code, rect, 1.0, &mut ink);
+            assert_eq!(ink.bounds.is_some(), font, "U+{code:X}, icon font: {font}");
+        }
+    }
+
+    #[test]
     fn measuring_grows_with_the_text_and_trims_what_does_not_fit() {
         let mut text = Text::new().expect("DirectWrite");
         let one = text.measure("W", &BODY, f32::INFINITY);

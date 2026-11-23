@@ -22,7 +22,13 @@
 //!
 //! The table (A2, slice 5b1): an idle frame doesn't ask for another build, and moving the current
 //! row, checking it, sorting and realizing a far row each settle at once.
+//!
+//! The composites (A3.7's U6, slice 6a): a settled composites page asks for no frames, timers or
+//! wakes, and each change to it (a count, a size, Details, the info bar, a setting, a resize)
+//! settles at once.
 
+#[path = "../benches/fixtures/composites.rs"]
+mod composites;
 #[path = "../benches/fixtures/shell.rs"]
 mod shell;
 
@@ -321,4 +327,60 @@ fn the_columns_settle_after_each_change() {
     let mut run = run.column_menu_open();
     assert!(run.popup_open, "the column menu opened");
     assert_idle(&mut run, "the column menu open");
+}
+
+/// A frame nobody asked for finds nothing to do on the composites page.
+fn assert_composites_idle(run: &mut composites::Run, when: &str) {
+    assert!(!run.ui.wants_frame(), "{when}: still asks for frames");
+    assert_eq!(run.wake(), None, "{when}: still asks for a wake");
+    let model = &run.model;
+    run.ui.build(|cx| composites::view(model, cx));
+    run.ui.layout(&mut FakeText);
+    assert_eq!(
+        run.ui.damage().len(),
+        0,
+        "{when}: an idle frame damaged {:?}",
+        run.ui.damage()
+    );
+    assert!(
+        run.ui.a11y_update().is_none(),
+        "{when}: an idle frame changed the accessibility tree"
+    );
+    assert!(
+        !run.ui.wants_frame(),
+        "{when}: an idle frame asked for another"
+    );
+}
+
+#[test]
+fn the_composites_settle_after_each_change_and_stay_idle() {
+    use composites::{Model, Msg as C, NARROW, START, Step as S};
+    let mut run = composites::Run::accessible(Model::new()).warmed();
+    assert_composites_idle(&mut run, "the page settled");
+    for (step, when) in [
+        (S::Update(C::Count(4)), "a count change"),
+        (S::Update(C::Count(0)), "the batch bar hidden"),
+        (S::Update(C::Count(2)), "the batch bar back"),
+        (S::Update(C::Size(0, 1_395_864_371)), "a size arriving"),
+        (S::Update(C::Failed(2)), "a scan failing"),
+        (S::Update(C::Expand), "Details open"),
+        (S::Update(C::Expand), "Details shut"),
+        (S::Update(C::Dismiss), "the info bar dismissed"),
+        (S::Update(C::ShowInfo), "the info bar back"),
+        (S::Update(C::When(0)), "a radio picked"),
+        (S::Resize(NARROW), "narrowed"),
+        (S::Resize(START), "widened"),
+    ] {
+        run.step(step);
+        let mut ticks = 0;
+        while run.ui.wants_frame() {
+            assert!(
+                ticks < max_ticks(),
+                "{when}: still asks for frames after {ticks}"
+            );
+            run.step(S::Tick(FRAME_MS));
+            ticks += 1;
+        }
+        assert_composites_idle(&mut run, when);
+    }
 }

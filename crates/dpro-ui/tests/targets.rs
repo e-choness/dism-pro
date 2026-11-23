@@ -7,6 +7,8 @@
 //! `popups.rs`). Their size is the layout's, in logical pixels, which are effective pixels at any
 //! scale.
 
+#[path = "../benches/fixtures/composites.rs"]
+mod composites;
 #[path = "../benches/fixtures/shell.rs"]
 mod shell;
 
@@ -17,7 +19,7 @@ use shell::{Msg, Run, SETTINGS, Shell, Step};
 const MIN: f32 = 24.0;
 
 /// Every enabled target under `id` smaller than [`MIN`] either way, described.
-fn too_small(ui: &Ui<Msg>, id: NodeId, out: &mut Vec<String>) {
+fn too_small<M>(ui: &Ui<M>, id: NodeId, out: &mut Vec<String>) {
     for c in ui.children(id) {
         let Some(n) = ui.info(c) else { continue };
         let target = matches!(
@@ -62,8 +64,38 @@ fn every_target_is_at_least_24_px_on_every_view() {
     );
 }
 
+/// The composites page (TD-0009 A3.9), wide and narrow, Details open: every target of slice 6a's
+/// composites.
+#[test]
+#[ignore = "slice 6a: lands with the code"]
+fn every_composites_target_is_at_least_24_px() {
+    use composites::{Model, Msg as C, NARROW, Step as S};
+    let mut run = composites::Run::with(Model::new());
+    let mut small = Vec::new();
+    let mut targets = 0;
+    for (name, step) in [
+        ("the page", None),
+        ("Details open", Some(S::Update(C::Expand))),
+        ("narrow", Some(S::Resize(NARROW))),
+    ] {
+        if let Some(s) = step {
+            run.step(s);
+        }
+        let mut here = Vec::new();
+        too_small(&run.ui, run.ui.root(), &mut here);
+        small.extend(here.into_iter().map(|s| format!("{name}: {s}")));
+        targets += count(&run.ui, run.ui.root());
+    }
+    assert!(targets > 0, "no targets at all");
+    assert!(
+        small.is_empty(),
+        "targets under {MIN} px:\n{}",
+        small.join("\n")
+    );
+}
+
 /// Enabled targets under `id`.
-fn count(ui: &Ui<Msg>, id: NodeId) -> usize {
+fn count<M>(ui: &Ui<M>, id: NodeId) -> usize {
     ui.children(id)
         .map(|c| {
             let own = ui.info(c).is_some_and(|n| {

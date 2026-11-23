@@ -50,9 +50,45 @@ pub enum Icon {
     ChevronDown,
     /// A column sorted smallest first.
     ChevronUp,
+    // TD-0009 A3.5 addition 1 (slice 6a): the composites' glyphs, at the code points both fonts'
+    // tables list (A3.3).
+    /// The palette's field.
+    Search,
+    /// Close, Dismiss and Clear selection.
+    Cancel,
+    ChevronRight,
+    /// A job that finished.
+    Completed,
+    /// An error panel's, an info bar's and a failed toast's mark.
+    ErrorBadge,
+    Warning,
+    Info,
+    Undo,
+    Folder,
+    /// The picker's Up one level.
+    Up,
+    More,
 }
 
 impl Icon {
+    /// Every icon, in declaration order: what the icon-font checks walk (TD-0009 A3.9).
+    pub const ALL: [Self; 14] = [
+        Self::CheckMark,
+        Self::ChevronDown,
+        Self::ChevronUp,
+        Self::Search,
+        Self::Cancel,
+        Self::ChevronRight,
+        Self::Completed,
+        Self::ErrorBadge,
+        Self::Warning,
+        Self::Info,
+        Self::Undo,
+        Self::Folder,
+        Self::Up,
+        Self::More,
+    ];
+
     /// Its code point in both icon fonts.
     #[must_use]
     pub const fn codepoint(self) -> u32 {
@@ -60,6 +96,17 @@ impl Icon {
             Self::CheckMark => 0xE73E,
             Self::ChevronDown => 0xE70D,
             Self::ChevronUp => 0xE70E,
+            Self::Search => 0xE721,
+            Self::Cancel => 0xE711,
+            Self::ChevronRight => 0xE76C,
+            Self::Completed => 0xE930,
+            Self::ErrorBadge => 0xEA39,
+            Self::Warning => 0xE7BA,
+            Self::Info => 0xE946,
+            Self::Undo => 0xE7A7,
+            Self::Folder => 0xE8B7,
+            Self::Up => 0xE74A,
+            Self::More => 0xE712,
         }
     }
 }

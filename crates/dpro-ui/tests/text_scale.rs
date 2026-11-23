@@ -6,6 +6,8 @@
 
 #![allow(missing_docs)]
 
+#[path = "../benches/fixtures/composites.rs"]
+mod composites;
 #[path = "../benches/fixtures/shell.rs"]
 mod shell;
 
@@ -39,7 +41,7 @@ fn has_text(role: Role) -> bool {
 
 /// Every node with text under `id` whose box is shorter than one line of its style, described;
 /// returns how many nodes with text it saw.
-fn clipped(ui: &Ui<Msg>, id: NodeId, out: &mut Vec<String>) -> usize {
+fn clipped<M>(ui: &Ui<M>, id: NodeId, out: &mut Vec<String>) -> usize {
     let mut seen = 0;
     for c in ui.children(id) {
         let Some(n) = ui.info(c) else { continue };
@@ -66,6 +68,31 @@ fn no_text_is_clipped_on_any_view_at_100_or_225_percent() {
         for (name, msg) in VIEWS {
             if let Some(m) = msg {
                 run.step(Step::Update(m));
+            }
+            let mut here = Vec::new();
+            let seen = clipped(&run.ui, run.ui.root(), &mut here);
+            assert!(seen > 0, "{name} at {scale}: no text at all");
+            short.extend(here.into_iter().map(|s| format!("{name} at {scale}: {s}")));
+        }
+        assert_eq!(short, [] as [String; 0], "text clipped");
+    }
+}
+
+/// The composites page (TD-0009 A3.9): at 100 and 225 %, wide and narrow, Details open, no text
+/// is clipped.
+#[test]
+fn no_composites_text_is_clipped_at_100_or_225_percent() {
+    use composites::{Model, Msg as C, NARROW, Step as S};
+    for scale in [1.0, LARGEST] {
+        let mut run = composites::Run::text_scaled(Model::new(), scale);
+        let mut short = Vec::new();
+        for (name, step) in [
+            ("the page", None),
+            ("Details open", Some(S::Update(C::Expand))),
+            ("narrow", Some(S::Resize(NARROW))),
+        ] {
+            if let Some(s) = step {
+                run.step(s);
             }
             let mut here = Vec::new();
             let seen = clipped(&run.ui, run.ui.root(), &mut here);

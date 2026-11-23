@@ -8,7 +8,7 @@ use crate::{
     geom::{Insets, Rect, Size},
     scroll::{Axes, ScrollInfo},
     style::{Axis, Dim, Style},
-    text::TextStyle,
+    text::{Icon, TextStyle},
     theme::{
         Tone,
         tokens::{font, popup, radius},
@@ -131,6 +131,16 @@ pub enum Group {
     /// A table's rows (`table.rs`): one Tab stop, landing on the current row. The table moves
     /// the current row; focus follows it.
     Rows,
+    /// A list box whose [options](Element::option) never take focus (TD-0009 A3.5 addition 7):
+    /// the palette's results. Hover only paints; a click sends the option's message and keyboard
+    /// focus stays where it was (the field). A client sees a list box of options, each placed
+    /// among the options alone, so headers don't count.
+    ///
+    /// Slice 6a's input track gives it that behavior; until then it roves as a list does.
+    Suggestions,
+    /// A [toolbar](Element::toolbar) (addition 8): one Tab stop; Left and Right move focus through
+    /// its items without wrapping, and Home and End go to its ends. A client sees a toolbar.
+    Toolbar,
 }
 
 /// How a node is painted, in theme tokens only (doc 05 §4). Changing it repaints the node; it never
@@ -230,6 +240,9 @@ pub enum Radius {
     Card,
     /// Drawers and dialogs.
     Drawer,
+    /// Half the node's shorter side (TD-0009 A3.5 addition 2): the target pill, dots, and the
+    /// ends of a job's bar.
+    Pill,
 }
 
 impl Radius {
@@ -237,7 +250,8 @@ impl Radius {
     #[must_use]
     pub const fn logical(self) -> f32 {
         match self {
-            Self::None => 0.0,
+            // Slice 6a's layout track makes a pill half the shorter side; square until then.
+            Self::None | Self::Pill => 0.0,
             Self::Small => radius::SMALL,
             Self::Control => radius::CONTROL,
             Self::Card => radius::CARD,
@@ -332,6 +346,21 @@ pub(crate) enum Extra<'s, M> {
     /// A menu item that's a check item: its [`check`](Element::check) shows, and a client sees
     /// a menu check box.
     Check,
+
+    /// A [glyph](Element::glyph)'s icon (TD-0009 A3.5 addition 1; slice 6a's layout track).
+    #[expect(
+        dead_code,
+        reason = "slice 6a's layout track keeps the icon on the node"
+    )]
+    Glyph(Icon),
+
+    /// A [live region](Element::live)'s politeness (A3.5 addition 5, A4.5; slice 6a's a11y
+    /// track).
+    #[expect(
+        dead_code,
+        reason = "slice 6a's a11y track keeps the politeness on the node"
+    )]
+    Live(Live),
 }
 
 /// A check item's value ([`Element::menu_check`]): its node's `value`, as a column header's sort
@@ -768,6 +797,144 @@ impl<'s, M> Element<'s, M> {
     }
 }
 
+// The toolkit additions of TD-0009 A3.5 (1–9) and A4's slice 7a, which slice 6a lands. Each of the
+// slice's three tracks fills its own block below: the planned API is in place, and each stub
+// does what its comment says until its track lands.
+
+/// Slice 6a's layout track: glyphs (A3.5 addition 1).
+impl<M> Element<'_, M> {
+    /// An icon-font glyph, drawn by [`TextSystem::icon`](crate::TextSystem::icon) at its text
+    /// style's size. Unnamed, it's decoration and hidden from assistive technology, as an empty
+    /// label is; [named](Self::name), a client sees an image of that name.
+    ///
+    /// Until the layout track lands it draws nothing: an empty label.
+    #[must_use]
+    pub fn glyph(key: Key, icon: Icon) -> Self {
+        Self {
+            extra: Extra::Glyph(icon),
+            ..Self::new(key, Role::Label, "", None)
+        }
+    }
+}
+
+/// Slice 6a's input track: toolbars and suggestion lists (A3.5 additions 7 and 8). A field's
+/// [step](Self::step) is its addition 6.
+impl<M> Element<'_, M> {
+    /// A toolbar, in a row: one Tab stop, Left and Right move focus through its items without
+    /// wrapping, Home and End go to its ends ([`Group::Toolbar`]). Name it when a page can show
+    /// more than one.
+    #[must_use]
+    pub fn toolbar(key: Key) -> Self {
+        Self {
+            extra: Extra::Group(Group::Toolbar),
+            style: Style {
+                axis: Axis::Row,
+                ..Style::default()
+            },
+            ..Self::stack(key)
+        }
+    }
+
+    /// A list of suggestions under a field (the palette's results): [options](Self::option)
+    /// that never take focus, so the field keeps it while one is highlighted
+    /// ([`Group::Suggestions`]). Name it; the field that drives it stays the Tab stop.
+    #[must_use]
+    pub fn suggestions(key: Key) -> Self {
+        Self {
+            extra: Extra::Group(Group::Suggestions),
+            ..Self::stack(key)
+        }
+    }
+}
+
+/// Slice 6a's a11y track: A4.5's element properties (A3.5 additions 4 and 5, and A4's slice 7a).
+/// Text is borrowed, as every element string is, so building a view allocates nothing.
+impl<'s, M> Element<'s, M> {
+    /// The accessible description (UI Automation's `FullDescription`) without a tooltip: what a
+    /// badge's word means, a clickable card's value and detail, how to hold a hold button. It wins
+    /// over a [tooltip](Self::tooltip)'s text, which is the description otherwise (A1).
+    ///
+    /// Until the a11y track lands (it keeps the text in `tip` with a new `rare::DESC` flag), it
+    /// sets nothing.
+    #[must_use]
+    pub fn describe(self, text: &'s str) -> Self {
+        let _ = text;
+        self
+    }
+
+    /// Makes a label, or a named container, a live region: a client announces its text when it
+    /// appears or changes, without a focus move (TD-0009 §4.4, A4.4). Toasts and status lines are
+    /// polite; a failure that comes unbidden is assertive.
+    ///
+    /// Other roles ignore it. Until the a11y track lands, a client doesn't see it.
+    #[must_use]
+    pub fn live(mut self, live: Live) -> Self {
+        if matches!(self.role, Role::Label | Role::Container)
+            && matches!(self.extra, Extra::None | Extra::Live(_))
+        {
+            self.extra = Extra::Live(live);
+        }
+        self
+    }
+
+    /// Makes a label a heading at `level`, 1 to 9 (clamped): a page's title is 1, its sections'
+    /// and cards' titles 2 (A4.4).
+    ///
+    /// Until the a11y track lands, it sets nothing.
+    #[must_use]
+    pub fn heading(self, level: u8) -> Self {
+        let _ = level;
+        self
+    }
+
+    /// Makes a named container a landmark that a screen reader jumps to (A4.4): the rail is
+    /// [`Landmark::Navigation`], the page [`Landmark::Main`] named by its title.
+    ///
+    /// Until the a11y track lands, it sets nothing.
+    #[must_use]
+    pub fn landmark(self, landmark: Landmark<'s>) -> Self {
+        let _ = landmark;
+        self
+    }
+
+    /// The keys that run this command, as the command registry displays them ("Ctrl+K"): UI
+    /// Automation's `AcceleratorKey` (A4.5, patch 10).
+    ///
+    /// Until the a11y track lands, it sets nothing.
+    #[must_use]
+    pub fn shortcut(self, keys: &'s str) -> Self {
+        let _ = keys;
+        self
+    }
+}
+
+/// How a [live region](Element::live) is announced (TD-0009 A3.5 addition 5, A4.5).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Live {
+    /// Not live: the default.
+    #[default]
+    Off,
+    /// After what the screen reader is saying: toasts and status lines.
+    Polite,
+    /// At once, interrupting: a failed or interrupted job's toast, and an error panel that came
+    /// unbidden (A4.4).
+    Assertive,
+}
+
+/// What kind of [landmark](Element::landmark) a container is (A4.5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Landmark<'s> {
+    /// The page, named by its title.
+    Main,
+    /// The rail.
+    Navigation,
+    /// The palette's field row.
+    Search,
+    /// Any other region a screen reader should list (the drawer), with the word it speaks for its
+    /// kind: `a11y-landmark-region`, resolved. A region needs a name.
+    Region { kind: &'s str },
+}
+
 /// A menu's and a list's look: the surface in a hairline. Under glass the surface is a
 /// translucent layer, so the window's acrylic shows through.
 const POPUP: Look = Look {
@@ -937,6 +1104,16 @@ impl<M> Node<M> {
     /// A menu's check item ([`Element::menu_check`]).
     pub(crate) fn is_check_item(&self) -> bool {
         self.role == Role::MenuItem && self.value.to_bits() == CHECK_ITEM.to_bits()
+    }
+
+    /// A [glyph](Element::glyph)'s icon; `None` for every other node. Slice 6a's layout track
+    /// keeps the icon on the node; until then no node has one.
+    #[allow(
+        clippy::unused_self,
+        reason = "a stub until slice 6a's layout track keeps the icon (TD-0009 A3.5 addition 1)"
+    )]
+    pub(crate) fn glyph(&self) -> Option<Icon> {
+        None
     }
 
     /// The arrow keys can bring focus to it: an interactive node, or a disabled menu item, which

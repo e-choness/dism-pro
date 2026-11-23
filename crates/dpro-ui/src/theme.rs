@@ -481,6 +481,35 @@ pub mod tokens {
         /// pointer shows the left-right arrows and a press drags the column's width.
         pub const DIVIDER: f32 = 8.0;
     }
+
+    // The composites' sizes (TD-0009 A3.10 item 8, decision #45; slice 6a). Component tokens, as
+    // `table::STATUS_PAD` is: card padding 20 is off the spacing scale on purpose.
+
+    /// Badges (A3.5 (1)): 12 px semibold text inside these.
+    pub mod badge {
+        pub const PAD_X: f32 = 8.0;
+        pub const PAD_Y: f32 = 3.0;
+    }
+
+    /// Summary and scan cards (A3.5 (4), (5)).
+    pub mod card {
+        /// Inside a summary card's edge.
+        pub const PADDING: f32 = 20.0;
+        /// A card's narrowest in a card grid: its basis on a wrapping line.
+        pub const MIN_W: f32 = 220.0;
+    }
+
+    /// The category scan card (A3.5 (5)).
+    pub mod scan {
+        /// The size's slot, right-aligned and fixed, so a size update damages it alone.
+        pub const SIZE_W: f32 = 72.0;
+    }
+
+    /// The inline error panel (A3.5 (9)).
+    pub mod error {
+        /// The most lines of a log excerpt Details shows.
+        pub const LOG_LINES: usize = 8;
+    }
 }
 
 #[cfg(test)]

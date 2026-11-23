@@ -131,3 +131,13 @@ amendment).
        - any other property, or a value of the wrong type, is `E_INVALIDARG`. No row is NULL with
          `S_OK`, as UI Automation's documentation asks.
    - **`src/lib.rs`, `src/tests/mod.rs`:** the `mod realize;` lines and the re-exports.
+
+**Planned, with their tests written first** (TD-0009 A4.5, slice 6a; A4 numbers them 7–13, and
+item 7, notifications, comes with slice 7b):
+8. **HeadingLevel**, 9. **landmarks**, 10. **AcceleratorKey**: `src/tests/landmarks.rs`,
+   ignored until the patches land.
+11. **Raising never panics.** `QueuedEvents::raise` already returns `usize`, the failed raises'
+   count; until the patch it's always 0 and a failed raise still panics.
+   `QueuedEvents::of` (tests only) builds a queue. `src/tests/menu_events.rs` holds the count's
+   test, ignored until the patch, and items 12–13's tests later.
+   - **`src/tests/mod.rs`:** the `mod landmarks;` and `mod menu_events;` lines.

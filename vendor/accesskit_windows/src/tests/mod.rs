@@ -350,8 +350,11 @@ impl IUIAutomationFocusChangedEventHandler_Impl for FocusEventHandler_Impl {
 
 mod simple;
 // dpro: the table and scroll patterns (PATCHES.md, 4), menus' check items (5), rows realized on
-// request (6), and the helpers their tests share.
+// request (6), and the helpers their tests share; headings, landmarks and accelerators, and the
+// raise count (planned items 8–11, written before the code).
+mod landmarks;
 mod menu;
+mod menu_events;
 mod providers;
 mod realize;
 mod table;

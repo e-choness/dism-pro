@@ -53,6 +53,7 @@
 mod a11y;
 mod build;
 mod canvas;
+pub mod composite;
 mod damage;
 mod field;
 mod geom;
@@ -91,6 +92,6 @@ pub use table::{
 };
 pub use text::{CaretStop, FakeText, GlyphSink, Icon, TextMetrics, TextStyle, TextSystem};
 pub use theme::{Color, Scheme, SysColors, Theme, Tone, tokens};
-pub use tree::{Element, Group, Key, Look, NodeId, NodeInfo, Radius, Role};
+pub use tree::{Element, Group, Key, Landmark, Live, Look, NodeId, NodeInfo, Radius, Role};
 pub use ui::{MAX_TEXT_SCALE, Motion, Ui};
 pub use values::{Formats, InvariantFormats, SizeUnits, format_size};
