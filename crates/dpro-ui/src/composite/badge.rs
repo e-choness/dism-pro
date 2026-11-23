@@ -5,10 +5,14 @@
 //! it's given. It's text, named by its word and described by what the word means, and it isn't
 //! focusable: a badge with an action is a button (§4.4). Color is never the only signal (WCAG
 //! 1.4.1): the word always says the meaning.
+//!
+//! Each tone is one text and fill pair of the token table (decision #45), opaque under glass. High
+//! contrast has no tints: the fill is the window and the word is window text, in a 1 px border of
+//! the same color, so a badge still reads as one.
 
 use crate::{
     Align, Axis, Cx, Element, Insets, Key, Look, NodeId, Radius, Style, TextStyle, Tone,
-    tokens::{SPACE, badge, font::SEMIBOLD},
+    tokens::{SPACE, badge, font},
 };
 
 use super::SMALL;
@@ -52,7 +56,8 @@ impl<'s, M> Element<'s, M> {
                 ..Style::default()
             })
             .text_style(TextStyle {
-                weight: SEMIBOLD,
+                size: font::BADGE,
+                weight: font::BADGE_WEIGHT,
                 ..SMALL
             })
             .look(look(tone))
@@ -83,20 +88,22 @@ impl<M: Clone> Cx<'_, M> {
     }
 }
 
-/// `tone`'s colors. Placeholders from today's tones until slice 6a's composites add decision #45's
-/// badge pairs (Undoable #166534 on #E7F6EC, Permanent #9A3412 on #FDEDE4, Neutral #374151 on ink
-/// 6 %, Info #1E40AF on accent 13 %, Caution #7C3F06 on #FEF6E7, light) to the token table.
+/// `tone`'s look: its fill and text pair from the token table (decision #45), slightly rounded.
+///
+/// The border is the fill's own tone. In light and dark it's the fill's color, so it doesn't
+/// show; high contrast strokes every border in window text, which gives the badge its outline
+/// there while the fill is the window.
 const fn look(tone: BadgeTone) -> Look {
     let (fill, ink) = match tone {
-        BadgeTone::Undoable => (Tone::Subtle, Tone::Ok),
+        BadgeTone::Undoable => (Tone::UndoableFill, Tone::UndoableText),
         BadgeTone::Permanent => (Tone::PermanentFill, Tone::PermanentText),
-        BadgeTone::Neutral => (Tone::Hover, Tone::Text),
-        BadgeTone::Info => (Tone::Selected, Tone::Accent),
-        BadgeTone::Caution => (Tone::Subtle, Tone::Warn),
+        BadgeTone::Neutral => (Tone::NeutralFill, Tone::NeutralText),
+        BadgeTone::Info => (Tone::RunningFill, Tone::RunningText),
+        BadgeTone::Caution => (Tone::CautionFill, Tone::CautionText),
     };
     Look {
         fill: Some(fill),
-        border: None,
+        border: Some(fill),
         radius: Radius::Small,
         ink,
     }

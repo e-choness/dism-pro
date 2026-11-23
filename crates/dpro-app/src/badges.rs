@@ -16,7 +16,8 @@
 //! `ui-badge-no-restart`. Job states: Info with `ui-badge-running`, Caution with
 //! `ui-badge-partial`.
 //!
-//! Slice 6a lands the mapping; until then every badge reads Undoable.
+//! The view passes the time it builds at as `now`, so a badge whose deadline passes while it
+//! shows reads `ui-badge-expired` on the next build (A3.8).
 
 use dpro_core::{
     health::RebootReason,
@@ -142,31 +143,65 @@ pub const fn partial<'a, S>() -> Badge<'a, S> {
     }
 }
 
-/// A change's undo badge at `now`.
+/// A day, in milliseconds.
+const DAY_MS: u64 = 86_400_000;
+
+/// A change's undo badge at `now`. A deadline counts the whole days left, rounded up, so the
+/// last millisecond still reads "1 day"; at the deadline or past it, the undo has expired.
 #[must_use]
 pub fn reversibility<S>(r: &Reversibility<S>, now: UnixMillis) -> Badge<'_, S> {
-    let _ = (r, now);
-    placeholder()
+    match r {
+        Reversibility::Reversible => Badge {
+            tone: Tone::Undoable,
+            text: Text::Undoable,
+            description: None,
+        },
+        Reversibility::ReversibleUntil { until } if until.0 > now.0 => Badge {
+            tone: Tone::Undoable,
+            text: Text::UndoableDays {
+                days: (until.0 - now.0).div_ceil(DAY_MS),
+            },
+            description: Some(Description::UndoableUntil { until: *until }),
+        },
+        Reversibility::ReversibleUntil { .. } => Badge {
+            tone: Tone::Permanent,
+            text: Text::Expired,
+            description: None,
+        },
+        Reversibility::ReversibleVia { inverse } => Badge {
+            tone: Tone::Undoable,
+            text: Text::Undoable,
+            description: Some(Description::UndoableVia { inverse }),
+        },
+        Reversibility::Irreversible { reason } => Badge {
+            tone: Tone::Permanent,
+            text: Text::Permanent,
+            description: Some(Description::Permanent { reason }),
+        },
+    }
 }
 
-/// A change's or a plan's restart badge, described by `reason` when there is one.
+/// A change's or a plan's restart badge, described by `reason` when there is one. Nothing to
+/// restart for gives no reason, whatever `reason` says.
 #[must_use]
 pub fn restart<'a, S>(required: bool, reason: Option<RebootReason>) -> Badge<'a, S> {
-    let _ = (required, reason);
-    placeholder()
+    if required {
+        Badge {
+            tone: Tone::Caution,
+            text: Text::Restart,
+            description: reason.map(Description::Reboot),
+        }
+    } else {
+        Badge {
+            tone: Tone::Neutral,
+            text: Text::NoRestart,
+            description: None,
+        }
+    }
 }
 
 /// A plan's restart badge, from its summary.
 #[must_use]
 pub fn plan_restart<'a, S>(summary: &PlanSummary) -> Badge<'a, S> {
     restart(summary.reboot_required, None)
-}
-
-/// What every badge reads until slice 6a lands the mapping.
-const fn placeholder<'a, S>() -> Badge<'a, S> {
-    Badge {
-        tone: Tone::Undoable,
-        text: Text::Undoable,
-        description: None,
-    }
 }

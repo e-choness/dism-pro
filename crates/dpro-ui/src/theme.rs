@@ -695,6 +695,9 @@ pub mod tokens {
         /// Inside the bar's edge: 12 × 16.
         pub const PAD_X: f32 = 16.0;
         pub const PAD_Y: f32 = 12.0;
+        /// Its action's least height, and Dismiss's square: `WinUI`'s standard button, as a scan
+        /// card's Details is. Taller when the text size needs it.
+        pub const BUTTON_H: f32 = 32.0;
     }
 
     /// Settings rows (A3.5 (15)).
@@ -896,6 +899,8 @@ mod tests {
             &[InfoFill],
             &[ErrorFill, Subtle],
             &[WarnFill, Subtle],
+            // An info bar's action button, a quiet control on its tint.
+            &[InfoFill, Subtle],
         ] {
             for fg in [Text, TextSecondary] {
                 layered(fg, stack);
