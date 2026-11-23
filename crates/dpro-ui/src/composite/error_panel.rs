@@ -77,9 +77,10 @@ pub struct ErrorPanel<'s, M> {
     /// The cause: `ui-error-title`, `ui-error-partial` or the finding's diagnosis. It names the
     /// panel.
     pub title: &'s str,
-    /// `ui-error-code`, with `OsError::hresult_bits()`.
+    /// `ui-error-code`, with `OsError::hresult_bits()`; empty for a finding that isn't an OS
+    /// error.
     pub code: &'s str,
-    /// `ui-error-api`.
+    /// `ui-error-api`; empty when there's no call to name.
     pub api: &'s str,
     /// `ui-error-next`, or the diagnosis' next step.
     pub next: &'s str,
@@ -198,10 +199,14 @@ fn details<M: Clone>(cx: &mut Cx<'_, M>, p: &ErrorPanel<'_, M>) {
     );
 }
 
-/// What Details opens: the code, the call, the log's source and its last lines.
+/// What Details opens: the code, the call, the log's source and its last lines. A finding that
+/// isn't an OS error has no code or call: an empty one takes no line.
 fn expanded<M>(cx: &mut Cx<'_, M>, p: &ErrorPanel<'_, M>) {
-    cx.add(Element::text(ERROR_CODE, p.code).text_style(CAPTION));
-    cx.add(Element::text(ERROR_API, p.api).text_style(CAPTION));
+    for (key, text) in [(ERROR_CODE, p.code), (ERROR_API, p.api)] {
+        if !text.is_empty() {
+            cx.add(Element::text(key, text).text_style(CAPTION));
+        }
+    }
     let Some(log) = p.log else {
         return;
     };

@@ -14,8 +14,8 @@ use dpro_ui::{
     SysColors, Theme, Tone, Ui,
     accesskit::{Live as AkLive, Role as AkRole},
     composite::{
-        ERROR_ACTIONS, ERROR_CODE, ERROR_COPY, ERROR_DETAILS, ERROR_GLYPH, ERROR_LOG, ERROR_TITLE,
-        ErrorPanel, ErrorTone, LogExcerpt,
+        ERROR_ACTIONS, ERROR_API, ERROR_CODE, ERROR_COPY, ERROR_DETAILS, ERROR_GLYPH, ERROR_LOG,
+        ERROR_TITLE, ErrorPanel, ErrorTone, LogExcerpt,
     },
     tokens::{self, error},
 };
@@ -62,6 +62,11 @@ fn alone(log: &str) -> Ui<u8> {
 
 /// A panel of `tone` alone, expanded, over `log`.
 fn alone_as(tone: ErrorTone, log: &str) -> Ui<u8> {
+    panel(tone, ("Code 0x80070005", "DeleteFileW"), log)
+}
+
+/// A panel of `tone` alone, expanded, with its code and call, over `log`.
+fn panel(tone: ErrorTone, (code, api): (&str, &str), log: &str) -> Ui<u8> {
     let mut ui = Ui::new(
         Size { w: 800.0, h: 600.0 },
         1.0,
@@ -75,8 +80,8 @@ fn alone_as(tone: ErrorTone, log: &str) -> Ui<u8> {
             &ErrorPanel {
                 tone,
                 title: "Couldn't clean",
-                code: "Code 0x80070005",
-                api: "DeleteFileW",
+                code,
+                api,
                 next: "Try again as administrator.",
                 log: Some(LogExcerpt {
                     source: "job.log",
@@ -107,6 +112,15 @@ fn part<M>(ui: &Ui<M>, key: Key) -> Option<NodeId> {
         }
     }
     None
+}
+
+#[test]
+fn a_finding_without_a_code_or_a_call_shows_neither() {
+    let ui = panel(ErrorTone::Partial, ("", ""), "one line");
+    assert!(part(&ui, ERROR_CODE).is_none() && part(&ui, ERROR_API).is_none());
+    assert!(part(&ui, ERROR_LOG).is_some(), "the log still shows");
+    let ui = alone("one line");
+    assert!(part(&ui, ERROR_CODE).is_some() && part(&ui, ERROR_API).is_some());
 }
 
 #[test]
