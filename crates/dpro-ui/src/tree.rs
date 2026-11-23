@@ -189,6 +189,17 @@ impl Look {
         ink: Tone::OnAccent,
     };
 
+    /// The outlined danger button (TD-0009 §12 item 10, decision #45): danger text in
+    /// `danger.border`, danger at 30 %, on whatever is under it. A danger action that isn't the
+    /// page's main one. The border is as faint as a secondary button's hairline; the text says
+    /// what the control is.
+    pub const DANGER_OUTLINE: Self = Self {
+        fill: None,
+        border: Some(Tone::DangerBorder),
+        radius: Radius::Control,
+        ink: Tone::Danger,
+    };
+
     /// A button that is only its text until hovered or pressed (caption buttons, icon buttons).
     pub const SUBTLE: Self = Self {
         fill: None,
