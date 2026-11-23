@@ -6,8 +6,9 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, labeled]
   push:
-    # spike/** branches get every job, Windows included, without a PR (roadmap spikes).
-    branches: [master, "spike/**"]
+    # stage (the integration branch, decision #37) and spike/** branches get every job, Windows
+    # included, without a PR.
+    branches: [master, stage, "spike/**"]
   schedule:
     - cron: "17 3 * * *" # nightly
   workflow_dispatch:
@@ -63,7 +64,8 @@ jobs:
   windows:
     name: T3 + G1 (windows-2025)
     needs: linux
-    # Windows minutes are scarce: master, nightly, manual, or PRs labeled needs-windows.
+    # Windows minutes are scarce: pushes (master, stage, spike/**), nightly, manual, or PRs
+    # labeled needs-windows.
     if: >-
       github.event_name == 'push' || github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch' ||
