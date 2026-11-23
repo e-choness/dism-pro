@@ -88,7 +88,12 @@ const SECONDARY: Look = Look {
     ..Look::PLAIN
 };
 
-/// A button's look for `emphasis`.
+/// A button's look for `emphasis`, on the page. (The batch bar has its own: it's the inverse of
+/// the page.)
+#[allow(
+    dead_code,
+    reason = "slice 6c's dialog frame lays out buttons by emphasis on the page"
+)]
 const fn button_look(emphasis: Emphasis) -> Look {
     match emphasis {
         Emphasis::Primary => Look::PRIMARY,

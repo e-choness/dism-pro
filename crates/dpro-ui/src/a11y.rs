@@ -52,7 +52,9 @@
 //!   - a [shortcut](crate::Element::shortcut) is the node's keyboard shortcut, which the adapter
 //!     reports as `AcceleratorKey` (PATCHES.md 10).
 //! - Presentational children (A3.5 addition 9): a check box's children, and a named button's,
-//!   are left out of the tree, so the control is read once by its name.
+//!   are left out of the tree, so the control is read once by its name. So are a presentation
+//!   container's: a settings row's label and description, which name and describe its control
+//!   (A3.5 (15)).
 //! - A [suggestions](crate::Element::suggestions) list's options are placed among the options
 //!   alone: each its position, and the list the set's size, so a header doesn't count (A3.5
 //!   addition 7).
@@ -158,11 +160,13 @@ impl<M> UiNode<M> {
 
     /// Its children are presentational (A3.5 addition 9): a check box's label lines, or the
     /// parts of a button with a name (a clickable card, an icon button), which the control's name
-    /// already says. A button without one is read through its children.
+    /// already says. A button without one is read through its children. Or a presentation
+    /// container's text, which names and describes a control beside it (a settings row's).
     pub(crate) fn presents_children(&self) -> bool {
         match self.role {
             Role::CheckBox => true,
             Role::Button => !self.text.is_empty(),
+            Role::Container => self.is_presentation(),
             _ => false,
         }
     }
@@ -201,10 +205,11 @@ impl<M> Ui<M> {
         self.sides[s as usize].props.set(props, text) || !had
     }
 
-    /// Button `i` may have gained or lost its name, so that its children became presentational
-    /// or stopped being (A3.5 addition 9): the flag follows down its subtree, and the nodes a
-    /// client can see again are sent. Their button, renamed, is sent with its new children. A
-    /// node's children share their flag, so the first one says whether anything changed.
+    /// Button `i` may have gained or lost its name, or container `i` its presentation, so that
+    /// its children became presentational or stopped being (A3.5 addition 9): the flag follows
+    /// down its subtree, and the nodes a client can see again are sent. Their button, renamed, is
+    /// sent with its new children. A node's children share their flag, so the first one says
+    /// whether anything changed.
     pub(crate) fn presentation_changed(&mut self, i: u32) {
         let n = &self.nodes[i as usize];
         let held = n.presentational || n.presents_children();
