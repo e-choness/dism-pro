@@ -82,7 +82,6 @@ fn an_unnamed_glyph_is_hidden() {
 }
 
 #[test]
-#[ignore = "slice 6a: lands with the code"]
 fn a_named_glyph_is_an_image() {
     let mut ui = built();
     let tree = ui.a11y_tree();

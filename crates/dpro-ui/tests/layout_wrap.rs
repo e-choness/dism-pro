@@ -69,7 +69,6 @@ fn a_row_that_doesnt_wrap_lays_out_on_one_line() {
 }
 
 #[test]
-#[ignore = "slice 6a: lands with the code"]
 fn children_go_on_as_many_lines_as_they_need() {
     // 290 inside the padding: two 100s and a gap fit (210), a third doesn't (320).
     let (row, kids) = lay_out(300.0, &[(100.0, 0.0); 5], Justify::Start, true);
@@ -87,7 +86,6 @@ fn children_go_on_as_many_lines_as_they_need() {
 }
 
 #[test]
-#[ignore = "slice 6a: lands with the code"]
 fn the_growing_children_split_what_is_left_on_their_line() {
     // Line 1: 100 (grow 1) and 100 (grow 3) in 290: 80 left, 20 and 60.
     // Line 2: 100 (grow 0) alone: stays 100.
@@ -103,7 +101,6 @@ fn the_growing_children_split_what_is_left_on_their_line() {
 }
 
 #[test]
-#[ignore = "slice 6a: lands with the code"]
 fn a_child_wider_than_the_row_gets_a_line_of_its_own_clamped_to_the_row() {
     let (_, kids) = lay_out(
         300.0,
@@ -121,7 +118,6 @@ fn a_child_wider_than_the_row_gets_a_line_of_its_own_clamped_to_the_row() {
 }
 
 #[test]
-#[ignore = "slice 6a: lands with the code"]
 fn each_lines_children_follow_justify() {
     let (_, kids) = lay_out(300.0, &[(100.0, 0.0); 3], Justify::End, true);
     // Line 1 ends at the row's end (295), line 2 too.
@@ -130,7 +126,6 @@ fn each_lines_children_follow_justify() {
 }
 
 #[test]
-#[ignore = "slice 6a: lands with the code"]
 fn a_resize_rewraps() {
     let wide = lay_out(1000.0, &[(220.0, 1.0); 4], Justify::Start, true).1;
     assert!(

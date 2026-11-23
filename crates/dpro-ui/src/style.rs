@@ -59,10 +59,15 @@ pub struct Style {
     pub min: Size,
     pub max: Size,
     /// A row whose children go on as many lines as they need (TD-0009 §5's wrap, A3.5 addition
-    /// 3): each child's `min.w` is its basis, and on each line the growing children split what's
-    /// left; card grids use it. Off by default, so no existing layout changes.
+    /// 3); card grids use it. Off by default, so no existing layout changes. A column ignores it.
     ///
-    /// Slice 6a's layout track lays it out; until then a wrapping row lays out as one line.
+    /// - A child's basis is its `min.w` if it grows, else its natural width. A line takes
+    ///   children while their bases and gaps fit; a child wider than the row gets a line of its
+    ///   own, clamped to the row.
+    /// - On each line the growing children split what's left, from their bases, within their
+    ///   min and max; `justify` places what remains.
+    /// - A line is as high as its tallest child, and `align` places each child in its line.
+    ///   Lines start at the logical start, and `gap` separates lines as it does children.
     pub wrap: bool,
 }
 

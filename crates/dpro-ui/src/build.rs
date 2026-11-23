@@ -293,8 +293,8 @@ impl<M> Ui<M> {
             // So is a menu item's being a check item: a client sees it, and the check shows.
             Extra::Check => (None, CHECK_ITEM, None),
             Extra::None | Extra::Field { .. } | Extra::Combo { .. } => (None, 0.0, None),
-            // A glyph's icon (A3.5 addition 1): dropped until slice 6a's layout track keeps it.
-            Extra::Glyph(_) => (None, 0.0, None),
+            // So is a glyph's icon (A3.5 addition 1): it shows, and a named one is an image.
+            Extra::Glyph(icon) => (None, crate::tree::glyph_value(icon), None),
             // A live region's politeness (addition 5, A4.5): dropped until slice 6a's a11y track
             // keeps it.
             Extra::Live(_) => (None, 0.0, None),
