@@ -6,7 +6,14 @@
 //!   whatever their content (CSS's `flex: 1`, a basis of 0). Table cells get equal widths and
 //!   their text trims; a page's body fills the window under its header.
 //! - With nothing growing, `justify` places the free space.
-//! - Across the axis, `align` places children or stretches them.
+//! - Across the axis, `align` places children or stretches them. A glyph is a line-high square
+//!   wherever it sits: stretching leaves it as it is.
+//! - A [wrapping](crate::Style::wrap) row puts its children on lines (TD-0009 A3.5 addition 3):
+//!   each line is laid out as a row of its own, growing children from their `min.w`, and lines
+//!   stack with the row's gap between them. Each child is measured a bounded number of times
+//!   and placed once, so it costs O(children).
+//! - A check box's children are its label lines (A3.5 addition 9): a column after its box, a
+//!   line and a half from its start, as a check box's own label is.
 //!
 //! `measure` caches a node's natural size for the width it was offered, until the node or a
 //! descendant changes. `arrange` skips a subtree that is clean and keeps its rectangle, so a frame
@@ -25,8 +32,8 @@
 //! as wide as it likes along an axis it scrolls across.
 
 use crate::{
-    geom::{Point, Rect, Size},
-    style::{Align, Axis, Dim, Justify, clamp},
+    geom::{Insets, Point, Rect, Size},
+    style::{Align, Axis, Dim, Justify, Style, clamp},
     text::{TextSystem, count},
     tree::{NIL, Role},
     ui::{ROOT, Ui},
@@ -108,6 +115,11 @@ impl<M> Ui<M> {
                 Role::Container | Role::Progress | Role::Separator | Role::Grid | Role::Row => {
                     Size::ZERO
                 }
+                // A glyph is a line square; its text is only its name (A3.5 addition 1).
+                Role::Label if n.is_glyph() => {
+                    let line = text.measure("", &n.text_style, f32::INFINITY).height;
+                    Size { w: line, h: line }
+                }
                 // Its label past the checks' gutter.
                 Role::MenuItem if self.in_check_menu(i) => {
                     let gutter = text.measure("", &n.text_style, f32::INFINITY).height * 1.5;
@@ -155,6 +167,14 @@ impl<M> Ui<M> {
                     }
                 }
             }
+        } else if n.role == Role::CheckBox {
+            // Its label lines, after the box as its own label would be (A3.5 addition 9).
+            let line = text.measure("", &n.text_style, f32::INFINITY).height;
+            let lines = self.measure_children(i, (inner_w - line * 1.5).max(0.0), text);
+            Size {
+                w: line * 1.5 + lines.w,
+                h: lines.h.max(line),
+            }
         } else {
             self.measure_children(i, inner_w, text)
         };
@@ -182,10 +202,13 @@ impl<M> Ui<M> {
     /// In a row of a known width, growing children count as the widths `arrange` will give them,
     /// and are measured at those widths, so wrapping text is as tall as it will be.
     fn measure_children(&mut self, i: u32, inner_w: f32, text: &mut dyn TextSystem) -> Size {
-        let (axis, gap, first) = {
+        let (axis, gap, first, wrap) = {
             let n = &self.nodes[i as usize];
-            (n.style.axis, n.style.gap, n.first)
+            (n.style.axis, n.style.gap, n.first, n.style.wrap)
         };
+        if wrap && axis == Axis::Row {
+            return self.measure_lines(first, inner_w, gap, text);
+        }
         let (mut main, mut cross, mut len, mut grow) = (0.0f32, 0.0f32, 0usize, 0.0f32);
         let flex = axis == Axis::Row && inner_w.is_finite();
         let mut c = first;
@@ -261,12 +284,20 @@ impl<M> Ui<M> {
         if self.arrange_table(i, text, covered) {
             return;
         }
-        let (s, inner, first, scroll) = {
+        let (s, first, scroll) = {
             let n = &self.nodes[i as usize];
-            (n.style, n.rect.inset(n.style.padding), n.first, n.scroll)
+            (n.style, n.first, n.scroll)
         };
+        let inner = self.children_box(i, text);
         // A viewport's children show elsewhere until it's done; nothing else changes it.
         let outer = (scroll != NIL).then(|| self.enter_viewport(i, s.axis));
+        if s.wrap && s.axis == Axis::Row {
+            let content = self.arrange_lines(first, s, inner, text, covered);
+            if let Some((outer, _)) = outer {
+                self.leave_viewport(scroll, outer, s.padding, content, text);
+            }
+            return;
+        }
         let across = outer.is_some_and(|(_, across)| across);
         let (inner_main, inner_cross) = along(
             s.axis,
@@ -312,13 +343,7 @@ impl<M> Ui<M> {
             }
             free = free.max(0.0);
         }
-        let (mut at, mut between) = (0.0f32, s.gap);
-        match s.justify {
-            Justify::Center => at = free / 2.0,
-            Justify::End => at = free,
-            Justify::SpaceBetween if len > 1 => between += free / count(len - 1),
-            Justify::Start | Justify::SpaceBetween => {}
-        }
+        let (mut at, between) = justify(s.justify, free, len, s.gap);
 
         // Pass 2: cross sizes (height for the final width in a row), then place. A viewport
         // keeps the content's extent.
@@ -346,18 +371,215 @@ impl<M> Ui<M> {
             c = next;
         }
         if let Some((outer, _)) = outer {
-            self.shown = outer;
-            let pad = s.padding;
             let (width, height) = match s.axis {
                 Axis::Row => (end_main, end_cross),
                 Axis::Column => (end_cross, end_main),
             };
             let content = Size {
-                w: width + pad.horizontal(),
-                h: height + pad.vertical(),
+                w: width,
+                h: height,
             };
-            self.scroll_laid_out(scroll, content, text);
+            self.leave_viewport(scroll, outer, s.padding, content, text);
         }
+    }
+
+    /// Where node `i`'s children go: inside its padding, and a check box's after its box, a line
+    /// and a half from its start (A3.5 addition 9).
+    fn children_box(&self, i: u32, text: &mut dyn TextSystem) -> Rect {
+        let n = &self.nodes[i as usize];
+        let mut inner = n.rect.inset(n.style.padding);
+        if n.role == Role::CheckBox {
+            let line = text.measure("", &n.text_style, f32::INFINITY).height;
+            let gutter = (line * 1.5).min(inner.w);
+            inner.x += gutter;
+            inner.w -= gutter;
+        }
+        inner
+    }
+
+    /// Viewport `scroll`'s children are laid out, `content` (inside its `padding`) in all: what
+    /// shows is `outer` again, and the viewport knows its content's extent.
+    fn leave_viewport(
+        &mut self,
+        scroll: u32,
+        outer: Shown,
+        padding: Insets,
+        content: Size,
+        text: &mut dyn TextSystem,
+    ) {
+        self.shown = outer;
+        let content = Size {
+            w: content.w + padding.horizontal(),
+            h: content.h + padding.vertical(),
+        };
+        self.scroll_laid_out(scroll, content, text);
+    }
+
+    /// The natural extent of a wrapping row's children from `first`, in `inner_w` (possibly
+    /// infinite: then they're one line): its widest line by its lines' heights and the gaps.
+    fn measure_lines(
+        &mut self,
+        first: u32,
+        inner_w: f32,
+        gap: f32,
+        text: &mut dyn TextSystem,
+    ) -> Size {
+        let (mut w, mut h, mut lines) = (0.0f32, 0.0f32, 0usize);
+        let mut c = first;
+        while c != NIL {
+            let line = self.line_from(c, inner_w, gap, text);
+            let free = self.grow_line(line, inner_w);
+            // Its children and gaps, grown: all of the row but what's left.
+            w = w.max(if inner_w.is_finite() {
+                inner_w - free
+            } else {
+                line.used
+            });
+            h += self.line_height(line, inner_w, text);
+            lines += 1;
+            c = line.end;
+        }
+        Size {
+            w,
+            h: h + gap * count(lines.saturating_sub(1)),
+        }
+    }
+
+    /// Lays out a wrapping row's children from `first` in `inner`, with `s`'s gap, justify and
+    /// align. Returns their extent, for a viewport.
+    fn arrange_lines(
+        &mut self,
+        first: u32,
+        s: Style,
+        inner: Rect,
+        text: &mut dyn TextSystem,
+        covered: bool,
+    ) -> Size {
+        let (mut wide, mut top) = (0.0f32, 0.0f32);
+        let mut start = first;
+        while start != NIL {
+            let line = self.line_from(start, inner.w, s.gap, text);
+            let free = self.grow_line(line, inner.w);
+            let high = self.line_height(line, inner.w, text);
+            let (mut at, between) = justify(s.justify, free, line.len, s.gap);
+            let mut c = line.first;
+            while c != line.end {
+                let (main, cs) = {
+                    let n = &self.nodes[c as usize];
+                    (n.main, n.style)
+                };
+                let natural = self.child_height(c, inner.w, text);
+                let cross =
+                    if s.align == Align::Stretch && cs.height == Dim::Auto && self.stretches(c) {
+                        clamp(high, cs.min.h, cs.max.h)
+                    } else {
+                        natural
+                    };
+                let offset = match s.align {
+                    Align::Start | Align::Stretch => 0.0,
+                    Align::Center => (high - cross) / 2.0,
+                    Align::End => high - cross,
+                };
+                let rect = Rect::new(inner.x + at, inner.y + top + offset, main, cross);
+                wide = wide.max(at + main);
+                at += main + between;
+                let next = self.nodes[c as usize].next;
+                self.arrange(c, rect, text, covered);
+                c = next;
+            }
+            top += high + s.gap;
+            start = line.end;
+        }
+        Size {
+            w: wide,
+            h: (top - s.gap).max(0.0),
+        }
+    }
+
+    /// The line of a wrapping row's children that starts at `first`, `w` wide (possibly
+    /// infinite), `gap` apart. Each child's basis, which [`grow_line`](Self::grow_line) grows,
+    /// goes in its `main`: its `min.w` if it grows, else its natural width; either at most `w`.
+    /// A line takes children while their bases and gaps fit, and always takes one.
+    fn line_from(&mut self, first: u32, w: f32, gap: f32, text: &mut dyn TextSystem) -> Line {
+        let mut line = Line {
+            first,
+            end: first,
+            used: 0.0,
+            grow: 0.0,
+            len: 0,
+        };
+        let mut c = first;
+        while c != NIL {
+            let s = self.nodes[c as usize].style;
+            let grow = s.grow.max(0.0);
+            let basis = if grow > 0.0 {
+                s.min.w
+            } else {
+                self.measure(c, w, text).w
+            }
+            .min(w);
+            let used = if line.len == 0 {
+                basis
+            } else {
+                line.used + gap + basis
+            };
+            // A hair of slack, as painting has: these sums went through layout's arithmetic.
+            if line.len > 0 && used > w + 1e-3 {
+                break;
+            }
+            self.nodes[c as usize].main = basis;
+            line.used = used;
+            line.grow += grow;
+            line.len += 1;
+            c = self.nodes[c as usize].next;
+        }
+        line.end = c;
+        line
+    }
+
+    /// Grows `line`'s growing children from their bases into what's left of `w`, by grow and
+    /// within their min and max (and `w`). Returns what's left after, which `justify` places:
+    /// nothing when `w` is infinite, where the children don't grow.
+    fn grow_line(&mut self, line: Line, w: f32) -> f32 {
+        let space = (w - line.used).max(0.0);
+        if !space.is_finite() {
+            return 0.0;
+        }
+        let mut free = space;
+        if line.grow > 0.0 {
+            let mut c = line.first;
+            while c != line.end {
+                let n = &mut self.nodes[c as usize];
+                let (grow, min, max) = (n.style.grow.max(0.0), n.style.min.w, n.style.max.w);
+                if grow > 0.0 {
+                    let grown = clamp(n.main + space * grow / line.grow, min, max).min(w);
+                    free -= grown - n.main;
+                    n.main = grown;
+                }
+                c = n.next;
+            }
+        }
+        free.max(0.0)
+    }
+
+    /// The height of a wrapping row's `line`, `w` wide: its tallest child's.
+    fn line_height(&mut self, line: Line, w: f32, text: &mut dyn TextSystem) -> f32 {
+        let mut high = 0.0f32;
+        let mut c = line.first;
+        while c != line.end {
+            high = high.max(self.child_height(c, w, text));
+            c = self.nodes[c as usize].next;
+        }
+        high
+    }
+
+    /// The natural height of a wrapping row's child `c` at the width its line gives it: a
+    /// growing child's grown width, else (its natural width, or the row's when it's wider) as
+    /// measured for the row's width `w`, which the measure cache already holds.
+    fn child_height(&mut self, c: u32, w: f32, text: &mut dyn TextSystem) -> f32 {
+        let n = &self.nodes[c as usize];
+        let avail = if n.style.grow > 0.0 { n.main } else { w };
+        self.measure(c, avail, text).h
     }
 
     /// Viewport `i`'s children are next: they show moved by its offset and inside it, which
@@ -426,7 +648,7 @@ impl<M> Ui<M> {
             Axis::Row if across => self.natural_cross(c, axis, align, main, inner_cross, text),
             Axis::Row => {
                 let s = self.nodes[c as usize].style;
-                if align == Align::Stretch && s.height == Dim::Auto {
+                if align == Align::Stretch && s.height == Dim::Auto && self.stretches(c) {
                     clamp(inner_cross, s.min.h, s.max.h)
                 } else {
                     self.measure(c, main, text).h.min(inner_cross.max(s.min.h))
@@ -449,7 +671,7 @@ impl<M> Ui<M> {
             return self.natural_cross(c, Axis::Column, align, f32::INFINITY, inner_w, text);
         }
         let s = self.nodes[c as usize].style;
-        if align == Align::Stretch && s.width == Dim::Auto {
+        if align == Align::Stretch && s.width == Dim::Auto && self.stretches(c) {
             clamp(inner_w, s.min.w, s.max.w)
         } else {
             self.measure(c, inner_w, text).w.min(inner_w.max(s.min.w))
@@ -475,12 +697,42 @@ impl<M> Ui<M> {
             Axis::Row => (measured.h, s.height == Dim::Auto),
             Axis::Column => (measured.w, s.width == Dim::Auto),
         };
-        if align == Align::Stretch && auto {
+        if align == Align::Stretch && auto && self.stretches(c) {
             natural.max(inner_cross)
         } else {
             natural
         }
     }
+
+    /// Whether a stretching parent stretches child `c`: everything but a glyph, which stays a
+    /// line-high square (A3.5 addition 1).
+    fn stretches(&self, c: u32) -> bool {
+        !self.nodes[c as usize].is_glyph()
+    }
+}
+
+/// Where a line's first child goes along the axis, and the space between children: `justify`
+/// placing `free` among `len` children `gap` apart.
+fn justify(justify: Justify, free: f32, len: usize, gap: f32) -> (f32, f32) {
+    match justify {
+        Justify::Center => (free / 2.0, gap),
+        Justify::End => (free, gap),
+        Justify::SpaceBetween if len > 1 => (0.0, gap + free / count(len - 1)),
+        Justify::Start | Justify::SpaceBetween => (0.0, gap),
+    }
+}
+
+/// One line of a [wrapping](crate::Style::wrap) row's children: from `first` to the child
+/// before `end` (or the last).
+#[derive(Clone, Copy, Debug)]
+struct Line {
+    first: u32,
+    end: u32,
+    /// The children's bases and the gaps between them.
+    used: f32,
+    /// The growing children's grow, in all.
+    grow: f32,
+    len: usize,
 }
 
 fn fixed(d: Dim) -> Option<f32> {
@@ -819,6 +1071,162 @@ mod tests {
         fn caret_stops(&mut self, text: &str, style: &TextStyle, out: &mut Vec<crate::CaretStop>) {
             FakeText.caret_stops(text, style, out);
         }
+    }
+
+    /// A wrapping row, children 10 apart, placed by `align` in their lines.
+    fn wrapping(align: Align) -> Element<'static, ()> {
+        Element::stack(Key(1)).style(Style {
+            axis: Axis::Row,
+            gap: 10.0,
+            align,
+            wrap: true,
+            ..Style::default()
+        })
+    }
+
+    fn kid(k: u64, (w, h, grow): (f32, f32, f32)) -> Element<'static, ()> {
+        Element::stack(Key(k)).style(Style {
+            min: Size { w, h },
+            grow,
+            ..Style::default()
+        })
+    }
+
+    #[test]
+    fn a_line_places_its_children_by_align_within_its_height() {
+        // 100 wide: the 30 and 40 share a line 30 high; the 50 goes on a line of its own.
+        let kids = [(30.0, 10.0, 0.0), (40.0, 30.0, 0.0), (50.0, 20.0, 0.0)];
+        for (align, first) in [
+            (Align::Start, Rect::new(0.0, 0.0, 30.0, 10.0)),
+            (Align::Center, Rect::new(0.0, 10.0, 30.0, 10.0)),
+            (Align::End, Rect::new(0.0, 20.0, 30.0, 10.0)),
+            (Align::Stretch, Rect::new(0.0, 0.0, 30.0, 30.0)),
+        ] {
+            let mut ui = ui(100.0, 200.0);
+            ui.build(|cx| {
+                cx.add_with(wrapping(align), |cx| {
+                    for (k, size) in (2..).zip(kids) {
+                        cx.add(kid(k, size));
+                    }
+                });
+            });
+            ui.layout(&mut FakeText);
+            assert_eq!(rect(&ui, &[1, 2]), first, "{align:?}");
+            assert_eq!(rect(&ui, &[1, 3]), Rect::new(40.0, 0.0, 40.0, 30.0));
+            // The second line starts a gap under the first, and is its own child's height.
+            assert_eq!(
+                rect(&ui, &[1, 4]),
+                Rect::new(0.0, 40.0, 50.0, 20.0),
+                "{align:?}"
+            );
+            assert_eq!(rect(&ui, &[1]).h, 60.0, "{align:?}");
+        }
+    }
+
+    #[test]
+    fn a_wrapping_row_in_a_row_is_as_wide_as_its_widest_line() {
+        // In 300 px, five 100s 10 apart go two to a line: 210 wide, 3 lines.
+        let mut ui = ui(300.0, 200.0);
+        ui.build(|cx| {
+            let row = Style {
+                axis: Axis::Row,
+                align: Align::Start,
+                ..Style::default()
+            };
+            cx.add_with(Element::stack(Key(9)).style(row), |cx| {
+                cx.add_with(wrapping(Align::Start), |cx| {
+                    for k in 2..7 {
+                        cx.add(kid(k, (100.0, 20.0, 0.0)));
+                    }
+                });
+            });
+        });
+        ui.layout(&mut FakeText);
+        assert_eq!(rect(&ui, &[9, 1]), Rect::new(0.0, 0.0, 210.0, 80.0));
+        assert_eq!(rect(&ui, &[9, 1, 6]), Rect::new(0.0, 60.0, 100.0, 20.0));
+    }
+
+    #[test]
+    fn a_glyph_isnt_stretched_on_its_line() {
+        let mut ui = ui(200.0, 100.0);
+        ui.build(|cx| {
+            cx.add_with(wrapping(Align::Stretch), |cx| {
+                cx.add(kid(2, (50.0, 40.0, 0.0)));
+                cx.add(Element::glyph(Key(3), crate::Icon::Info).text_style(SMALL));
+            });
+        });
+        ui.layout(&mut FakeText);
+        assert_eq!(rect(&ui, &[1, 3]), Rect::new(60.0, 0.0, 12.5, 12.5));
+    }
+
+    #[test]
+    fn a_wrapping_row_measures_each_child_once_a_layout() {
+        // 40 words of 5 to 14 characters, 5 px each: about 9 lines in 300 px.
+        const WORDS: [&str; 40] = [
+            "alpha",
+            "bravo",
+            "charlie",
+            "delta",
+            "echo",
+            "foxtrot",
+            "golf",
+            "hotel",
+            "india",
+            "juliett",
+            "kilo",
+            "lima",
+            "mike",
+            "november",
+            "oscar",
+            "papa",
+            "quebec",
+            "romeo",
+            "sierra",
+            "tango",
+            "uniform",
+            "victor",
+            "whiskey",
+            "xray",
+            "yankee",
+            "zulu",
+            "temporary",
+            "files",
+            "windows",
+            "update",
+            "delivery",
+            "optimization",
+            "thumbnails",
+            "recycle",
+            "bin",
+            "logs",
+            "dumps",
+            "caches",
+            "prefetch",
+            "installers",
+        ];
+        let mut ui = ui(300.0, 400.0);
+        let page = |ui: &mut Ui<()>, text: &mut Counting| {
+            ui.build(|cx| {
+                cx.add_with(wrapping(Align::Center), |cx| {
+                    for (k, w) in (10..).zip(WORDS) {
+                        cx.add(Element::text(Key(k), w).text_style(SMALL));
+                    }
+                });
+            });
+            ui.layout(text);
+        };
+        let mut text = Counting(0);
+        page(&mut ui, &mut text);
+        assert_eq!(text.0, 40, "the first layout");
+        let lines: std::collections::BTreeSet<u32> =
+            (10..50).map(|k| rect(&ui, &[1, k]).y.to_bits()).collect();
+        assert!(lines.len() > 5, "{} lines", lines.len());
+        // A resize rewraps them, measuring each once more; an unchanged frame measures none.
+        ui.set_viewport(Size { w: 200.0, h: 400.0 });
+        page(&mut ui, &mut text);
+        assert_eq!(text.0, 80, "the resize");
+        page(&mut ui, &mut text);
+        assert_eq!(text.0, 80, "an unchanged frame");
     }
 
     #[test]

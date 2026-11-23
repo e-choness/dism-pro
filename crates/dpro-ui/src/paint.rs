@@ -7,7 +7,8 @@
 //! whenever the damage is (`tests/paint_damage.rs` checks the scripted session pixel by pixel).
 //!
 //! What each node shows:
-//! - its [`Look`](crate::Look)'s fill, then its border, both with the look's radius;
+//! - its [`Look`](crate::Look)'s fill, then its border, both with the look's radius (a pill's is
+//!   half its shorter side as painted);
 //! - buttons and tabs: a state layer while hovered (following the hover fade) or pressed. A hold
 //!   button held shows the part still to go in the permanent fill, its own fill growing from its
 //!   start as the hold runs, and its text in the ink that pairs with each part;
@@ -15,7 +16,9 @@
 //!   and horizontally too in a button. A node with children (a table row) shows no text of its
 //!   own: its text is its accessible name;
 //! - check boxes: a box a line high, with the state layer, then the label half a line after it;
-//!   radio buttons the same with a circle, the accent with a dot in it when picked;
+//!   one with label lines of its own (children), the box beside the first, and no text of its
+//!   own; radio buttons the same with a circle, the accent with a dot in it when picked;
+//! - glyphs: their icon in their ink, at their text style's size, centered (a name never shows);
 //! - progress bars: a pill-shaped track, the accent along it as far as its value;
 //! - menu items and a dropdown list's options: their text from the start, and the state layer
 //!   while focused, hovered or pressed, which is all the keyboard focus shows in a menu, as in
@@ -44,7 +47,7 @@ use dpro_app::table::{Order, Tri};
 
 use crate::{
     canvas::Canvas,
-    geom::{Rect, RectPx},
+    geom::{Rect, RectPx, Size},
     style::Justify,
     table::{TABLE_CHECK, sort_of},
     text::{GlyphSink, Icon, TextSystem},
@@ -122,7 +125,12 @@ impl<M> Ui<M> {
             return;
         }
         p.canvas.set_clip(visible);
-        let corner = node.look.radius.logical() * p.scale;
+        // On the box as painted, so a pill's ends are half circles at any scale.
+        let painted = Size {
+            w: f(rect.x1 - rect.x0) / p.scale,
+            h: f(rect.y1 - rect.y0) / p.scale,
+        };
+        let corner = node.look.radius.logical(painted) * p.scale;
         let fill = node.look.fill.map(|f| p.theme.fill(f, node.enabled));
         if let Some(fill) = fill {
             p.canvas.rrect(rect, corner, p.theme.color(fill));
@@ -163,6 +171,7 @@ impl<M> Ui<M> {
             Role::Radio => p.radio(node, interactive, ink),
             Role::Field => self.paint_field(i, visible, under, ink, p),
             Role::Progress => p.progress(node, rect),
+            Role::Label if node.is_glyph() => p.glyph(node, ink),
             Role::Label | Role::Button | Role::Tab
                 if node.first == NIL && !node.text.is_empty() =>
             {
@@ -570,10 +579,32 @@ impl Painter<'_, '_> {
     }
 
     /// The box, a line high, then the label half a line after it (the size layout measured).
+    /// With label lines of its own (A3.5 addition 9), the box sits beside the first, and its
+    /// text is only its name.
     fn check_box<M>(&mut self, n: &Node<M>, interactive: bool, ink: Color) {
         let (content, line, b) = self.mark_box(n);
-        self.check_mark(n, b, interactive);
-        self.mark_label(n, content, line, ink);
+        if n.first == NIL {
+            self.check_mark(n, b, interactive);
+            self.mark_label(n, content, line, ink);
+        } else {
+            self.check_mark(n, Rect { y: content.y, ..b }, interactive);
+        }
+    }
+
+    /// A glyph's icon in `ink`, at its text style's size, centered in its content box.
+    fn glyph<M>(&mut self, n: &Node<M>, ink: Color) {
+        let Some(icon) = n.glyph() else {
+            return;
+        };
+        let content = n.rect.inset(n.style.padding);
+        let side = n.text_style.size.min(content.w).min(content.h).max(0.0);
+        let c = content.center();
+        let at = Rect::new(c.x - side / 2.0, c.y - side / 2.0, side, side);
+        let mut sink = Ink {
+            canvas: &mut *self.canvas,
+            color: ink,
+        };
+        self.text.icon(icon, at, self.scale, &mut sink);
     }
 
     /// A check box at `b`, a line square, showing `n`'s check state.

@@ -246,16 +246,17 @@ pub enum Radius {
 }
 
 impl Radius {
-    /// In logical pixels.
+    /// In logical pixels, on a box `size` big: a pill's is half its shorter side, so its ends
+    /// are half circles (a square box makes a circle); the others are fixed tokens.
     #[must_use]
-    pub const fn logical(self) -> f32 {
+    pub const fn logical(self, size: Size) -> f32 {
         match self {
-            // Slice 6a's layout track makes a pill half the shorter side; square until then.
-            Self::None | Self::Pill => 0.0,
+            Self::None => 0.0,
             Self::Small => radius::SMALL,
             Self::Control => radius::CONTROL,
             Self::Card => radius::CARD,
             Self::Drawer => radius::DRAWER,
+            Self::Pill => size.w.min(size.h).max(0.0) / 2.0,
         }
     }
 }
@@ -347,11 +348,8 @@ pub(crate) enum Extra<'s, M> {
     /// a menu check box.
     Check,
 
-    /// A [glyph](Element::glyph)'s icon (TD-0009 A3.5 addition 1; slice 6a's layout track).
-    #[expect(
-        dead_code,
-        reason = "slice 6a's layout track keeps the icon on the node"
-    )]
+    /// A [glyph](Element::glyph)'s icon (TD-0009 A3.5 addition 1): its node's value
+    /// ([`glyph_value`]).
     Glyph(Icon),
 
     /// A [live region](Element::live)'s politeness (A3.5 addition 5, A4.5; slice 6a's a11y
@@ -366,6 +364,14 @@ pub(crate) enum Extra<'s, M> {
 /// A check item's value ([`Element::menu_check`]): its node's `value`, as a column header's sort
 /// is its.
 pub(crate) const CHECK_ITEM: f32 = 1.0;
+
+/// A [glyph](Element::glyph)'s icon as its node's `value`, as a check item's is: one more than
+/// its place in [`Icon::ALL`], so no glyph's is 0. A label has no other value, and a new icon
+/// changes the value, which repaints the glyph.
+pub(crate) fn glyph_value(icon: Icon) -> f32 {
+    // `Icon::ALL` lists the icons in declaration order, so the discriminant is the place.
+    f32::from(icon as u8 + 1)
+}
 
 // Copy whatever `M` is: it holds no `M`, only functions that make one, so building a node drops
 // nothing of it (measured on the shell fixture: with an `M` here, rebuilding a view in which
@@ -803,11 +809,10 @@ impl<'s, M> Element<'s, M> {
 
 /// Slice 6a's layout track: glyphs (A3.5 addition 1).
 impl<M> Element<'_, M> {
-    /// An icon-font glyph, drawn by [`TextSystem::icon`](crate::TextSystem::icon) at its text
-    /// style's size. Unnamed, it's decoration and hidden from assistive technology, as an empty
-    /// label is; [named](Self::name), a client sees an image of that name.
-    ///
-    /// Until the layout track lands it draws nothing: an empty label.
+    /// An icon-font glyph in its look's ink, drawn by [`TextSystem::icon`](crate::TextSystem::icon)
+    /// at its text style's size: a line-high square, which a stretching parent doesn't stretch.
+    /// Unnamed, it's decoration and hidden from assistive technology, as an empty label is;
+    /// [named](Self::name), a client sees an image of that name, and the name never shows.
     #[must_use]
     pub fn glyph(key: Key, icon: Icon) -> Self {
         Self {
@@ -988,7 +993,8 @@ pub(crate) struct Node<M> {
     pub(crate) field: u32,
     /// The arrow keys move through this container's items.
     pub(crate) group: Option<Group>,
-    /// A progress bar's fraction, 0 to 1.
+    /// A progress bar's fraction, 0 to 1; a column header's sort, a check item's mark, or a
+    /// glyph's icon ([`glyph_value`]).
     pub(crate) value: f32,
     /// A hold button: its Invoke message is in the Ui's hold table.
     pub(crate) hold: bool,
@@ -1106,14 +1112,19 @@ impl<M> Node<M> {
         self.role == Role::MenuItem && self.value.to_bits() == CHECK_ITEM.to_bits()
     }
 
-    /// A [glyph](Element::glyph)'s icon; `None` for every other node. Slice 6a's layout track
-    /// keeps the icon on the node; until then no node has one.
-    #[allow(
-        clippy::unused_self,
-        reason = "a stub until slice 6a's layout track keeps the icon (TD-0009 A3.5 addition 1)"
-    )]
+    /// A [glyph](Element::glyph)'s icon; `None` for every other node.
     pub(crate) fn glyph(&self) -> Option<Icon> {
-        None
+        if !self.is_glyph() {
+            return None;
+        }
+        Icon::ALL
+            .into_iter()
+            .find(|&icon| glyph_value(icon).to_bits() == self.value.to_bits())
+    }
+
+    /// A [glyph](Element::glyph): a label with a value, which is its icon's.
+    pub(crate) fn is_glyph(&self) -> bool {
+        self.role == Role::Label && self.value.to_bits() != 0
     }
 
     /// The arrow keys can bring focus to it: an interactive node, or a disabled menu item, which
@@ -1201,6 +1212,35 @@ mod tests {
         assert!(item.focusable() && !item.interactive());
         n.enabled = false;
         assert!(!n.focusable());
+    }
+
+    #[test]
+    fn a_pill_is_half_its_shorter_side_and_the_rest_are_tokens() {
+        let size = |w, h| Size { w, h };
+        assert_eq!(Radius::Pill.logical(size(120.0, 24.0)), 12.0);
+        assert_eq!(Radius::Pill.logical(size(8.0, 8.0)), 4.0);
+        assert_eq!(Radius::Pill.logical(size(-3.0, 8.0)), 0.0);
+        for big in [size(0.0, 0.0), size(500.0, 500.0)] {
+            assert_eq!(Radius::None.logical(big), 0.0);
+            assert_eq!(Radius::Small.logical(big), radius::SMALL);
+            assert_eq!(Radius::Control.logical(big), radius::CONTROL);
+            assert_eq!(Radius::Card.logical(big), radius::CARD);
+            assert_eq!(Radius::Drawer.logical(big), radius::DRAWER);
+        }
+    }
+
+    #[test]
+    fn a_glyphs_icon_is_its_value_and_only_a_label_has_one() {
+        let mut n: Node<()> = Node::new(Key(1), Role::Label);
+        assert_eq!(n.glyph(), None);
+        for icon in Icon::ALL {
+            n.value = glyph_value(icon);
+            assert_eq!(n.glyph(), Some(icon));
+        }
+        // A check item's value is a menu item's, not an icon.
+        let mut item: Node<()> = Node::new(Key(1), Role::MenuItem);
+        item.value = CHECK_ITEM;
+        assert_eq!((item.glyph(), item.is_glyph()), (None, false));
     }
 
     #[test]
