@@ -12,6 +12,10 @@
 
 x-toolchain: &toolchain
   working_dir: /src
+  # Docker's own bridge, not a network per compose project: every checkout (worktree) would
+  # otherwise make one, and Docker runs out of address pools at about 32 networks. No service
+  # talks to another; they only need the internet (crates, the xwin download).
+  network_mode: bridge
   volumes:
     - .:/src
     # target/ and the cargo caches live in named volumes, not the bind mount (fast on Windows hosts).
