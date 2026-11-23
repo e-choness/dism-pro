@@ -10,7 +10,12 @@ targets = [
 all-features = true
 
 [advisories]
-ignore = []
+# Each entry names the only path the crate takes into the graph. Remove it when that path goes.
+ignore = [
+    # chrono is unmaintained and has no successor release. Its only path in: rmcp, the dev-only
+    # MCP conformance client (never linked into a shipped binary). Drop when rmcp leaves chrono.
+    { id = "RUSTSEC-2026-0543", reason = "chrono only via rmcp, a dev-only test client" },
+]
 
 [licenses]
 # Anything else needs an ADR.
