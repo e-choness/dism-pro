@@ -67,7 +67,6 @@ fn every_target_is_at_least_24_px_on_every_view() {
 /// The composites page (TD-0009 A3.9), wide and narrow, Details open: every target of slice 6a's
 /// composites.
 #[test]
-#[ignore = "slice 6a: lands with the code"]
 fn every_composites_target_is_at_least_24_px() {
     use composites::{Model, Msg as C, NARROW, Step as S};
     let mut run = composites::Run::with(Model::new());

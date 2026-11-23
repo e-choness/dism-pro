@@ -13,9 +13,9 @@
 //! the target pill, palette, toast, job card and dialog frame, 6d the drawer frame, 6e the path
 //! picker.
 //!
-//! Until slice 6a's composites land, each builds a placeholder of its shape from the existing roles
-//! and the toolkit additions' stubs, so the measurements written before the code (A3.7, A3.9) have
-//! a page to run on.
+//! They're built from the toolkit's roles and slice 6a's additions (glyphs, pills, wrapping rows,
+//! check boxes with label lines, descriptions, live regions, headings and landmarks), measured by
+//! the composites page (`benches/fixtures/composites.rs`, A3.7, A3.9).
 //!
 //! [`Cx`]: crate::Cx
 //! [`Cx::table`]: crate::Cx::table
