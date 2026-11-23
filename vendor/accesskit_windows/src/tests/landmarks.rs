@@ -1,6 +1,6 @@
-// dpro: DISM Pro's tests of headings, landmarks and accelerators (PATCHES.md, planned items 8–10;
-// TD-0009 A4.5), under the crate's licences: the MIT license or the Apache License, Version 2.0,
-// at your option. Written before the patches, so ignored until they land.
+// dpro: DISM Pro's tests of headings, landmarks and accelerators (PATCHES.md, 8–10; TD-0009
+// A4.5), under the crate's licences: the MIT license or the Apache License, Version 2.0, at your
+// option. Written before the patches.
 
 //! Headings, landmarks and accelerator keys as a client reads them, called on the providers in
 //! process.
@@ -73,7 +73,6 @@ fn tree() -> TreeUpdate {
 }
 
 #[test]
-#[ignore = "slice 6a: lands with patch 8 (PATCHES.md)"]
 fn a_heading_reports_its_heading_level_and_no_level() {
     let requests = Requests::default();
     let context = context(&requests, tree());
@@ -96,7 +95,6 @@ fn a_heading_reports_its_heading_level_and_no_level() {
 }
 
 #[test]
-#[ignore = "slice 6a: lands with patch 9 (PATCHES.md)"]
 fn landmarks_report_their_type() {
     let requests = Requests::default();
     let context = context(&requests, tree());
@@ -115,7 +113,6 @@ fn landmarks_report_their_type() {
 }
 
 #[test]
-#[ignore = "slice 6a: lands with patch 9 (PATCHES.md)"]
 fn a_named_region_is_a_custom_landmark_with_its_kind() {
     let requests = Requests::default();
     let context = context(&requests, tree());
@@ -139,7 +136,6 @@ fn a_named_region_is_a_custom_landmark_with_its_kind() {
 }
 
 #[test]
-#[ignore = "slice 6a: lands with patch 10 (PATCHES.md)"]
 fn a_keyboard_shortcut_is_the_accelerator_key() {
     let requests = Requests::default();
     let context = context(&requests, tree());
