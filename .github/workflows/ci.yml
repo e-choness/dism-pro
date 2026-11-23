@@ -16,15 +16,71 @@ permissions:
   contents: read
   packages: read # the pinned toolchain images (decision #29)
 
+# One run at a time per branch or PR: a newer push cancels the older run, whose tree it supersedes
+# (decision #39). The nightly has its own group, so it never cancels a push's run, and so does a
+# label other than needs-windows, so it never cancels the real run.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: >-
+    ci-${{ github.event_name == 'schedule' && 'nightly' ||
+    github.event.action == 'labeled' && github.event.label.name != 'needs-windows' && github.run_id ||
+    github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  linux:
-    name: T1 + T2 (ubuntu)
+  dedupe:
+    name: One CI per tree
+    # A tree that a push, manual or nightly run already passed doesn't run again (decision #39):
+    # stage promoted to master, a feature merged into a stage that hadn't moved, the same commit
+    # pushed twice. A PR run isn't evidence: it tests its merge commit, not its head's tree. A
+    # manual run always runs everything.
     # Adding a label other than needs-windows doesn't need a new run.
     if: github.event.action != 'labeled' || github.event.label.name == 'needs-windows'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      tested: ${{ steps.find.outputs.tested }}
+    steps:
+      - id: find
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tested=false
+          if [[ $GITHUB_EVENT_NAME != workflow_dispatch ]]; then
+            tree=$(gh api "repos/$GITHUB_REPOSITORY/git/commits/$GITHUB_SHA" --jq .tree.sha)
+            hit=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?status=success&per_page=100" \
+              --jq "[.workflow_runs[] | select(.event != \"pull_request\" and .head_commit.tree_id == \"$tree\")][0].html_url // empty")
+            if [[ -n $hit ]]; then
+              echo "::notice title=One CI per tree::tree $tree already passed in $hit, so this run skips its jobs."
+              tested=true
+            fi
+          fi
+          echo "tested=$tested" >> "$GITHUB_OUTPUT"
+
+  drift:
+    name: Nightly drift (ubuntu)
+    # The nightly on a tree that already passed checks only what changes without a commit: the
+    # CRT + SDK files Microsoft serves at the pinned versions, and the advisory database.
+    needs: dedupe
+    if: github.event_name == 'schedule' && needs.dedupe.outputs.tested == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/toolchain
+      - run: docker compose run --rm xwin
+      - run: docker compose run --rm deny
+
+  linux:
+    name: T1 + T2 (ubuntu)
+    # Every other job needs this one, so skipping it skips the run.
+    needs: dedupe
+    if: needs.dedupe.outputs.tested != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
