@@ -495,6 +495,20 @@ impl Theme {
         }
     }
 
+    /// A state layer, [`Hover`](Tone::Hover) or [`Pressed`](Tone::Pressed) (ink at 6 or 4 %),
+    /// over a fill of `under`: in the ink that pairs with that fill. Primary text's everywhere but
+    /// on the batch bar's [`InverseFill`](Tone::InverseFill), whose ink is the other way round,
+    /// where primary text's color at 6 % wouldn't show (A3.5 (11)). Clear in high contrast,
+    /// which outlines instead ([`hover_outline`](Self::hover_outline)).
+    #[must_use]
+    pub const fn layer(&self, layer: Tone, under: Tone) -> Color {
+        let c = self.color(layer);
+        match under {
+            Tone::InverseFill => self.color(Tone::InverseText).alpha(c.a),
+            _ => c,
+        }
+    }
+
     /// `tone` as text or a glyph over a fill of `under`. Light and dark: the tone's own color,
     /// whose contrast on every fill it's used on is tested. High contrast: the color the system
     /// pairs with that fill.
@@ -560,6 +574,8 @@ pub mod tokens {
     pub mod stroke {
         /// The keyboard focus ring's width (doc 05 §6).
         pub const FOCUS: f32 = 2.0;
+        /// A hairline drawn as a box: the dividers between settings rows (A3.5 (15)).
+        pub const HAIRLINE: f32 = 1.0;
     }
 
     /// Menus, dropdown lists and tooltips (TD-0009 A1.10 item 1: the metrics of `WinUI`, until the
@@ -679,6 +695,9 @@ pub mod tokens {
         pub const PADDING: f32 = 16.0;
         /// The most lines of a log excerpt Details shows.
         pub const LOG_LINES: usize = 8;
+        /// Its buttons' least height, as a scan card's Details and a job card's Cancel are;
+        /// taller when the text size needs it.
+        pub const BUTTON_H: f32 = 32.0;
     }
 
     /// The batch selection bar (A3.5 (11)).
@@ -688,6 +707,10 @@ pub mod tokens {
         pub const PAD_Y: f32 = 10.0;
         /// Its buttons' least height; taller when the text size needs it.
         pub const BUTTON_H: f32 = 34.0;
+        /// The count's slot at 100 % text ("99,999 selected" in body semibold fits): a count that
+        /// changes inside it damages the count alone. It grows with Windows' text size, and a
+        /// longer count still widens it.
+        pub const COUNT_W: f32 = 104.0;
     }
 
     /// The info bar (A3.5 (14)).
@@ -705,6 +728,8 @@ pub mod tokens {
         /// The label and description's narrowest: where they'd get narrower, the row wraps its
         /// control under them.
         pub const TEXT_MIN_W: f32 = 240.0;
+        /// A window narrower than this puts every row's control under its text.
+        pub const NARROW: f32 = 600.0;
     }
 }
 
@@ -937,9 +962,59 @@ mod tests {
         pairs
     }
 
-    /// `stack`'s fills composited over `under`, in `theme`.
+    /// `stack`'s fills composited over `under`, in `theme`. A state layer is painted in the ink
+    /// of the fill under it ([`Theme::layer`]).
     fn flat(theme: &Theme, under: Color, stack: &[Tone]) -> Color {
-        stack.iter().fold(under, |c, t| theme.color(*t).over(c))
+        let mut fill = Tone::App;
+        stack.iter().fold(under, |c, &t| {
+            let color = if matches!(t, Tone::Hover | Tone::Pressed) {
+                theme.layer(t, fill)
+            } else {
+                fill = t;
+                theme.color(t)
+            };
+            color.over(c)
+        })
+    }
+
+    /// A quiet button on the batch bar shows its hover and press (A3.5 (11)): the state layer is
+    /// the bar's own ink, so it moves the fill as far as it does on a card. Elsewhere it's
+    /// primary text's, and high contrast paints none.
+    #[test]
+    fn a_state_layer_shows_on_the_inverse_fill() {
+        for theme in [Theme::LIGHT, Theme::DARK, Theme::LIGHT.glass()] {
+            for layer in [Tone::Hover, Tone::Pressed] {
+                let a = theme.color(layer).a;
+                assert_eq!(
+                    theme.layer(layer, Tone::InverseFill),
+                    theme.color(Tone::InverseText).alpha(a)
+                );
+                assert_eq!(theme.layer(layer, Tone::Surface), theme.color(layer));
+                let bar = theme.color(Tone::InverseFill);
+                let lit = theme.layer(layer, Tone::InverseFill).over(bar);
+                let card = theme.color(Tone::Surface).over(Color::hex(0xFF_FFFF));
+                let lit_card = theme.color(layer).over(card);
+                // How far the layer moves its fill, as a contrast ratio less one.
+                let moved = |a: Color, b: Color| contrast(a, b) - 1.0;
+                assert!(
+                    moved(lit, bar) >= moved(lit_card, card) / 2.0,
+                    "{:?} {layer:?}: {lit:?} on {bar:?}",
+                    theme.scheme()
+                );
+            }
+        }
+        let sys = SysColors {
+            window: Color::hex(0),
+            window_text: Color::hex(0xFF_FFFF),
+            highlight: Color::hex(0x1A_EBFF),
+            highlight_text: Color::hex(0),
+            hot_light: Color::hex(0xFF_FF00),
+            gray_text: Color::hex(0x3F_F23F),
+            btn_face: Color::hex(0),
+            btn_text: Color::hex(0xFF_FFFF),
+        };
+        let hc = Theme::high_contrast(sys);
+        assert_eq!(hc.layer(Tone::Hover, Tone::InverseFill).a, 0);
     }
 
     /// Doc 05 §6: WCAG 2.2 AA (4.5:1) for every text color on every background it's used on, in
