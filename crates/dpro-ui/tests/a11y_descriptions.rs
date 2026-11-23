@@ -42,7 +42,6 @@ fn a_tooltip_alone_is_the_description() {
 }
 
 #[test]
-#[ignore = "slice 6a: lands with the code"]
 fn a_description_wins_over_a_tooltip_and_a_hold_says_how_to_hold() {
     let mut run = Run::accessible(Shell::new());
     run.step(Step::Update(Msg::Drawer));
@@ -52,7 +51,6 @@ fn a_description_wins_over_a_tooltip_and_a_hold_says_how_to_hold() {
 }
 
 #[test]
-#[ignore = "slice 6a: lands with the code"]
 fn a_description_without_a_tooltip_shows_no_tooltip() {
     let mut ui = small();
     ui.build(|cx| {
@@ -69,7 +67,6 @@ fn a_description_without_a_tooltip_shows_no_tooltip() {
 }
 
 #[test]
-#[ignore = "slice 6a: lands with the code"]
 fn a_command_button_carries_its_accelerator() {
     let mut run = Run::accessible(Shell::new());
     let tree = run.ui.a11y_tree();
@@ -78,7 +75,6 @@ fn a_command_button_carries_its_accelerator() {
 }
 
 #[test]
-#[ignore = "slice 6a: lands with the code"]
 fn a_description_change_is_in_the_next_update() {
     let mut ui = small();
     let build = |ui: &mut Ui<u8>, d: &str| {

@@ -49,7 +49,6 @@ fn built() -> Ui<u8> {
 }
 
 #[test]
-#[ignore = "slice 6a: lands with the code"]
 fn a_check_boxs_children_are_left_out_of_the_tree() {
     let mut ui = built();
     let tree = ui.a11y_tree();
@@ -61,7 +60,6 @@ fn a_check_boxs_children_are_left_out_of_the_tree() {
 }
 
 #[test]
-#[ignore = "slice 6a: lands with the code"]
 fn a_named_buttons_children_are_left_out_of_the_tree() {
     let mut ui = built();
     let tree = ui.a11y_tree();

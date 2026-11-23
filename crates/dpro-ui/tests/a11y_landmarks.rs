@@ -65,7 +65,6 @@ fn shell_tree() -> TreeUpdate {
 }
 
 #[test]
-#[ignore = "slice 6a: lands with the code"]
 fn a_page_has_one_level_1_heading_its_title_and_sections_at_level_2() {
     let mut run = composites::Run::accessible(composites::Model::new());
     let found = headings(&run.ui.a11y_tree());
@@ -96,7 +95,6 @@ fn a_page_has_one_level_1_heading_its_title_and_sections_at_level_2() {
 }
 
 #[test]
-#[ignore = "slice 6a: lands with the code"]
 fn exactly_one_main_landmark_named_by_the_page_title() {
     let mut run = composites::Run::accessible(composites::Model::new());
     let found = landmarks(&run.ui.a11y_tree());
@@ -106,7 +104,6 @@ fn exactly_one_main_landmark_named_by_the_page_title() {
 }
 
 #[test]
-#[ignore = "slice 6a: lands with the code"]
 fn the_shells_landmarks_are_in_visual_order_and_regions_have_a_kind() {
     let found = landmarks(&shell_tree());
     let roles: Vec<Role> = found.iter().map(|(r, _, _)| *r).collect();
@@ -125,7 +122,6 @@ fn the_shells_landmarks_are_in_visual_order_and_regions_have_a_kind() {
 }
 
 #[test]
-#[ignore = "slice 6a: lands with the code"]
 fn heading_levels_are_clamped_to_1_through_9() {
     let mut ui: Ui<()> = Ui::new(
         Size { w: 400.0, h: 400.0 },

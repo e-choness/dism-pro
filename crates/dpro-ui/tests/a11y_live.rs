@@ -56,7 +56,6 @@ fn live_off_sets_nothing() {
 }
 
 #[test]
-#[ignore = "slice 6a: lands with the code"]
 fn a_label_and_a_named_container_carry_their_politeness_and_a_button_ignores_it() {
     for (live, want) in [
         (Live::Polite, AkLive::Polite),
@@ -72,7 +71,6 @@ fn a_label_and_a_named_container_carry_their_politeness_and_a_button_ignores_it(
 }
 
 #[test]
-#[ignore = "slice 6a: lands with the code"]
 fn a_live_nodes_text_change_is_in_the_next_update_and_its_politeness_change_too() {
     let mut ui = ui();
     build(&mut ui, "Scanning", Live::Polite);
