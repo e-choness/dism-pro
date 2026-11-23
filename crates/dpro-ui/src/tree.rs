@@ -282,6 +282,12 @@ pub struct Element<'s, M> {
     pub(crate) rare: u8,
     /// What only its role describes.
     pub(crate) extra: Extra<'s, M>,
+    /// Its heading level or landmark, and what [`a11y_text`](Self::a11y_text) is (TD-0009 A4.5),
+    /// which few elements have: zero on the rest. One byte, in the struct's padding.
+    pub(crate) a11y: A11yProps,
+    /// Its shortcut, its region's kind or a description beside its tooltip, as
+    /// [`a11y`](Self::a11y) says. An `Option`, whose `None` an element sets in one store.
+    pub(crate) a11y_text: Option<&'s str>,
 }
 
 /// [`Element::rare`]'s flags, which a node keeps as they were last built. (Measured on the shell
@@ -300,6 +306,12 @@ pub(crate) mod rare {
     pub(crate) const SCROLL_X: u8 = 16;
     pub(crate) const SCROLL_Y: u8 = 32;
     pub(crate) const SCROLL: u8 = SCROLL_X | SCROLL_Y;
+    /// Its `tip` is a [description](super::Element::describe) and shows no tooltip (TD-0009
+    /// A3.5 addition 4).
+    pub(crate) const DESC: u8 = 64;
+    /// A node's flag, never an element's, whose bit 128 stays free: its side slot holds A4.5's
+    /// properties (`a11y.rs`). In these flags, an update tests it with them at no cost.
+    pub(crate) const PROPS: u8 = 128;
 
     /// Whether what a node with flags `r` opens is open; `None` if it opens nothing.
     pub(crate) const fn expanded(r: u8) -> Option<bool> {
@@ -352,12 +364,7 @@ pub(crate) enum Extra<'s, M> {
     /// ([`glyph_value`]).
     Glyph(Icon),
 
-    /// A [live region](Element::live)'s politeness (A3.5 addition 5, A4.5; slice 6a's a11y
-    /// track).
-    #[expect(
-        dead_code,
-        reason = "slice 6a's a11y track keeps the politeness on the node"
-    )]
+    /// A [live region](Element::live)'s politeness (A3.5 addition 5, A4.5).
     Live(Live),
 }
 
@@ -400,6 +407,8 @@ impl<'s, M> Element<'s, M> {
             tip: "",
             rare: 0,
             extra: Extra::None,
+            a11y: A11yProps::NONE,
+            a11y_text: None,
         }
     }
 
@@ -773,9 +782,21 @@ impl<'s, M> Element<'s, M> {
     /// Text the toolkit shows in a tooltip while the pointer rests on the node, or at once when
     /// the keyboard focuses it ([`Ui::tooltip`](crate::Ui::tooltip)); assistive technology reads
     /// it as the node's description, whether it shows or not. A command's label and its
-    /// accelerator, or why it's disabled. Disabled nodes show theirs too.
+    /// accelerator, or why it's disabled. Disabled nodes show theirs too. A
+    /// [description](Self::describe), given before or after, is the description instead, and
+    /// the tooltip still shows, unless the node also has a [shortcut](Self::shortcut).
     #[must_use]
     pub fn tooltip(mut self, text: &'s str) -> Self {
+        if self.rare & rare::DESC != 0 {
+            // A description alone is kept where the tooltip goes: it moves beside it if there's
+            // room, and otherwise wins over it (A3.5 addition 4).
+            if text.is_empty() || self.a11y.text().is_some() {
+                return self;
+            }
+            self.a11y_text = Some(self.tip);
+            self.a11y = self.a11y.with_text(Some(A11yText::Description));
+            self.rare &= !rare::DESC;
+        }
         self.tip = text;
         self.rare = if text.is_empty() {
             self.rare & !rare::TIP
@@ -857,21 +878,48 @@ impl<M> Element<'_, M> {
 impl<'s, M> Element<'s, M> {
     /// The accessible description (UI Automation's `FullDescription`) without a tooltip: what a
     /// badge's word means, a clickable card's value and detail, how to hold a hold button. It wins
-    /// over a [tooltip](Self::tooltip)'s text, which is the description otherwise (A1).
+    /// over a [tooltip](Self::tooltip)'s text, which is the description otherwise (A1). A node
+    /// with a tooltip still shows it, given before or after (a disabled card's reason), unless
+    /// it also has a [shortcut](Self::shortcut); one without shows none. Empty, it changes
+    /// nothing.
     ///
-    /// Until the a11y track lands (it keeps the text in `tip` with a new `rare::DESC` flag), it
-    /// sets nothing.
+    /// Without a tooltip, it's kept where a tooltip would be, flagged so that nothing shows (A3.5
+    /// addition 4). Beside one, it's kept in [`Element::a11y_text`], which a shortcut takes
+    /// first: the description then wins over the tooltip, as it would alone.
     #[must_use]
-    pub fn describe(self, text: &'s str) -> Self {
-        let _ = text;
+    pub fn describe(mut self, text: &'s str) -> Self {
+        if text.is_empty() {
+            return self;
+        }
+        if self.rare & rare::TIP != 0
+            && matches!(self.a11y.text(), None | Some(A11yText::Description))
+        {
+            self.a11y_text = Some(text);
+            self.a11y = self.a11y.with_text(Some(A11yText::Description));
+        } else {
+            self.tip = text;
+            self.rare = self.rare & !rare::TIP | rare::DESC;
+        }
         self
+    }
+
+    /// Puts `text`, a shortcut or a region's kind, in [`Element::a11y_text`]. A description
+    /// there moves to `tip` and wins over the tooltip, so a client still reads it.
+    fn set_a11y_text(&mut self, what: A11yText, text: &'s str) {
+        if self.a11y.text() == Some(A11yText::Description) {
+            self.tip = self.a11y_text.unwrap_or_default();
+            self.rare = self.rare & !rare::TIP | rare::DESC;
+        }
+        self.a11y_text = Some(text);
+        self.a11y = self.a11y.with_text(Some(what));
     }
 
     /// Makes a label, or a named container, a live region: a client announces its text when it
     /// appears or changes, without a focus move (TD-0009 §4.4, A4.4). Toasts and status lines are
-    /// polite; a failure that comes unbidden is assertive.
+    /// polite; a failure that comes unbidden is assertive. [`Live::Off`] makes it no live region.
     ///
-    /// Other roles ignore it. Until the a11y track lands, a client doesn't see it.
+    /// Other roles ignore it, as do a glyph and a container whose arrow keys move through its
+    /// items.
     #[must_use]
     pub fn live(mut self, live: Live) -> Self {
         if matches!(self.role, Role::Label | Role::Container)
@@ -882,34 +930,182 @@ impl<'s, M> Element<'s, M> {
         self
     }
 
-    /// Makes a label a heading at `level`, 1 to 9 (clamped): a page's title is 1, its sections'
-    /// and cards' titles 2 (A4.4).
+    /// Makes a label a heading at `level`, 1 to 9: a page's title is 1, its sections' and cards'
+    /// titles 2 (A4.4). A level outside them is clamped, so 0 is 1. A client reads the label's
+    /// text as the heading's name.
     ///
-    /// Until the a11y track lands, it sets nothing.
+    /// Other roles ignore it: a button, a card that's a button included, can't hold a heading.
     #[must_use]
-    pub fn heading(self, level: u8) -> Self {
-        let _ = level;
+    pub fn heading(mut self, level: u8) -> Self {
+        if self.role == Role::Label {
+            self.a11y = self.a11y.with_place(level.clamp(1, 9));
+        }
         self
     }
 
-    /// Makes a named container a landmark that a screen reader jumps to (A4.4): the rail is
-    /// [`Landmark::Navigation`], the page [`Landmark::Main`] named by its title.
+    /// Makes a container a landmark that a screen reader jumps to (A4.4): the rail is
+    /// [`Landmark::Navigation`], the page [`Landmark::Main`] named by its title. Give it a
+    /// [name](Self::name): a [region](Landmark::Region) without one is no landmark. A client
+    /// sees the landmark in place of what the container would be (a list, a group).
     ///
-    /// Until the a11y track lands, it sets nothing.
+    /// Other roles ignore it.
     #[must_use]
-    pub fn landmark(self, landmark: Landmark<'s>) -> Self {
-        let _ = landmark;
+    pub fn landmark(mut self, landmark: Landmark<'s>) -> Self {
+        if self.role == Role::Container {
+            let (place, kind) = match landmark {
+                Landmark::Main => (LandmarkKind::Main, ""),
+                Landmark::Navigation => (LandmarkKind::Navigation, ""),
+                Landmark::Search => (LandmarkKind::Search, ""),
+                Landmark::Region { kind } => (LandmarkKind::Region, kind),
+            };
+            self.a11y = self.a11y.with_place(place.place());
+            if !kind.is_empty() {
+                self.set_a11y_text(A11yText::Kind, kind);
+            } else if self.a11y.text() == Some(A11yText::Kind) {
+                self.a11y_text = None;
+                self.a11y = self.a11y.with_text(None);
+            }
+        }
         self
     }
 
     /// The keys that run this command, as the command registry displays them ("Ctrl+K"): UI
-    /// Automation's `AcceleratorKey` (A4.5, patch 10).
+    /// Automation's `AcceleratorKey` (A4.5, patch 10). Empty, it changes nothing.
     ///
-    /// Until the a11y track lands, it sets nothing.
+    /// A container ignores it: it runs no command.
     #[must_use]
-    pub fn shortcut(self, keys: &'s str) -> Self {
-        let _ = keys;
+    pub fn shortcut(mut self, keys: &'s str) -> Self {
+        if !keys.is_empty() && self.role != Role::Container {
+            self.set_a11y_text(A11yText::Shortcut, keys);
+        }
         self
+    }
+}
+
+/// [`Element::a11y`]: A4.5's properties that few elements have, in one byte beside
+/// [`Element::a11y_text`]. A heading's level or a landmark, and what that text is; zero for
+/// none, so building a node tests this byte with its [`rare`] flags. The node keeps a copy in
+/// its side slot.
+///
+/// The byte and one string, rather than A4.5's `Option<A11yProps>` of strings: the byte fits the
+/// element's padding, so an element pays 16 bytes for them. (Measured on the shell fixture,
+/// `interact::event.unchanged` in C1: 115,040 Ir before slice 6a's a11y track; 119,081 with an
+/// `Option` of three strings and two bytes, 56 bytes on every element, tested on its own; 116,272
+/// with this byte tested with the `rare` flags and one string.) An element holds one string: a
+/// container's region kind, or a shortcut or a description beside a tooltip. A shortcut takes it
+/// from a description, which then wins over the tooltip, as it would alone (A3.5 addition 4).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct A11yProps(u8);
+
+impl A11yProps {
+    pub(crate) const NONE: Self = Self(0);
+    /// The low four bits: a label's heading level, 1 to 9, or a container's landmark,
+    /// [`LandmarkKind::place`]. A node is one or the other.
+    const PLACE: u8 = 0x0f;
+    /// Bits 4 and 5: what [`Element::a11y_text`] is, [`A11yText::bits`].
+    const TEXT: u8 = 0x30;
+
+    pub(crate) const fn is_none(self) -> bool {
+        self.0 == 0
+    }
+
+    /// Zero for none, so the reconciler tests them with the [`rare`] flags at once.
+    pub(crate) const fn bits(self) -> u8 {
+        self.0
+    }
+
+    /// Its heading level, 1 to 9; 0 for none.
+    pub(crate) const fn heading(self) -> u8 {
+        let place = self.0 & Self::PLACE;
+        if place < LandmarkKind::Main.place() {
+            place
+        } else {
+            0
+        }
+    }
+
+    pub(crate) const fn landmark(self) -> Option<LandmarkKind> {
+        let place = self.0 & Self::PLACE;
+        if place == LandmarkKind::Main.place() {
+            Some(LandmarkKind::Main)
+        } else if place == LandmarkKind::Navigation.place() {
+            Some(LandmarkKind::Navigation)
+        } else if place == LandmarkKind::Search.place() {
+            Some(LandmarkKind::Search)
+        } else if place == LandmarkKind::Region.place() {
+            Some(LandmarkKind::Region)
+        } else {
+            None
+        }
+    }
+
+    /// What [`Element::a11y_text`] is, if anything.
+    pub(crate) const fn text(self) -> Option<A11yText> {
+        let bits = self.0 & Self::TEXT;
+        if bits == A11yText::Shortcut.bits() {
+            Some(A11yText::Shortcut)
+        } else if bits == A11yText::Description.bits() {
+            Some(A11yText::Description)
+        } else if bits == A11yText::Kind.bits() {
+            Some(A11yText::Kind)
+        } else {
+            None
+        }
+    }
+
+    const fn with_place(self, place: u8) -> Self {
+        Self(self.0 & !Self::PLACE | place)
+    }
+
+    const fn with_text(self, text: Option<A11yText>) -> Self {
+        let bits = match text {
+            Some(t) => t.bits(),
+            None => 0,
+        };
+        Self(self.0 & !Self::TEXT | bits)
+    }
+}
+
+/// What [`Element::a11y_text`] is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum A11yText {
+    /// The keys that run it, as displayed.
+    Shortcut,
+    /// Its [description](Element::describe), beside a tooltip that shows its own text.
+    Description,
+    /// A [region](Landmark::Region)'s kind, the word a screen reader speaks for it.
+    Kind,
+}
+
+impl A11yText {
+    /// In [`A11yProps`]' bits 4 and 5.
+    const fn bits(self) -> u8 {
+        match self {
+            Self::Shortcut => 0x10,
+            Self::Description => 0x20,
+            Self::Kind => 0x30,
+        }
+    }
+}
+
+/// A [`Landmark`] without its region's kind, which [`Element::a11y_text`] holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LandmarkKind {
+    Main,
+    Navigation,
+    Search,
+    Region,
+}
+
+impl LandmarkKind {
+    /// In [`A11yProps`]' low four bits, past the heading levels.
+    const fn place(self) -> u8 {
+        match self {
+            Self::Main => 10,
+            Self::Navigation => 11,
+            Self::Search => 12,
+            Self::Region => 13,
+        }
     }
 }
 
@@ -998,8 +1194,8 @@ pub(crate) struct Node<M> {
     pub(crate) value: f32,
     /// A hold button: its Invoke message is in the Ui's hold table.
     pub(crate) hold: bool,
-    /// It has a group, a progress value, a hold or a dropdown's step, which an element without
-    /// them clears.
+    /// It has a group, a progress value, a hold, a dropdown's step or a politeness, which an
+    /// element without them clears.
     pub(crate) special: bool,
     /// Its slot in the Ui's side table (a tooltip, a dropdown's name and step); [`NIL`] if none.
     pub(crate) side: u32,
@@ -1012,9 +1208,16 @@ pub(crate) struct Node<M> {
     pub(crate) expanded: Option<bool>,
     /// Context requests on it or inside it ask for the model's menu.
     pub(crate) context: bool,
-    /// Its element's [`rare`] flags as last built: with these and the new element's both 0, an
-    /// update skips the popup state.
+    /// Its element's [`rare`] flags as last built, and [`rare::PROPS`]: with these and the new
+    /// element's both 0, an update skips the popup state and A4.5's properties.
     pub(crate) rare: u8,
+    /// How a client announces it as a [live region](Element::live): a label's or a container's
+    /// (A3.5 addition 5). Not `live`, which says the arena slot is in use.
+    pub(crate) politeness: Live,
+    /// A check box or a named button holds it, so it's left out of the accessibility tree and the
+    /// control is read once (A3.5 addition 9). Set when it's linked, and kept as the button's
+    /// name comes and goes.
+    pub(crate) presentational: bool,
 
     pub(crate) parent: u32,
     pub(crate) first: u32,
@@ -1073,6 +1276,8 @@ impl<M> Node<M> {
             expanded: None,
             context: false,
             rare: 0,
+            politeness: Live::Off,
+            presentational: false,
             parent: NIL,
             first: NIL,
             last: NIL,
@@ -1253,5 +1458,154 @@ mod tests {
             [value(-1.0), value(0.41), value(2.0), value(f32::NAN)],
             [0.0, 0.41, 1.0, 0.0]
         );
+    }
+
+    /// TD-0009 A4.5: the heading level, landmark, shortcut and a description beside a tooltip
+    /// cost an element 16 bytes over its 168 before slice 6a: their byte fits its padding, and
+    /// their string is one. A node keeps them in its side slot, flagged in its `rare`, and its
+    /// politeness and presentational flag fit its padding: it doesn't grow.
+    #[test]
+    fn the_a11y_properties_cost_an_element_a_string_and_a_node_nothing() {
+        use std::mem::size_of;
+        assert_eq!(size_of::<A11yProps>(), 1);
+        assert_eq!(size_of::<Element<'_, ()>>(), 168 + 16);
+        assert_eq!(size_of::<Element<'_, u64>>(), 184 + 16);
+        assert_eq!((size_of::<Node<()>>(), size_of::<Node<u64>>()), (216, 232));
+    }
+
+    /// The parts of an element that A3.5 addition 4 and A4.5 set: its `tip` and whether it shows,
+    /// and its A4.5 text, as what.
+    fn parts(el: &Element<'static, ()>) -> (&'static str, u8, Option<(A11yText, &'static str)>) {
+        (
+            el.tip,
+            el.rare & (rare::TIP | rare::DESC),
+            el.a11y
+                .text()
+                .map(|what| (what, el.a11y_text.unwrap_or_default())),
+        )
+    }
+
+    /// A3.5 addition 4: a description alone is kept in `tip`, flagged to show no tooltip. Beside
+    /// a tooltip, given before or after, it's kept in the A4.5 text and the tooltip keeps `tip`.
+    #[test]
+    fn a_description_and_a_tooltip_each_keep_their_text() {
+        let b = || Element::<()>::button(Key(1), "Apply", ());
+        assert_eq!(
+            parts(&b().describe("How to hold")),
+            ("How to hold", rare::DESC, None)
+        );
+        for both in [
+            b().tooltip("Hold it").describe("How to hold"),
+            b().describe("How to hold").tooltip("Hold it"),
+        ] {
+            assert_eq!(
+                parts(&both),
+                (
+                    "Hold it",
+                    rare::TIP,
+                    Some((A11yText::Description, "How to hold"))
+                )
+            );
+        }
+        // Empty text changes nothing.
+        assert_eq!(
+            parts(&b().tooltip("Hold it").describe("")),
+            ("Hold it", rare::TIP, None)
+        );
+        assert_eq!(
+            parts(&b().describe("How to hold").tooltip("")),
+            ("How to hold", rare::DESC, None)
+        );
+    }
+
+    /// A shortcut beside a tooltip and a description, in any order: the shortcut holds the A4.5
+    /// text, and the description wins over the tooltip, as it would alone, so a client reads both.
+    #[test]
+    fn a_shortcut_takes_the_text_and_the_description_wins_over_the_tooltip() {
+        let b = || Element::<()>::button(Key(1), "Apply", ());
+        let want = (
+            "How to hold",
+            rare::DESC,
+            Some((A11yText::Shortcut, "Ctrl+H")),
+        );
+        for all in [
+            b().tooltip("Hold it")
+                .describe("How to hold")
+                .shortcut("Ctrl+H"),
+            b().shortcut("Ctrl+H")
+                .tooltip("Hold it")
+                .describe("How to hold"),
+            b().describe("How to hold")
+                .shortcut("Ctrl+H")
+                .tooltip("Hold it"),
+            b().describe("How to hold")
+                .tooltip("Hold it")
+                .shortcut("Ctrl+H"),
+        ] {
+            assert_eq!(parts(&all), want);
+        }
+        assert_eq!(
+            parts(&b().tooltip("Hold it").shortcut("Ctrl+H")),
+            ("Hold it", rare::TIP, Some((A11yText::Shortcut, "Ctrl+H")))
+        );
+    }
+
+    #[test]
+    fn the_a11y_properties_apply_to_their_roles_only() {
+        let props = |el: Element<'static, ()>| (el.a11y, el.a11y_text.unwrap_or_default());
+        // A heading is a label's, clamped to 1 through 9.
+        let heading = |el: Element<'static, ()>| el.a11y.heading();
+        assert_eq!(heading(Element::text(Key(1), "Clean").heading(0)), 1);
+        assert_eq!(heading(Element::text(Key(1), "Clean").heading(12)), 9);
+        assert!(
+            Element::<()>::button(Key(1), "Clean", ())
+                .heading(1)
+                .a11y
+                .is_none()
+        );
+        // A landmark is a container's; a region keeps its kind, and another landmark drops it.
+        let region = Element::<()>::stack(Key(1))
+            .name("Changes")
+            .landmark(Landmark::Region { kind: "region" });
+        assert_eq!(region.a11y.landmark(), Some(LandmarkKind::Region));
+        assert_eq!(region.a11y.heading(), 0);
+        assert_eq!(parts(&region), ("", 0, Some((A11yText::Kind, "region"))));
+        let main = Element::<()>::stack(Key(1))
+            .landmark(Landmark::Region { kind: "region" })
+            .landmark(Landmark::Main);
+        assert_eq!(main.a11y.landmark(), Some(LandmarkKind::Main));
+        assert_eq!(parts(&main), ("", 0, None));
+        assert_eq!(
+            props(Element::text(Key(1), "Clean").landmark(Landmark::Main)),
+            (A11yProps::NONE, "")
+        );
+        // A shortcut goes on anything but a container; an empty one sets nothing. A heading and
+        // a shortcut share the byte.
+        assert_eq!(
+            props(Element::button(Key(1), "Go", ()).shortcut("")),
+            (A11yProps::NONE, "")
+        );
+        assert_eq!(
+            props(Element::stack(Key(1)).shortcut("Ctrl+G")),
+            (A11yProps::NONE, "")
+        );
+        let both = Element::<()>::text(Key(1), "Go")
+            .heading(2)
+            .shortcut("Ctrl+G");
+        assert_eq!(both.a11y.heading(), 2);
+        assert_eq!(parts(&both).2, Some((A11yText::Shortcut, "Ctrl+G")));
+        // A live region is a label's or a container's.
+        assert!(matches!(
+            Element::<()>::button(Key(1), "Go", ())
+                .live(Live::Polite)
+                .extra,
+            Extra::None
+        ));
+        assert!(matches!(
+            Element::<()>::text(Key(1), "Ready")
+                .live(Live::Assertive)
+                .extra,
+            Extra::Live(Live::Assertive)
+        ));
     }
 }

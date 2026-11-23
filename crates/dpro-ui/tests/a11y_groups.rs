@@ -1,6 +1,10 @@
 //! What a client sees of slice 6a's new groups (TD-0009 A3.5 additions 7 and 8): a toolbar is a
 //! `ToolBar`; suggestions are a list box whose options are list box options, each placed among the
 //! options alone (`PositionInSet` and `SizeOfSet` skip a header).
+//!
+//! As AccessKit has them: an option's position is zero-based (the adapter adds one for UI
+//! Automation, as for a table's rows), and the set's size is on the list, where the adapter reads
+//! it for each option.
 
 #![allow(missing_docs)]
 
@@ -63,19 +67,19 @@ fn suggestions_are_a_list_box() {
 }
 
 #[test]
-#[ignore = "slice 6a: lands with the code"]
 fn each_suggestion_is_placed_among_the_options_alone() {
     let mut ui = built();
     let tree = ui.a11y_tree();
+    let list = node(&ui, &tree, &[LIST]).expect("the list");
+    assert_eq!(list.size_of_set(), Some(3), "the header isn't counted");
     for i in 0..3_u64 {
         let option = node(&ui, &tree, &[LIST, Key::index(i)]).expect("an option");
         assert_eq!(option.role(), Role::ListBoxOption);
         assert_eq!(
             option.position_in_set(),
-            Some(usize::try_from(i).expect("small") + 1),
+            Some(usize::try_from(i).expect("small")),
             "option {i}"
         );
-        assert_eq!(option.size_of_set(), Some(3), "option {i}");
     }
     let selected: Vec<_> = (0..3_u64)
         .filter(|i| {

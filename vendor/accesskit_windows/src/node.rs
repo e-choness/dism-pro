@@ -275,8 +275,60 @@ impl NodeWrapper<'_> {
     }
 
     fn localized_control_type(&mut self) -> Option<StrWrapper<'_>> {
+        // dpro: a custom landmark's role description is its landmark type, and its control type
+        // keeps UI Automation's word (PATCHES.md, 9).
+        if self.is_custom_landmark() {
+            return None;
+        }
         self.node
             .role_description()
+            .map(|s| StrWrapper::new(s, self.string_buffer))
+    }
+
+    // dpro: headings, landmarks and accelerator keys (PATCHES.md, 8-10; TD-0009 A4.5).
+
+    /// A named region with a role description: UI Automation's custom landmark, whose type is
+    /// the role description. Custom requires LocalizedLandmarkType, so a region without one, or
+    /// without a name, is no landmark.
+    fn is_custom_landmark(&self) -> bool {
+        self.node.role() == Role::Region
+            && self.node.has_label()
+            && self.node.role_description().is_some()
+    }
+
+    /// A heading's level, 1 to 9: AccessKit's level is zero-based, and a deeper one is reported
+    /// as 9. Other roles, and a heading without a level, have none.
+    fn heading_level(&self) -> Option<i32> {
+        if self.node.role() != Role::Heading {
+            return None;
+        }
+        let level = i32::try_from(self.node.level()?.min(8)).ok()?;
+        Some(HeadingLevel1.0 + level)
+    }
+
+    fn landmark_type(&self) -> Option<i32> {
+        match self.node.role() {
+            Role::Main => Some(UIA_MainLandmarkTypeId.0),
+            Role::Navigation => Some(UIA_NavigationLandmarkTypeId.0),
+            Role::Search => Some(UIA_SearchLandmarkTypeId.0),
+            Role::Region if self.is_custom_landmark() => Some(UIA_CustomLandmarkTypeId.0),
+            _ => None,
+        }
+    }
+
+    fn localized_landmark_type(&mut self) -> Option<StrWrapper<'_>> {
+        if !self.is_custom_landmark() {
+            return None;
+        }
+        self.node
+            .role_description()
+            .map(|s| StrWrapper::new(s, self.string_buffer))
+    }
+
+    fn accelerator_key(&mut self) -> Option<StrWrapper<'_>> {
+        self.node
+            .data()
+            .keyboard_shortcut()
             .map(|s| StrWrapper::new(s, self.string_buffer))
     }
 
@@ -715,6 +767,10 @@ impl NodeWrapper<'_> {
     }
 
     fn level(&self) -> Option<i32> {
+        // dpro: a heading reports its HeadingLevel instead (PATCHES.md, 8).
+        if self.node.role() == Role::Heading {
+            return None;
+        }
         self.node
             .level()
             .and_then(|level| level.checked_add(1))
@@ -1864,7 +1920,12 @@ properties! {
     (UIA_PositionInSetPropertyId, position_in_set),
     (UIA_SizeOfSetPropertyId, size_of_set),
     (UIA_AriaPropertiesPropertyId, aria_properties),
-    (UIA_IsDialogPropertyId, is_dialog)
+    (UIA_IsDialogPropertyId, is_dialog),
+    // dpro: headings, landmarks and accelerator keys (PATCHES.md, 8-10).
+    (UIA_HeadingLevelPropertyId, heading_level),
+    (UIA_LandmarkTypePropertyId, landmark_type),
+    (UIA_LocalizedLandmarkTypePropertyId, localized_landmark_type),
+    (UIA_AcceleratorKeyPropertyId, accelerator_key)
 }
 
 patterns! {
