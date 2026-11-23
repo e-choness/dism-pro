@@ -74,7 +74,8 @@ pub enum Role {
     /// How far a job has come, as a bar: a fraction from 0 to 1. Not interactive.
     Progress,
     /// A [menu](Element::menu)'s item, or a dropdown list's [option](Element::option): its
-    /// message invokes or picks it. Hovering it focuses it.
+    /// message invokes or picks it. Hovering it focuses it, except in a
+    /// [suggestion list](Group::Suggestions), whose options never take focus.
     MenuItem,
     /// A [dropdown](Element::combo): shows its value, and its message opens its list.
     ComboBox,
@@ -133,10 +134,9 @@ pub enum Group {
     Rows,
     /// A list box whose [options](Element::option) never take focus (TD-0009 A3.5 addition 7):
     /// the palette's results. Hover only paints; a click sends the option's message and keyboard
-    /// focus stays where it was (the field). A client sees a list box of options, each placed
+    /// focus stays where it was (the field). Tab skips it, and the field that drives it moves the
+    /// highlight with its [step](Element::step). A client sees a list box of options, each placed
     /// among the options alone, so headers don't count.
-    ///
-    /// Slice 6a's input track gives it that behavior; until then it roves as a list does.
     Suggestions,
     /// A [toolbar](Element::toolbar) (addition 8): one Tab stop; Left and Right move focus through
     /// its items without wrapping, and Home and End go to its ends. A client sees a toolbar.
@@ -321,12 +321,14 @@ pub(crate) mod rare {
 #[derive(Debug)]
 pub(crate) enum Extra<'s, M> {
     None,
-    /// A field's accessible name, what it shows while it's empty, and its edits as the view's
-    /// messages (`None` for a read-only field).
+    /// A field's accessible name, what it shows while it's empty, its edits as the view's
+    /// messages (`None` for a read-only field), and what Up (`true`, more) and Down send
+    /// (TD-0009 A3.5 addition 6).
     Field {
         label: &'s str,
         placeholder: &'s str,
         on_edit: Option<fn(TextEdit) -> M>,
+        step: Option<fn(bool) -> M>,
     },
     /// A container whose items the arrow keys move through.
     Group(Group),
@@ -558,11 +560,17 @@ impl<'s, M> Element<'s, M> {
         }
     }
 
-    /// What Up and Down send while a [dropdown](Self::combo) is closed and focused: `step(true)`
-    /// for the next option, `step(false)` for the one before. Other roles ignore it.
+    /// What Up and Down send instead of passing on:
+    /// - while a [dropdown](Self::combo) is closed and focused, `step(true)` on Down for the next
+    ///   option, `step(false)` on Up for the one before;
+    /// - while a [field](Self::field) is focused, `step(true)` on Up for more (a number's next
+    ///   value, a list's highlight moving up), `step(false)` on Down for less (TD-0009 A3.5
+    ///   addition 6). Page Up and Page Down still pass on.
+    ///
+    /// Other roles ignore it.
     #[must_use]
     pub fn step(mut self, on_step: fn(bool) -> M) -> Self {
-        if let Extra::Combo { step, .. } = &mut self.extra {
+        if let Extra::Combo { step, .. } | Extra::Field { step, .. } = &mut self.extra {
             *step = Some(on_step);
         }
         self
@@ -671,8 +679,9 @@ impl<'s, M> Element<'s, M> {
 
     /// A one-line text field showing `value`. Each edit reaches the view as `on_edit(edit)`; the
     /// view applies it to its copy ([`TextEdit::apply`]) and passes the result as `value` next
-    /// frame. Give it a [name](Self::name) for assistive technology, and a
-    /// [placeholder](Self::placeholder) if it's empty at first.
+    /// frame. Give it a [name](Self::name) for assistive technology, a
+    /// [placeholder](Self::placeholder) if it's empty at first, and a [step](Self::step) if Up and
+    /// Down change its value.
     #[must_use]
     pub fn field(key: Key, value: &'s str, on_edit: fn(TextEdit) -> M) -> Self {
         Self {
@@ -680,6 +689,7 @@ impl<'s, M> Element<'s, M> {
                 label: "",
                 placeholder: "",
                 on_edit: Some(on_edit),
+                step: None,
             },
             // A text box: a surface inside a border.
             look: Look {
@@ -821,8 +831,8 @@ impl<M> Element<'_, M> {
 /// [step](Self::step) is its addition 6.
 impl<M> Element<'_, M> {
     /// A toolbar, in a row: one Tab stop, Left and Right move focus through its items without
-    /// wrapping, Home and End go to its ends ([`Group::Toolbar`]). Name it when a page can show
-    /// more than one.
+    /// wrapping (along whichever axis its style gives it), Home and End go to its ends
+    /// ([`Group::Toolbar`]). Name it when a page can show more than one.
     #[must_use]
     pub fn toolbar(key: Key) -> Self {
         Self {
@@ -837,7 +847,9 @@ impl<M> Element<'_, M> {
 
     /// A list of suggestions under a field (the palette's results): [options](Self::option)
     /// that never take focus, so the field keeps it while one is highlighted
-    /// ([`Group::Suggestions`]). Name it; the field that drives it stays the Tab stop.
+    /// ([`Group::Suggestions`]). Hovering one only paints it, a click sends its message, and Tab
+    /// skips the list. Name it; the field that drives it stays the Tab stop, and its
+    /// [step](Self::step) moves the highlight.
     #[must_use]
     pub fn suggestions(key: Key) -> Self {
         Self {
@@ -995,7 +1007,8 @@ pub(crate) struct Node<M> {
     /// It has a group, a progress value, a hold or a dropdown's step, which an element without
     /// them clears.
     pub(crate) special: bool,
-    /// Its slot in the Ui's side table (a tooltip, a dropdown's name and step); [`NIL`] if none.
+    /// Its slot in the Ui's side table (a tooltip, a dropdown's name and step, a field's step);
+    /// [`NIL`] if none.
     pub(crate) side: u32,
     /// A scroll viewport's slot in the Ui's scroll table (`scroll.rs`); [`NIL`] for other nodes.
     pub(crate) scroll: u32,
