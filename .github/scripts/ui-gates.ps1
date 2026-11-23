@@ -132,7 +132,9 @@ $null = New-Item -ItemType Directory -Force $Out
 $Out = (Resolve-Path $Out).Path
 # The parameters are fixed from here on. PowerShell's names ignore case: Value cells' `$size = ...`
 # once replaced -Size, and the Data table's shell then got `--size '37.0 MB'` and exited.
-Get-Variable -Name Bin, Out, Rounds, Size | ForEach-Object { $_.Options = $_.Options -bor [Management.Automation.ScopedItemOptions]::ReadOnly }
+# (Set-Variable, not .Options: CI calls the script from another, where parameters are optimized
+# locals whose Options can't be set.)
+Set-Variable -Name Bin, Out, Rounds, Size -Option ReadOnly -Force
 $exe = [ordered]@{ bare = Join-Path $Bin 'bare_window.exe'; shell = Join-Path $Bin 'shell.exe' }
 foreach ($path in $exe.Values) {
     if (-not (Test-Path $path)) { throw "missing $path (docker compose run --rm t3-tools builds it)" }
