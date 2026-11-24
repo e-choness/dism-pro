@@ -5,9 +5,11 @@
 //! different program.
 //!
 //! `shell [--size WxH] [--materials auto|solid|glass] [--ui-probe first-frame|idle --probe-out
-//! <file>] [--rows N]`: the arguments of dpro-win's `bare_window`, which `.github/scripts/ui-gates.ps1`
-//! measures it against, and the table's data rows (G1's "Data table" walks 100,000). It follows
-//! Windows' theme, high contrast and animation settings live.
+//! <file>] [--rows N] [--job-ms N]`: the arguments of dpro-win's `bare_window`, which
+//! `.github/scripts/ui-gates.ps1` measures it against, the table's data rows (G1's "Data table"
+//! walks 100,000), and how long the drawer's job runs from the drawer opening, its progress
+//! announced (G1's "Accessibility depth: notifications"). It follows Windows' theme, high contrast
+//! and animation settings live.
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
@@ -32,7 +34,7 @@ mod win {
     use std::{ffi::OsString, process::ExitCode};
 
     use dpro_ui::{
-        Cx, Key, Popup, SizeUnits,
+        Cx, Key, Notice, Popup, SizeUnits,
         materials::GlassPref,
         platform::{self, DirectWrite, Host, Model},
     };
@@ -69,10 +71,18 @@ mod win {
         fn size_units(&self) -> SizeUnits {
             shell::units()
         }
+
+        fn wake(&mut self, now_ms: u64) -> Option<u64> {
+            self.job_wake(now_ms)
+        }
+
+        fn notices(&mut self, f: impl FnMut(Notice<'_>)) {
+            Shell::notices(self, f);
+        }
     }
 
     pub(crate) fn main() -> ExitCode {
-        let Some((rows, rest)) = rows(std::env::args_os().skip(1)) else {
+        let Some((rows, job_ms, rest)) = rows(std::env::args_os().skip(1)) else {
             return ExitCode::from(2);
         };
         let Ok(args) = Args::parse(rest) else {
@@ -94,7 +104,10 @@ mod win {
             ForceMaterials::Solid => GlassPref::Off,
             ForceMaterials::Glass => GlassPref::Force,
         };
-        let shell = rows.map_or_else(Shell::new, Shell::with_rows);
+        let mut shell = rows.map_or_else(Shell::new, Shell::with_rows);
+        if let Some(ms) = job_ms {
+            shell = shell.with_job_ms(ms);
+        }
         let host = Host::new(shell, Box::new(text), glass);
         match platform::run(&options, host) {
             Ok(()) => ExitCode::SUCCESS,
@@ -102,18 +115,23 @@ mod win {
         }
     }
 
-    /// `--rows N`, the shell's data rows, taken out of the arguments; the rest are the probe's.
-    /// `None` if N is missing or not a number.
-    fn rows(mut args: impl Iterator<Item = OsString>) -> Option<(Option<usize>, Vec<OsString>)> {
+    /// `--rows N`, the shell's data rows, and `--job-ms N`, its drawer job's length, taken out of
+    /// the arguments; the rest are the probe's. `None` if an N is missing or not a number.
+    fn rows(
+        mut args: impl Iterator<Item = OsString>,
+    ) -> Option<(Option<usize>, Option<u64>, Vec<OsString>)> {
         let mut rows = None;
+        let mut job_ms = None;
         let mut rest = Vec::new();
         while let Some(arg) = args.next() {
             if arg == "--rows" {
                 rows = Some(args.next()?.to_str()?.parse().ok()?);
+            } else if arg == "--job-ms" {
+                job_ms = Some(args.next()?.to_str()?.parse().ok()?);
             } else {
                 rest.push(arg);
             }
         }
-        Some((rows, rest))
+        Some((rows, job_ms, rest))
     }
 }
