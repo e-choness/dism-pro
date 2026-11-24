@@ -156,9 +156,11 @@ pub struct Window {
 /// Tests run on threads of their own, and under Wine (T2) another test's new window takes the
 /// activation, which dismisses this test's popups as the user's click elsewhere would. Each
 /// window holds one lock while its thread has any (a popup's owner already does), so the window
-/// tests run one after another. T3 runs them with `--test-threads 1` for the same reason.
+/// tests run one after another. T3 runs them with `--test-threads 1` for the same reason. Every
+/// `file_dialog` test that enters COM takes it too (slice 6e): under Wine 10, a thread entering
+/// and leaving apartments while another shows the dialog can hang both.
 #[cfg(test)]
-mod serial {
+pub(super) mod serial {
     use std::{
         cell::RefCell,
         sync::{Mutex, MutexGuard, PoisonError},
@@ -173,11 +175,11 @@ mod serial {
     }
 
     #[derive(Debug)]
-    pub(super) struct Serial(());
+    pub(in crate::gui) struct Serial(());
 
     impl Serial {
         /// Waits for other threads' windows to go, unless this thread holds the lock already.
-        pub(super) fn take() -> Self {
+        pub(in crate::gui) fn take() -> Self {
             HELD.with(|held| {
                 let mut held = held.borrow_mut();
                 if held.0 == 0 {
@@ -1237,12 +1239,16 @@ impl State {
 
     /// The pick the handler asked for, now that it has returned and nothing of it is borrowed
     /// (TD-0009 A3.5 (12)): the dialog's modal loop dispatches this window's messages meanwhile,
-    /// and its answer goes to [`Handler::picked`]. Nothing once the window is going.
+    /// and its answer goes to [`Handler::picked`]. Nothing once the window is going, and no
+    /// answer if it went while the dialog was up (a close that the modal loop dispatched, which
+    /// takes the dialog with it as an owned window).
     fn run_pick(&self, hwnd: HWND) {
         if self.kind != Kind::Main || self.life.get() != Life::Alive {
             return;
         }
-        if let Some(picked) = self.picks.run(hwnd) {
+        if let Some(picked) = self.picks.run(hwnd)
+            && self.life.get() == Life::Alive
+        {
             self.dispatch_as(hwnd, Surface::Main, |h, cx| h.picked(picked, cx));
         }
     }
@@ -2833,7 +2839,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "slice 6e: lands with the code"]
     fn the_dialog_s_modal_loop_still_dispatches_the_window_s_messages() {
         let (window, log) = open_picker();
         let closer = crate::gui::file_dialog::tests::close_with_esc_after(
@@ -2857,6 +2862,30 @@ mod tests {
             );
         } else {
             eprintln!("window: no system dialog here, so no modal loop to test: {log:?}");
+            assert_eq!(
+                log,
+                ["asked true", "again false", "picked unavailable after"]
+            );
+        }
+        drop(window);
+        pump_until(|| true);
+    }
+
+    /// A window closed while its dialog is up (the modal loop dispatches the close) takes the
+    /// dialog with it, and hears no answer: there's no window to give it to.
+    #[test]
+    fn a_window_closed_while_its_dialog_is_up_hears_no_answer() {
+        let (window, log) = open_picker();
+        let closer =
+            crate::gui::file_dialog::tests::close_owner_when_shown(PICK_TITLE, window.hwnd);
+        // SAFETY: as above.
+        unsafe { SendMessageW(window.hwnd, WM_CHAR, 0x70, 0) };
+        let found = closer.finish();
+        let log = log.borrow().clone();
+        if found {
+            assert_eq!(log, ["asked true", "again false"]);
+            assert_eq!(window.life.get(), Life::Gone, "the close was heard");
+        } else {
             assert_eq!(
                 log,
                 ["asked true", "again false", "picked unavailable after"]

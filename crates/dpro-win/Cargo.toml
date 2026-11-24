@@ -21,12 +21,27 @@ accesskit_windows = { workspace = true, optional = true }
 
 [features]
 # The GUI's Win32 platform (TD-0009 §5.1): window, message loop, presenters, DirectWrite text,
-# UI Automation, G1 probes. dismpro.exe needs it; the CLI and the broker don't.
-gui = ["dep:windows", "dep:windows-core", "dep:accesskit", "dep:accesskit_windows"]
+# UI Automation, G1 probes. dismpro.exe needs it; the CLI and the broker don't. The system file
+# dialog (TD-0009 A3.5 (12)) takes COM's apartment and class-context constants and the dialog's
+# filter spec from windows-sys; its interfaces are declared in `gui/file_dialog.rs`, and ole32
+# and shell32 are loaded at run time.
+gui = [
+    "dep:windows",
+    "dep:windows-core",
+    "dep:accesskit",
+    "dep:accesskit_windows",
+    "windows-sys/Win32_System_Com",
+    "windows-sys/Win32_UI_Shell_Common",
+]
 
 # TD-0009 §7 U4, U6, U7: the raw-API window that G1's startup and idle ratios divide by.
 [[example]]
 name = "bare_window"
+required-features = ["gui"]
+
+# TD-0009 A3.5 (12), A3.9: G1's picker dialog check, the system file dialog modal to a window.
+[[example]]
+name = "file_dialog_t3"
 required-features = ["gui"]
 
 [lints]
