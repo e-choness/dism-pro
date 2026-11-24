@@ -491,7 +491,11 @@ impl<M> Ui<M> {
     /// what a page change focuses in.
     pub(crate) fn landmark_of(&self, i: u32) -> Option<LandmarkKind> {
         let n = &self.nodes[i as usize];
-        if !n.has_props() || n.role != Role::Container || n.group.is_some() {
+        if !n.has_props()
+            || n.role != Role::Container
+            || n.group.is_some()
+            || self.is_table_header(i)
+        {
             return None;
         }
         let kind = self.sides.get(n.side as usize)?.props.props.landmark()?;

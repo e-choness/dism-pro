@@ -20,7 +20,8 @@
 //! pushing: a scope removed by a page change would leave the stack holding its entry, and its
 //! give-back runs in the build that removes it, before the successor rule, so focus moves once.
 //!
-//! None of it runs on a steady frame: a removal pays a few comparisons, and a build one.
+//! None of it runs on a steady frame: a removal pays a few comparisons, a reconcile's move with
+//! focus set a walk up from the focus, and a build one comparison.
 
 use crate::{
     Key, NodeId, Ui,
@@ -47,19 +48,6 @@ impl FocusMemo {
         keys: [Key(0); DEPTH],
         len: 0,
     };
-
-    /// A memo of the node at `path` from the root, as [`Ui::find`] takes it (A5's
-    /// `FocusTarget::Key`); `None` past depth 16.
-    #[must_use]
-    pub fn from_keys(path: &[Key]) -> Option<Self> {
-        let len = u8::try_from(path.len())
-            .ok()
-            .filter(|&n| usize::from(n) <= DEPTH)?;
-        let mut memo = Self::EMPTY;
-        memo.keys[..path.len()].copy_from_slice(path);
-        memo.len = len;
-        Some(memo)
-    }
 
     /// The keys from the root, the root's child first.
     #[must_use]
