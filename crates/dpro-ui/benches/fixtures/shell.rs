@@ -24,8 +24,8 @@ use std::sync::OnceLock;
 use dpro_ui::{
     Align, Axis, Bytes, Canvas, Cells, ClipboardRequest, Column, ColumnId, ColumnLayout,
     ColumnMenuLabels, Cx, Dim, Element, FakeText, Input, Insets, InvariantFormats, Justify, Key,
-    KeyCode, KeyEvent, Look, Mods, Motion, Order, Point, Popup, PopupKind, Radius, Row, RowKey,
-    ScrollBar, Size, SizeUnits, Status, Style, TABLE_BODY, TABLE_HEADER, Table, TableEvent,
+    KeyCode, KeyEvent, Landmark, Look, Mods, Motion, Order, Point, Popup, PopupKind, Radius, Row,
+    RowKey, ScrollBar, Size, SizeUnits, Status, Style, TABLE_BODY, TABLE_HEADER, Table, TableEvent,
     TextEdit, TextStyle, Theme, Tone, Track, Tri, Ui, UnixMillis, accesskit::TreeUpdate, tokens,
 };
 
@@ -126,6 +126,13 @@ const COLUMN_MENU: ColumnMenuLabels<'static> = ColumnMenuLabels {
 pub(crate) const PROPERTIES_TIP: &str = "Not available for this program";
 /// The header's drawer button's tooltip.
 pub(crate) const DRAWER_TIP: &str = "Every change before it applies";
+/// Its accelerator, as the command registry displays it (TD-0009 A4.5's `shortcut`).
+pub(crate) const DRAWER_KEYS: &str = "Ctrl+Shift+R";
+/// How to hold Hold to apply (`a11y-hold-description`, A4.4), its description.
+pub(crate) const HOLD_DESCRIPTION: &str =
+    "Press and hold Space or Enter, or the mouse button, until the bar fills";
+/// The drawer's landmark kind (`a11y-landmark-region`, resolved).
+pub(crate) const REGION: &str = "region";
 /// One frame at 60 Hz, rounded down to whole milliseconds.
 pub(crate) const FRAME_MS: u64 = 16;
 
@@ -624,7 +631,8 @@ pub(crate) fn view(s: &Shell, cx: &mut Cx<'_, Msg>) {
                 .style(sized(32.0, 16.0))
                 .text_style(STRONG)
                 .look(Look::PRIMARY)
-                .tooltip(DRAWER_TIP),
+                .tooltip(DRAWER_TIP)
+                .shortcut(DRAWER_KEYS),
             );
         },
     );
@@ -648,30 +656,44 @@ pub(crate) fn view(s: &Shell, cx: &mut Cx<'_, Msg>) {
     );
 }
 
-/// A list: one Tab stop, the arrow keys move through its pages, Enter or Space opens one.
+/// A list: one Tab stop, the arrow keys move through its pages, Enter or Space opens one. A plain
+/// container around it is the Navigation landmark, as a web `<nav>` holds a `<ul>`, so the list
+/// keeps its role and a screen reader reads a page's place in it (TD-0009 A4.5, A4.9's N-2). The
+/// container is a row that stretches the list, and as wide as it, so the list is where it was.
 fn rail(s: &Shell, cx: &mut Cx<'_, Msg>) {
     cx.add_with(
-        Element::list(Key::name("rail"))
+        Element::stack(Key::name("nav"))
             .style(Style {
-                width: Dim::Fixed(200.0),
-                padding: Insets::all(8.0),
-                align: Align::Stretch,
-                ..column(4.0)
+                axis: Axis::Row,
+                ..Style::default()
             })
-            .look(Look {
-                fill: Some(Tone::Subtle),
-                ..Look::PLAIN
-            })
-            .name("Pages"),
+            .name("Pages")
+            .landmark(Landmark::Navigation),
         |cx| {
-            for (p, label) in (0..RAIL).zip(PAGES) {
-                cx.add(
-                    Element::button(Key::index(u64::from(p)), label, Msg::Page(p))
-                        .style(sized(36.0, 12.0))
-                        .look(control((p == s.page).then_some(Tone::Selected)))
-                        .selected(p == s.page),
-                );
-            }
+            cx.add_with(
+                Element::list(Key::name("rail"))
+                    .style(Style {
+                        width: Dim::Fixed(200.0),
+                        padding: Insets::all(8.0),
+                        align: Align::Stretch,
+                        ..column(4.0)
+                    })
+                    .look(Look {
+                        fill: Some(Tone::Subtle),
+                        ..Look::PLAIN
+                    })
+                    .name("Pages"),
+                |cx| {
+                    for (p, label) in (0..RAIL).zip(PAGES) {
+                        cx.add(
+                            Element::button(Key::index(u64::from(p)), label, Msg::Page(p))
+                                .style(sized(36.0, 12.0))
+                                .look(control((p == s.page).then_some(Tone::Selected)))
+                                .selected(p == s.page),
+                        );
+                    }
+                },
+            );
         },
     );
 }
@@ -792,7 +814,8 @@ fn drawer(s: &Shell, cx: &mut Cx<'_, Msg>) {
                 ..column(6.0)
             })
             .look(card(Radius::Drawer))
-            .name("Changes"),
+            .name("Changes")
+            .landmark(Landmark::Region { kind: REGION }),
         |cx| {
             for i in 0..DRAWER_ROWS {
                 let cells = &s.cells[usize::try_from(i).unwrap_or(0)];
@@ -837,7 +860,8 @@ fn drawer(s: &Shell, cx: &mut Cx<'_, Msg>) {
                             .style(sized(36.0, 16.0))
                             .text_style(STRONG)
                             .look(Look::DANGER)
-                            .tooltip("Hold until the bar fills to apply"),
+                            .tooltip("Hold until the bar fills to apply")
+                            .describe(HOLD_DESCRIPTION),
                     );
                 },
             );
@@ -866,9 +890,14 @@ fn summary(s: &Shell, cx: &mut Cx<'_, Msg>) {
                 align: Align::Stretch,
                 ..column(8.0)
             })
-            .name(title),
+            .name(title)
+            .landmark(Landmark::Main),
         |cx| {
-            cx.add(Element::text(Key::name("heading"), title).text_style(TITLE));
+            cx.add(
+                Element::text(Key::name("heading"), title)
+                    .text_style(TITLE)
+                    .heading(1),
+            );
             for (i, (what, size)) in (0..).zip(CARDS) {
                 cx.add_with(
                     Element::stack(Key::index(i))
@@ -909,9 +938,14 @@ fn settings(s: &Shell, cx: &mut Cx<'_, Msg>) {
                 align: Align::Start,
                 ..column(8.0)
             })
-            .name("Settings"),
+            .name("Settings")
+            .landmark(Landmark::Main),
         |cx| {
-            cx.add(Element::text(Key::name("heading"), "Appearance").text_style(TITLE));
+            cx.add(
+                Element::text(Key::name("heading"), "Appearance")
+                    .text_style(TITLE)
+                    .heading(2),
+            );
             cx.add_with(
                 Element::radios(Key::name("theme"))
                     .name("Theme")
@@ -1462,6 +1496,15 @@ impl Run {
         [Key::name("start-pages"), Key::index(p)]
     }
 
+    /// The rail's list of pages, its path from the root: in the rail's Navigation landmark.
+    pub(crate) const RAIL_LIST: [Key; 3] = [Key::name("body"), Key::name("nav"), Key::name("rail")];
+
+    /// Page `p`'s item in the rail, its path from the root.
+    pub(crate) fn page(p: u64) -> [Key; 4] {
+        let [body, nav, rail] = Self::RAIL_LIST;
+        [body, nav, rail, Key::index(p)]
+    }
+
     /// Tab `t`'s path from the root.
     pub(crate) fn tab(t: u64) -> [Key; 5] {
         [
@@ -1693,7 +1736,7 @@ impl Run {
         let body = [Key::name("body")];
         let mut steps = Vec::new();
         for p in 0..u64::from(RAIL) {
-            let at = self.center(&[body[0], Key::name("rail"), Key::index(p)]);
+            let at = self.center(&Self::page(p));
             steps.push(Step::Input(Input::PointerMove(at)));
         }
         steps.push(Step::Input(Input::PointerLeave));

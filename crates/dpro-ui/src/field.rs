@@ -26,8 +26,10 @@
 //! - Ctrl+A selects all. Ctrl+C or Ctrl+Insert copies, Ctrl+X or Shift+Delete cuts, Ctrl+V or
 //!   Shift+Insert pastes: the field asks the platform through [`Ui::take_clipboard`].
 //! - Enter sends the field's [submit](crate::Element::submit) message, if it has one.
-//! - Space comes as a character. Tab moves focus; Esc, Up, Down, Page Up and Page Down go to the
-//!   caller (a palette moves its selection with them).
+//! - Up and Down send the field's [step](crate::Element::step), if it has one: `true` (more) on
+//!   Up, `false` on Down (TD-0009 A3.5 addition 6). A palette's field moves its highlight so.
+//! - Space comes as a character. Tab moves focus; Esc, Page Up and Page Down go to the caller, as
+//!   Up and Down do from a field without a step.
 //!
 //! Tab into a field selects all of it; a click puts the caret under the pointer, and dragging
 //! selects. A word is a run of letters, digits and underscores, or of other non-space
@@ -732,8 +734,9 @@ impl<M: Clone> Ui<M> {
     }
 
     /// A key for the focused field `i`. `Some(used)` if the field decides; `None` leaves it to the
-    /// rest of dispatch: Tab, and Page Up and Page Down, which a one-line field has no use for and
-    /// which scroll the viewport holding it (A2.4).
+    /// rest of dispatch: Tab; Page Up and Page Down, which a one-line field has no use for and
+    /// which scroll the viewport holding it (A2.4); and Up and Down when it has a step, which
+    /// dispatch sends as a dropdown's (A3.5 addition 6).
     pub(crate) fn field_key(
         &mut self,
         i: u32,
@@ -828,6 +831,7 @@ impl<M: Clone> Ui<M> {
             _ if letter(b'X') => self.request(ClipboardRequest::Cut, i),
             _ if letter(b'V') => self.request(ClipboardRequest::Paste, i),
             KeyCode::Tab | KeyCode::PageUp | KeyCode::PageDown => return None,
+            KeyCode::Up | KeyCode::Down if !mods.ctrl && self.has_step(i) => return None,
             _ => return Some(false),
         }
         Some(true)

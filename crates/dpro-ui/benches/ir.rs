@@ -24,11 +24,19 @@
 //!   events join `interact`: Down on the last row in view (which scrolls), Space checking the
 //!   focused row, a header's sort (750 rows, inline), and a far row realized for a client with
 //!   its update made. `a11y` adds the 100k-row table's first tree.
+//! - `composite` (TD-0009 A3.7, slice 6a): the composites page of `fixtures/composites.rs`,
+//!   warmed by its session; frames end at layout and damage. The batch bar's count going from 3
+//!   to 4 (`batch_count`), a scan card's size arriving (`scan_size`), and the window narrowed so
+//!   the summary cards wrap two to a line (`cards_wrap_resize`). `a11y` adds the page's whole
+//!   tree (`a11y_tree.composites`). A3.7 names them `composite::batch_count` and so on; the bench
+//!   ids after the dot say which case.
 //!
 //! C1: `docker compose run --rm bench-gate`.
 
 #![allow(missing_docs)]
 
+#[path = "fixtures/composites.rs"]
+mod composites;
 #[path = "fixtures/fling.rs"]
 mod fling_table;
 #[path = "fixtures/shell.rs"]
@@ -409,26 +417,41 @@ fn a11y_table_tree(mut f: Box<Fling>) -> (TreeUpdate, Box<Fling>) {
     (f.a11y_tree(), f)
 }
 
+/// A whole tree to serve: the shell's, its open menu's, or the composites page's.
+enum Tree {
+    Shell(Box<Run>),
+    Menu(Box<Run>),
+    Composites(Box<composites::Run>),
+}
+
 /// [`warm_accessible`], for the shell's whole tree.
-fn shell_tree() -> (Box<Run>, bool) {
-    (Box::new(warm_accessible()), false)
+fn shell_tree() -> Tree {
+    Tree::Shell(Box::new(warm_accessible()))
 }
 
 /// [`warm_accessible`] with row 4's menu open, for the menu window's whole tree.
-fn menu_tree() -> (Box<Run>, bool) {
-    (Box::new(warm_accessible().menu_open()), true)
+fn menu_tree() -> Tree {
+    Tree::Menu(Box::new(warm_accessible().menu_open()))
+}
+
+/// The composites page after its session, a client listening, for its whole tree (A3.7).
+fn composites_tree() -> Tree {
+    Tree::Composites(Box::new(
+        composites::Run::accessible(composites::Model::new()).warmed(),
+    ))
 }
 
 #[library_benchmark]
 #[bench::shell(setup = shell_tree)]
 #[bench::menu(setup = menu_tree)]
-fn a11y_tree((mut run, popup): (Box<Run>, bool)) -> (TreeUpdate, Box<Run>) {
-    let tree = if popup {
-        run.popup.a11y_tree()
-    } else {
-        run.ui.a11y_tree()
+#[bench::composites(setup = composites_tree)]
+fn a11y_tree(mut tree: Tree) -> (TreeUpdate, Tree) {
+    let update = match &mut tree {
+        Tree::Shell(run) => run.ui.a11y_tree(),
+        Tree::Menu(run) => run.popup.a11y_tree(),
+        Tree::Composites(run) => run.ui.a11y_tree(),
     };
-    (tree, run)
+    (update, tree)
 }
 
 #[library_benchmark]
@@ -448,8 +471,49 @@ library_benchmark_group!(
     benchmarks = [a11y_tree, a11y_table_tree, a11y_update]
 );
 
+/// The composites page after its session, settled, then `step` to run. Boxed, as the U12 runs
+/// are, so moving it isn't counted.
+fn composites_with(step: composites::Step) -> (Box<composites::Run>, composites::Step) {
+    (
+        Box::new(composites::Run::with(composites::Model::new()).warmed()),
+        step,
+    )
+}
+
+// The batch bar's count changes, as a row's check box toggles: its label alone changes.
+#[library_benchmark]
+#[bench::three_to_four(args = (composites::Step::Update(composites::Msg::Count(4))), setup = composites_with)]
+fn batch_count((mut run, step): (Box<composites::Run>, composites::Step)) -> Box<composites::Run> {
+    run.step(step);
+    run
+}
+
+// A scan card's size arrives, 1.2 GB to 1.3 GB: its fixed slot alone changes.
+#[library_benchmark]
+#[bench::one_card(args = (composites::Step::Update(composites::Msg::Size(0, 1_395_864_371))), setup = composites_with)]
+fn scan_size((mut run, step): (Box<composites::Run>, composites::Step)) -> Box<composites::Run> {
+    run.step(step);
+    run
+}
+
+// The window narrowed from 1000 to 640 px: the summary cards wrap two to a line, and the page
+// lays out again.
+#[library_benchmark]
+#[bench::narrow(args = (composites::Step::Resize(composites::NARROW)), setup = composites_with)]
+fn cards_wrap_resize(
+    (mut run, step): (Box<composites::Run>, composites::Step),
+) -> Box<composites::Run> {
+    run.step(step);
+    run
+}
+
+library_benchmark_group!(
+    name = composite,
+    benchmarks = [batch_count, scan_size, cards_wrap_resize]
+);
+
 main!(
     // Instruction counts only: the cache simulation would slow every run for metrics nothing gates.
     config = LibraryBenchmarkConfig::default().tool(Callgrind::with_args(["--cache-sim=no"]));
-    library_benchmark_groups = interact, paint, popup, table, a11y
+    library_benchmark_groups = interact, paint, popup, table, a11y, composite
 );

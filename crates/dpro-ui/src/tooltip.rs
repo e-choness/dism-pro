@@ -14,7 +14,13 @@
 //! Only the active window shows tips, so a menu over the main window shows its own and the main
 //! window's stop.
 
-use crate::{NodeId, geom::Point, theme::tokens::popup, tree::NIL, ui::Ui};
+use crate::{
+    NodeId,
+    geom::Point,
+    theme::tokens::popup,
+    tree::{NIL, rare},
+    ui::Ui,
+};
 
 /// What started a tip.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,7 +89,7 @@ impl<M> Ui<M> {
             return None;
         }
         let id = self.id(self.tip.node)?;
-        Some((id, self.tip_text(self.tip.node)?))
+        Some((id, self.shown_tip(self.tip.node)?))
     }
 
     /// Windows' tooltip delay changed (its double-click time, `GetDoubleClickTime`), in
@@ -137,11 +143,21 @@ impl<M> Ui<M> {
         }
     }
 
-    /// The tip of node `i`, if it has one.
+    /// The tip of node `i`, if it has one: its tooltip's text or its
+    /// [description](crate::Element::describe), which a client reads as its description.
     pub(crate) fn tip_text(&self, i: u32) -> Option<&str> {
         let side = self.nodes.get(i as usize)?.side;
         let tip = self.sides.get(side as usize)?.tip.as_str();
         (!tip.is_empty()).then_some(tip)
+    }
+
+    /// The tooltip node `i` shows, if it has one: a description alone shows none (TD-0009 A3.5
+    /// addition 4).
+    fn shown_tip(&self, i: u32) -> Option<&str> {
+        if self.nodes.get(i as usize)?.rare & rare::DESC != 0 {
+            return None;
+        }
+        self.tip_text(i)
     }
 
     /// The pointer moved to `p`, or left (`None`): a tip under it starts, and a tip the pointer
@@ -166,7 +182,7 @@ impl<M> Ui<M> {
 
     /// The keyboard moved focus to `i`: its tip shows at once, if it has one.
     pub(crate) fn tip_focus(&mut self, i: u32) {
-        if self.active && i != NIL && i != self.tip.node && self.tip_text(i).is_some() {
+        if self.active && i != NIL && i != self.tip.node && self.shown_tip(i).is_some() {
             self.tip_start(i, TipSource::Focus);
         }
     }
@@ -234,7 +250,7 @@ impl<M> Ui<M> {
     fn tip_hit(&self, p: Point) -> u32 {
         let mut found = NIL;
         let (_, bar) = self.walk_at(p, |at| {
-            if self.nodes[at as usize].side != NIL && self.tip_text(at).is_some() {
+            if self.nodes[at as usize].side != NIL && self.shown_tip(at).is_some() {
                 found = at;
             }
         });

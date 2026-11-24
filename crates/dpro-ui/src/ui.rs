@@ -7,7 +7,7 @@
 use std::rc::Rc;
 
 use crate::{
-    a11y::A11y,
+    a11y::{A11y, SideProps},
     damage::Damage,
     field::{Caret, ClipboardRequest, Field},
     geom::{Point, Rect, RectPx, Size},
@@ -152,14 +152,17 @@ pub struct Ui<M> {
     pub(crate) queued: Vec<M>,
 }
 
-/// A node's tooltip, and a dropdown's accessible name and step: in a side table, so the nodes
-/// without them (nearly all) carry one index.
+/// A node's tooltip, a dropdown's accessible name and step, and a field's step: in a side table,
+/// so the nodes without them (nearly all) carry one index.
 #[derive(Debug)]
 pub(crate) struct Side<M> {
     pub(crate) node: u32,
     pub(crate) tip: String,
     pub(crate) label: String,
     pub(crate) step: Option<fn(bool) -> M>,
+    /// Its heading level, landmark, shortcut and a description beside its tooltip (TD-0009
+    /// A4.5, `a11y.rs`).
+    pub(crate) props: SideProps,
 }
 
 /// A hold button's Invoke message.
@@ -465,12 +468,14 @@ impl<M> Ui<M> {
         };
         let p = &self.nodes[parent as usize];
         let in_viewport = p.in_viewport || p.scroll != NIL;
+        let presentational = p.presentational || p.presents_children();
         {
             let c = &mut self.nodes[child as usize];
             c.parent = parent;
             c.prev = prev;
             c.next = before;
             c.in_viewport = in_viewport;
+            c.presentational = presentational;
         }
         if prev == NIL {
             self.nodes[parent as usize].first = child;
@@ -557,11 +562,19 @@ impl<M> Ui<M> {
         let field = std::mem::replace(&mut self.nodes[i as usize].field, NIL);
         if field != NIL {
             self.release_field(field);
+            // A field's step has a side slot without popup state (TD-0009 A3.5 addition 6).
+            if self.nodes[i as usize].rare == 0 {
+                let side = std::mem::replace(&mut self.nodes[i as usize].side, NIL);
+                if side != NIL {
+                    self.release_side(side);
+                }
+            }
         }
         if std::mem::replace(&mut self.nodes[i as usize].hold, false) {
             self.forget_hold(i);
         }
-        // Only a node with popup state (a tooltip, a dropdown) has a side slot: the rest skip it.
+        // Only a node with popup state (a tooltip, a dropdown) has a side slot now: the rest
+        // skip it.
         debug_assert!(
             self.nodes[i as usize].rare != 0 || self.nodes[i as usize].side == NIL,
             "node {i} has a side slot and no popup state"

@@ -131,3 +131,48 @@ amendment).
        - any other property, or a value of the wrong type, is `E_INVALIDARG`. No row is NULL with
          `S_OK`, as UI Automation's documentation asks.
    - **`src/lib.rs`, `src/tests/mod.rs`:** the `mod realize;` lines and the re-exports.
+
+TD-0009 A4.5 numbers its patches 7–13. Item 7, notifications, comes with slice 7b, so the list
+goes on at 8.
+
+8. **HeadingLevel** (TD-0009 A4.5, slice 6a). Narrator's scan mode jumps by heading (H, and 1–9
+   by level) through UI Automation's HeadingLevel, which upstream doesn't report: it sends a
+   heading's level as Level.
+   - **`src/node.rs`:** a `Heading` with AccessKit level *n*, which is zero-based (aria-level less
+     one), reports HeadingLevel 80051 + *n* (`HeadingLevel1` for level 0), a level past 8 as
+     level 9, and no Level. A heading without a level, and every other role, reports none, which
+     clients read as `HeadingLevel_None`. Other roles keep their Level.
+9. **Landmarks** (TD-0009 A4.5, slice 6a). Narrator's D and its landmark list read LandmarkType,
+   which upstream doesn't report.
+   - **`src/node.rs`:**
+     - `Main`, `Navigation` and `Search` report LandmarkType 80002, 80003 and 80004.
+     - A `Region` with a name and a role description is a custom landmark: LandmarkType Custom
+       (80000), with its role description as LocalizedLandmarkType, which UI Automation requires
+       with Custom. Its LocalizedControlType is then UI Automation's default ("group"), instead
+       of the role description that upstream gives every role.
+     - A region without a name or a role description is no landmark, as upstream.
+     - `Form`, `Banner`, `Complementary` and `ContentInfo` stay unmapped: nothing uses them.
+10. **AcceleratorKey** from `keyboard_shortcut` (TD-0009 A4.5, slice 6a): a command button carries
+    its accelerator as the command registry displays it ("Ctrl+Shift+R"). AccessKey stays
+    unmapped: access keys are a non-goal (A4.2).
+    - **`src/node.rs`:** the property, in the `properties!` table with 8's and 9's, so a change to
+      any of them raises its property-changed event as every mapped property's does.
+    - **New file:** `src/tests/landmarks.rs`, the tests of 8–10, called on the providers in
+      process.
+11. **Raising never panics** (TD-0009 A4.5, slice 6a). Upstream unwraps the results of
+    `UiaRaiseAutomationEvent` and `UiaRaiseAutomationPropertyChangedEvent`. Under the release
+    profile's `panic = "abort"`, one refused raise would end the process, the elevated one
+    included.
+    - **`src/adapter.rs`:** `QueuedEvents::raise(self) -> usize` raises every event and returns
+      how many UI Automation refused (an `HRESULT` error); the events after a refused one are
+      still raised. Upstream returns nothing. It calls `raise_with`, which takes the two raisers
+      so that a test can refuse a raise. `QueuedEvents::of` (tests only) builds a queue.
+    - **New file:** `src/tests/menu_events.rs`: a refused raise is counted and the events after
+      it are raised; an empty queue counts nothing; and the real raise of event id 0, an unknown
+      event, doesn't panic. The T2 image's Wine accepts that raise (measured: 0 refused), so the
+      count's test refuses through `raise_with`. Whether Windows refuses it is to verify in T3.
+      Items 12–13's tests join the file.
+    - **`src/tests/mod.rs`:** the `mod landmarks;` and `mod menu_events;` lines.
+
+**Planned** (TD-0009 A4.5): 7, notifications (slice 7b); 12, MenuOpened and MenuClosed, and 13,
+ToolTipOpened and ToolTipClosed (slice 7c).

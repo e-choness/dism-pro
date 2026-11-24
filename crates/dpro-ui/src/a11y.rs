@@ -38,7 +38,31 @@
 //!   check column's are named as its header is, toggled, taking `Click`. `Focus` on a row makes
 //!   it current.
 //! - A node's [tooltip](crate::Element::tooltip) is its description (UI Automation's
-//!   `FullDescription`), so a screen reader reads it on focus whether or not it shows.
+//!   `FullDescription`), so a screen reader reads it on focus whether or not it shows. A
+//!   [description](crate::Element::describe) wins over it (TD-0009 A3.5 addition 4).
+//! - A4.5's structure (slice 7a, in A3's slice 6a):
+//!   - a label that's a [heading](crate::Element::heading) is a heading at its level, named by
+//!     its text. AccessKit's level is zero-based (aria-level less one), so a level-1 heading is
+//!     sent as level 0 and the adapter reports `HeadingLevel1` (PATCHES.md 8);
+//!   - a plain container that's a [landmark](crate::Element::landmark) is the main, navigation
+//!     or search landmark, in place of the group it would be; a named region is a region with
+//!     its kind as role description, which the adapter reports as a custom landmark of that
+//!     type (PATCHES.md 9). An unnamed region is no landmark. Only a plain container is one: a
+//!     list, toolbar or tab list that is a landmark goes inside a plain container that carries
+//!     the landmark, as a web `<nav>` holds a `<ul>`, so it keeps its role and a screen reader
+//!     reads an item's place in it ("3 of 12"). A landmark on a container with a role of its
+//!     own (a list, a toolbar, a tab list, a table's header) is a mistake: a debug build
+//!     asserts, and the container keeps its role;
+//!   - a [live](crate::Element::live) label or container carries its politeness;
+//!   - a [shortcut](crate::Element::shortcut) is the node's keyboard shortcut, which the adapter
+//!     reports as `AcceleratorKey` (PATCHES.md 10).
+//! - Presentational children (A3.5 addition 9): a check box's children, and a named button's,
+//!   are left out of the tree, so the control is read once by its name. So are a presentation
+//!   container's: a settings row's label and description, which name and describe its control
+//!   (A3.5 (15)).
+//! - A [suggestions](crate::Element::suggestions) list's options are placed among the options
+//!   alone: each its position, and the list the set's size, so a header doesn't count (A3.5
+//!   addition 7).
 //!
 //! Enabled buttons, check boxes, tabs, radio buttons and menu items take `Click` (Invoke, Toggle or
 //! Select) and `Focus`, except that a hold button's `Click` sends its Invoke message: a client
@@ -58,14 +82,17 @@
 //! and moves no focus.
 
 use accesskit::{
-    Action, ActionData, ActionRequest, Affine, Node, NodeId as AkId, Rect as AkRect,
-    Role as AkRole, ScrollUnit, SortDirection, Toggled, TreeId, TreeInfo, TreeUpdate,
+    Action, ActionData, ActionRequest, Affine, Live as AkLive, Node, NodeId as AkId,
+    Rect as AkRect, Role as AkRole, ScrollUnit, SortDirection, Toggled, TreeId, TreeInfo,
+    TreeUpdate,
 };
 use dpro_app::table::{Order, Tri};
 
 use crate::{
     table::{TABLE_CHECK, sort_of},
-    tree::{Group, NIL, NodeId, Role},
+    tree::{
+        A11yProps, A11yText, Group, LandmarkKind, Live, NIL, Node as UiNode, NodeId, Role, rare,
+    },
     ui::{ROOT, Ui},
 };
 
@@ -94,6 +121,127 @@ impl A11y {
     }
 }
 
+/// A node's heading level or landmark, and its shortcut, region kind or description beside its
+/// tooltip (TD-0009 A4.5, A3.5 addition 4) as its element last gave them, in its side slot. The
+/// reconciler compares them as it does text, so an unchanged view copies and allocates nothing
+/// (U8).
+#[derive(Debug, Default)]
+pub(crate) struct SideProps {
+    props: A11yProps,
+    /// What `props` says it is.
+    text: String,
+}
+
+impl SideProps {
+    /// Copies an element's props and text, reusing the buffer. Returns whether anything changed.
+    fn set(&mut self, props: A11yProps, text: &str) -> bool {
+        let mut changed = self.props != props;
+        self.props = props;
+        if self.text != text {
+            self.text.clear();
+            self.text.push_str(text);
+            changed = true;
+        }
+        changed
+    }
+
+    /// Its text, if it's `what`.
+    fn text(&self, what: A11yText) -> Option<&str> {
+        (self.props.text() == Some(what)).then_some(self.text.as_str())
+    }
+
+    /// None, keeping the buffer for the slot's next node.
+    pub(crate) fn clear(&mut self) {
+        self.props = A11yProps::NONE;
+        self.text.clear();
+    }
+}
+
+impl<M> UiNode<M> {
+    /// Its side slot holds A4.5's properties.
+    pub(crate) const fn has_props(&self) -> bool {
+        self.rare & rare::PROPS != 0
+    }
+
+    /// Its children are presentational (A3.5 addition 9): a check box's label lines, or the
+    /// parts of a button with a name (a clickable card, an icon button), which the control's name
+    /// already says. A button without one is read through its children. Or a presentation
+    /// container's text, which names and describes a control beside it (a settings row's).
+    pub(crate) fn presents_children(&self) -> bool {
+        match self.role {
+            Role::CheckBox => true,
+            Role::Button => !self.text.is_empty(),
+            Role::Container => self.is_presentation(),
+            _ => false,
+        }
+    }
+}
+
+impl<M> Ui<M> {
+    /// Copies an element's [`A11yProps`] and their text (A4.5) into node `i`'s side slot: a
+    /// node that gained them gets a slot, and one that lost them gives it back unless its tooltip
+    /// or dropdown still uses it. Returns whether a client sees a change.
+    pub(crate) fn update_props(&mut self, i: u32, props: A11yProps, text: &str) -> bool {
+        let n = &mut self.nodes[i as usize];
+        let had = n.has_props();
+        n.rare = if props.is_none() {
+            n.rare & !rare::PROPS
+        } else {
+            n.rare | rare::PROPS
+        };
+        let s = n.side;
+        if props.is_none() {
+            if let Some(side) = self.sides.get_mut(s as usize) {
+                side.props.clear();
+                if side.tip.is_empty() && side.label.is_empty() && side.step.is_none() {
+                    self.nodes[i as usize].side = NIL;
+                    self.release_side(s);
+                }
+            }
+            return had;
+        }
+        let s = if s == NIL {
+            let s = self.alloc_side(i);
+            self.nodes[i as usize].side = s;
+            s
+        } else {
+            s
+        };
+        self.sides[s as usize].props.set(props, text) || !had
+    }
+
+    /// Button `i` may have gained or lost its name, or container `i` its presentation, so that
+    /// its children became presentational or stopped being (A3.5 addition 9): the flag follows
+    /// down its subtree, and the nodes a client can see again are sent. Their button, renamed, is
+    /// sent with its new children. A node's children share their flag, so the first one says
+    /// whether anything changed.
+    pub(crate) fn presentation_changed(&mut self, i: u32) {
+        let n = &self.nodes[i as usize];
+        let held = n.presentational || n.presents_children();
+        if self
+            .nodes
+            .get(n.first as usize)
+            .is_none_or(|c| c.presentational == held)
+        {
+            return;
+        }
+        self.mark_presentational(i, held);
+    }
+
+    /// Sets the flag `held` on node `i`'s children, and on theirs as they hold it.
+    fn mark_presentational(&mut self, i: u32, held: bool) {
+        let mut c = self.nodes[i as usize].first;
+        while c != NIL {
+            let was = std::mem::replace(&mut self.nodes[c as usize].presentational, held);
+            if was && !held {
+                self.a11y_touch(c);
+            }
+            self.presentation_changed(c);
+            c = self.nodes[c as usize].next;
+        }
+    }
+}
+
 impl<M> Ui<M> {
     /// The whole tree, for a client's first request (AccessKit's `ActivationHandler`). From then
     /// on, [`a11y_update`](Self::a11y_update) reports what changes.
@@ -106,7 +254,9 @@ impl<M> Ui<M> {
         let mut stack = vec![ROOT];
         while let Some(i) = stack.pop() {
             nodes.push((self.ak_id(i), self.ak_node(i)));
-            stack.extend(self.children_of(i));
+            if !self.nodes[i as usize].presents_children() {
+                stack.extend(self.children_of(i));
+            }
         }
         let mut tree = TreeInfo::new(self.ak_id(ROOT));
         tree.toolkit_name = Some(env!("CARGO_PKG_NAME").to_owned());
@@ -140,7 +290,8 @@ impl<M> Ui<M> {
                 continue;
             }
             n.a11y_dirty = false;
-            if n.live {
+            // A presentational node isn't in the client's tree (A3.5 addition 9).
+            if n.live && !n.presentational {
                 nodes.push((self.ak_id(i), self.ak_node(i)));
             }
         }
@@ -215,8 +366,14 @@ impl<M> Ui<M> {
         self.index(NodeId { index, generation })
     }
 
+    /// The focus as a client sees it: a presentational node isn't in its tree, so the control
+    /// holding it is focused.
     fn ak_focus(&self) -> AkId {
-        self.ak_id(if self.focus == NIL { ROOT } else { self.focus })
+        let mut f = self.focus;
+        while f != NIL && self.nodes[f as usize].presentational {
+            f = self.nodes[f as usize].parent;
+        }
+        self.ak_id(if f == NIL { ROOT } else { f })
     }
 
     /// Node `i`'s role, as the client sees it.
@@ -225,6 +382,13 @@ impl<M> Ui<M> {
             return AkRole::Window;
         }
         let n = &self.nodes[i as usize];
+        // A heading, or a plain container's landmark (A4.5), is that in place of a label or a
+        // group.
+        if n.has_props()
+            && let Some(role) = self.ak_structure(i)
+        {
+            return role;
+        }
         match n.role {
             // A table's header is a row group of its column headers.
             Role::Container if self.is_table_header(i) => AkRole::RowGroup,
@@ -235,10 +399,15 @@ impl<M> Ui<M> {
                 Some(Group::Radios) => AkRole::RadioGroup,
                 Some(Group::List) => AkRole::List,
                 Some(Group::Menu) => AkRole::Menu,
-                Some(Group::Options) => AkRole::ListBox,
+                // A dropdown's options and a field's suggestions (TD-0009 A3.5 addition 7).
+                Some(Group::Options | Group::Suggestions) => AkRole::ListBox,
+                Some(Group::Toolbar) => AkRole::Toolbar,
                 None if n.text.is_empty() => AkRole::GenericContainer,
                 None => AkRole::Group,
             },
+            // A named glyph is an image; an unnamed one is hidden, as an empty label is (A3.5
+            // addition 1).
+            Role::Label if n.glyph().is_some() && !n.text.is_empty() => AkRole::Image,
             Role::Label => AkRole::Label,
             Role::Button if n.selected.is_some() => AkRole::ListItem,
             Role::Button => AkRole::Button,
@@ -261,6 +430,128 @@ impl<M> Ui<M> {
         }
     }
 
+    /// Node `i`'s heading or landmark role (A4.5), if it has one: a named label's heading, or a
+    /// plain container's landmark. A region needs a name.
+    ///
+    /// A container with a role of its own (a list, a toolbar, a tab list, a table's header)
+    /// keeps it, and a debug build asserts: its landmark goes on a plain container around it, as
+    /// a web `<nav>` holds a `<ul>`. Replacing a list's role hid the rail's pages from UI
+    /// Automation's List (G1, run 45127764360) and took their place in it ("3 of 12") from
+    /// Narrator (A4.9's N-2).
+    fn ak_structure(&self, i: u32) -> Option<AkRole> {
+        let n = &self.nodes[i as usize];
+        let p = self.sides.get(n.side as usize)?.props.props;
+        let named = !n.text.is_empty();
+        match (n.role, p.landmark()) {
+            (Role::Container, Some(kind)) => {
+                let plain = n.group.is_none() && !self.is_table_header(i);
+                debug_assert!(
+                    plain,
+                    "node {i}: a landmark goes on a plain container around a list, toolbar or \
+                     tab list, not on it"
+                );
+                if !plain {
+                    return None;
+                }
+                match kind {
+                    LandmarkKind::Main => Some(AkRole::Main),
+                    LandmarkKind::Navigation => Some(AkRole::Navigation),
+                    LandmarkKind::Search => Some(AkRole::Search),
+                    LandmarkKind::Region => named.then_some(AkRole::Region),
+                }
+            }
+            (Role::Label, _) if p.heading() > 0 && named => Some(AkRole::Heading),
+            _ => None,
+        }
+    }
+
+    /// Node `i`'s description (A3.5 addition 4): the one given beside its tooltip, or the text
+    /// in its `tip`, a description alone or the tooltip's own.
+    fn description(&self, i: u32) -> Option<&str> {
+        let n = &self.nodes[i as usize];
+        if n.has_props()
+            && let Some(side) = self.sides.get(n.side as usize)
+            && let Some(description) = side.props.text(A11yText::Description)
+        {
+            return Some(description);
+        }
+        self.tip_text(i)
+    }
+
+    /// Node `i`'s description, live setting, heading level, region kind and shortcut (A3.5
+    /// additions 4 and 5, A4.5), and a suggestion's place in its set (addition 7).
+    fn ak_depth(&self, i: u32, role: AkRole, node: &mut Node) {
+        let n = &self.nodes[i as usize];
+        if let Some(description) = self.description(i) {
+            node.set_description(description);
+        }
+        match n.politeness {
+            Live::Off => {}
+            Live::Polite => node.set_live(AkLive::Polite),
+            Live::Assertive => node.set_live(AkLive::Assertive),
+        }
+        if n.has_props() {
+            self.ak_props(i, role, node);
+        }
+        match role {
+            AkRole::ListBox if n.group == Some(Group::Suggestions) => {
+                node.set_size_of_set(self.option_count(i));
+            }
+            AkRole::ListBoxOption => {
+                if let Some(at) = self.suggestion_place(i) {
+                    node.set_position_in_set(at);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Node `i`'s heading level, region kind and shortcut (A4.5), for a node with them.
+    fn ak_props(&self, i: u32, role: AkRole, node: &mut Node) {
+        let n = &self.nodes[i as usize];
+        let Some(side) = self.sides.get(n.side as usize) else {
+            return;
+        };
+        let p = &side.props;
+        match role {
+            // Zero-based: aria-level less one.
+            AkRole::Heading => node.set_level(usize::from(p.props.heading().saturating_sub(1))),
+            AkRole::Region => {
+                if let Some(kind) = p.text(A11yText::Kind) {
+                    node.set_role_description(kind);
+                }
+            }
+            _ => {}
+        }
+        if let Some(keys) = p.text(A11yText::Shortcut) {
+            node.set_keyboard_shortcut(keys);
+        }
+    }
+
+    /// Suggestion `i`'s place among its list's options alone (A3.5 addition 7): the options
+    /// before it, zero-based as AccessKit counts. `None` for an option of any other list.
+    fn suggestion_place(&self, i: u32) -> Option<usize> {
+        let n = &self.nodes[i as usize];
+        if self.nodes.get(n.parent as usize)?.group != Some(Group::Suggestions) {
+            return None;
+        }
+        let mut at = 0;
+        let mut c = n.prev;
+        while c != NIL {
+            let s = &self.nodes[c as usize];
+            at += usize::from(is_option(s));
+            c = s.prev;
+        }
+        Some(at)
+    }
+
+    /// Node `i`'s options: the size of the set a suggestions list's options are placed in.
+    fn option_count(&self, i: u32) -> usize {
+        self.children_of(i)
+            .filter(|&c| is_option(&self.nodes[c as usize]))
+            .count()
+    }
+
     /// Node `i` as the client sees it. Bounds are in physical pixels from the client area's
     /// top-left, snapped as painted.
     fn ak_node(&self, i: u32) -> Node {
@@ -280,7 +571,8 @@ impl<M> Ui<M> {
         if n.in_viewport {
             node.add_action(Action::ScrollIntoView);
         }
-        if n.first != NIL {
+        // A presentational node's children are left out (A3.5 addition 9).
+        if n.first != NIL && !n.presents_children() {
             node.set_children(
                 self.children_of(i)
                     .map(|c| self.ak_id(c))
@@ -319,9 +611,7 @@ impl<M> Ui<M> {
             (_, false) => node.set_label(n.text.as_str()),
             (_, true) => {}
         }
-        if let Some(tip) = self.tip_text(i) {
-            node.set_description(tip);
-        }
+        self.ak_depth(i, role, &mut node);
         if let Some(expanded) = n.expanded {
             node.set_expanded(expanded);
             if expanded && n.enabled {
@@ -524,6 +814,12 @@ impl<M> Ui<M> {
         };
         Some(by.is_some_and(|(axis, dir, page)| self.scroll_step(s, axis, dir, page)))
     }
+}
+
+/// An option of a list (a dropdown's, a field's suggestions), which a client counts in its set;
+/// a header among them isn't one.
+fn is_option<M>(n: &UiNode<M>) -> bool {
+    n.role == Role::MenuItem && n.selected.is_some()
 }
 
 /// A check state as a client reads it.
@@ -985,5 +1281,186 @@ mod tests {
         let again = id(&ui, &[Key::name("list"), Key::index(2)]);
         assert_ne!(first, again);
         assert_eq!(ui.a11y_node(first), None);
+    }
+
+    /// A3.5 addition 9, in updates: a button's children leave the tree when it's given a name
+    /// and come back when it loses it, a child added under a check box is never sent (a client
+    /// would refuse a node outside its tree), and focus inside a control is the control's.
+    #[test]
+    fn presentational_children_follow_the_name_in_updates() {
+        let mut ui: Ui<u8> = Ui::new(Size { w: 300.0, h: 300.0 }, 1.0, Motion::default());
+        let build = |ui: &mut Ui<u8>, name: &str, lines: u64| {
+            ui.build(|cx| {
+                cx.add_with(Element::button(Key::name("b"), name, 1), |cx| {
+                    cx.add(Element::text(Key::name("part"), "Part"));
+                });
+                cx.add_with(Element::toggle(Key::name("c"), "Box", Tri::Off, 2), |cx| {
+                    cx.add(Element::button(Key::name("inner"), "Inner", 3));
+                    for k in 0..lines {
+                        cx.add(Element::text(Key::index(k), "Line"));
+                    }
+                });
+            });
+            ui.layout(&mut FakeText);
+        };
+        let node = |u: &accesskit::TreeUpdate, ak: AkId| {
+            u.nodes
+                .iter()
+                .find(|(id, _)| *id == ak)
+                .map(|(_, n)| n.clone())
+        };
+        build(&mut ui, "", 1);
+        let tree = ui.a11y_tree();
+        let b = id(&ui, &[Key::name("b")]);
+        let part = id(&ui, &[Key::name("b"), Key::name("part")]);
+        let c = id(&ui, &[Key::name("c")]);
+        assert_eq!(node(&tree, b).unwrap().children(), [part], "unnamed: read");
+        assert_eq!(node(&tree, c).unwrap().children(), []);
+        assert_eq!(
+            tree.nodes.len(),
+            4,
+            "the root, the button, its part, the box"
+        );
+
+        build(&mut ui, "Dismiss", 1);
+        let u = ui.a11y_update().unwrap();
+        assert_eq!(node(&u, b).unwrap().children(), []);
+        assert!(node(&u, part).is_none());
+
+        build(&mut ui, "", 2);
+        let u = ui.a11y_update().unwrap();
+        assert_eq!(node(&u, b).unwrap().children(), [part]);
+        assert!(node(&u, part).is_some(), "the part again");
+        let line = ui.ak_id(ui.find(&[Key::name("c"), Key::index(1)]).unwrap().index);
+        assert!(node(&u, line).is_none(), "not the box's new line");
+
+        // Focus on a button inside the box is the box's, as a client sees it.
+        ui.set_focus(ui.find(&[Key::name("c"), Key::name("inner")]));
+        assert_eq!(ui.a11y_tree().focus, c);
+    }
+
+    /// A4.5: a heading or a landmark that goes gives its side slot back, and a landmark on a
+    /// scroll viewport (a scrolled page's Main) keeps its slot from frame to frame, sending
+    /// nothing while nothing changes.
+    #[test]
+    fn properties_keep_their_slot_while_they_last() {
+        let mut ui: Ui<u8> = Ui::new(Size { w: 300.0, h: 300.0 }, 1.0, Motion::default());
+        let build = |ui: &mut Ui<u8>, depth: bool| {
+            ui.build(|cx| {
+                let mut page = Element::scroll(Key::name("page"), crate::Axes::Y).name("Clean");
+                let mut title = Element::text(Key::name("title"), "Clean");
+                if depth {
+                    page = page.landmark(crate::Landmark::Main);
+                    title = title.heading(1);
+                }
+                cx.add_with(page, |cx| {
+                    cx.add(title);
+                });
+            });
+            ui.layout(&mut FakeText);
+        };
+        build(&mut ui, true);
+        let tree = ui.a11y_tree();
+        let role = |tree: &accesskit::TreeUpdate, ak: AkId| {
+            tree.nodes
+                .iter()
+                .find(|(id, _)| *id == ak)
+                .map(|(_, n)| n.role())
+        };
+        let page = id(&ui, &[Key::name("page")]);
+        let title = id(&ui, &[Key::name("page"), Key::name("title")]);
+        assert_eq!(role(&tree, page), Some(AkRole::Main));
+        assert_eq!(role(&tree, title), Some(AkRole::Heading));
+        let slots = ui.sides.len() - ui.free_sides.len();
+        assert_eq!(slots, 2);
+        build(&mut ui, true);
+        assert!(ui.a11y_update().is_none(), "nothing changed");
+        assert_eq!(ui.sides.len() - ui.free_sides.len(), slots);
+
+        build(&mut ui, false);
+        let u = ui.a11y_update().unwrap();
+        assert!(
+            matches!(role(&u, page), Some(r) if r != AkRole::Main),
+            "{u:?}"
+        );
+        assert_eq!(role(&u, title), Some(AkRole::Label));
+        assert_eq!(
+            ui.sides.len() - ui.free_sides.len(),
+            0,
+            "both slots given back"
+        );
+    }
+
+    /// A4.5: a plain container that's a landmark is the landmark in place of a group, and a list
+    /// inside it keeps its role, as a web `<nav>` holds a `<ul>`: a client reads the list and an
+    /// item's place in it (A4.9's N-2).
+    #[test]
+    fn a_plain_container_is_the_landmark_around_a_list() {
+        let mut ui: Ui<u8> = Ui::new(Size { w: 300.0, h: 300.0 }, 1.0, Motion::default());
+        ui.build(|cx| {
+            cx.add_with(
+                Element::stack(Key::name("nav"))
+                    .name("Pages")
+                    .landmark(crate::Landmark::Navigation),
+                |cx| {
+                    cx.add_with(Element::list(Key::name("rail")).name("Pages"), |cx| {
+                        cx.add(Element::button(Key::index(0), "Overview", 1).selected(true));
+                        cx.add(Element::button(Key::index(1), "Clean", 2).selected(false));
+                    });
+                },
+            );
+        });
+        ui.layout(&mut FakeText);
+        let tree = ui.a11y_tree();
+        let node = |path: &[Key]| {
+            let want = id(&ui, path);
+            &tree.nodes.iter().find(|(id, _)| *id == want).unwrap().1
+        };
+        let rail = [Key::name("nav"), Key::name("rail")];
+        let nav = node(&rail[..1]);
+        assert_eq!(
+            (nav.role(), nav.label()),
+            (AkRole::Navigation, Some("Pages"))
+        );
+        assert_eq!(nav.children(), [id(&ui, &rail)]);
+        let list = node(&rail);
+        assert_eq!((list.role(), list.label()), (AkRole::List, Some("Pages")));
+        assert_eq!(list.children().len(), 2);
+        let first = node(&[rail[0], rail[1], Key::index(0)]);
+        assert_eq!(
+            (first.role(), first.label(), first.is_selected()),
+            (AkRole::ListItem, Some("Overview"), Some(true))
+        );
+    }
+
+    /// A landmark on a list is a mistake: a debug build asserts, and the list keeps its role,
+    /// so UI Automation still sees a List (G1, run 45127764360, found none when the landmark
+    /// replaced it).
+    #[test]
+    #[cfg_attr(
+        debug_assertions,
+        should_panic(expected = "a landmark goes on a plain container")
+    )]
+    fn a_list_that_is_given_a_landmark_keeps_its_role() {
+        let mut ui: Ui<u8> = Ui::new(Size { w: 300.0, h: 300.0 }, 1.0, Motion::default());
+        ui.build(|cx| {
+            cx.add_with(
+                Element::list(Key::name("rail"))
+                    .name("Pages")
+                    .landmark(crate::Landmark::Navigation),
+                |cx| {
+                    cx.add(Element::button(Key::index(0), "Overview", 1).selected(true));
+                },
+            );
+        });
+        ui.layout(&mut FakeText);
+        let tree = ui.a11y_tree();
+        let rail = id(&ui, &[Key::name("rail")]);
+        let role = tree
+            .nodes
+            .iter()
+            .find(|(id, _)| *id == rail)
+            .map(|(_, n)| n.role());
+        assert_eq!(role, Some(AkRole::List));
     }
 }

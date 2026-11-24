@@ -10,11 +10,12 @@
 //! into the node's own buffer, so a warm window reconciles without allocating (§7 U8).
 
 use crate::{
+    a11y::SideProps,
     field::TextEdit,
     pool::capacity_for,
     table::sort_value,
     text::TextStyle,
-    tree::{CHECK_ITEM, Element, Extra, NIL, NodeId, Role, rare},
+    tree::{CHECK_ITEM, Element, Extra, Live, NIL, NodeId, PRESENTATION, Role, rare},
     ui::{HoldSlot, ROOT, Side, Ui},
 };
 
@@ -197,8 +198,10 @@ impl<M> Ui<M> {
         n.selected = el.selected;
         n.msg = el.msg;
         let special = n.special;
-        // Popup state, now or last frame: few nodes have any, so the rest skip it here.
+        // Popup state, now or last frame: few nodes have any, so the rest skip it here. So with
+        // A4.5's properties, in the same test: the node's are its `rare::PROPS`.
         let rare = n.rare | el.rare;
+        let a11y = el.a11y.bits();
         if n.enabled != el.enabled {
             n.enabled = el.enabled;
             if !el.enabled {
@@ -208,8 +211,13 @@ impl<M> Ui<M> {
                 self.stop_changed(i);
             }
         }
-        if rare != 0 {
-            seen |= self.update_rare(i, el.rare, el.tip, el.extra);
+        if rare | a11y != 0 {
+            if rare & !rare::PROPS != 0 {
+                seen |= self.update_rare(i, el.rare, el.tip, el.extra);
+            }
+            if rare & rare::PROPS | a11y != 0 {
+                seen |= self.update_props(i, el.a11y, el.a11y_text.unwrap_or_default());
+            }
         }
         match el.extra {
             // Most nodes: nothing more.
@@ -219,8 +227,9 @@ impl<M> Ui<M> {
                 label,
                 placeholder,
                 on_edit,
+                step,
             } if field != NIL => {
-                seen |= self.update_field(field, label, placeholder, on_edit);
+                seen |= self.update_field(field, label, placeholder, on_edit, step);
                 if field_text {
                     self.field_text_set(i);
                 } else if field_style {
@@ -236,6 +245,11 @@ impl<M> Ui<M> {
         }
         if layout {
             self.mark_dirty(i);
+            // A button with a name holds presentational children, one without doesn't (A3.5
+            // addition 9): a renamed one is laid out again, as its text changed.
+            if self.nodes[i as usize].role == Role::Button {
+                self.presentation_changed(i);
+            }
         }
         if looks {
             // Where it is now; if layout moves it, layout damages where it goes.
@@ -246,16 +260,19 @@ impl<M> Ui<M> {
         }
     }
 
-    /// Copies a field's name, placeholder and edit handler into its slot `f`. Returns whether a
-    /// client sees a change; a new placeholder shows while the field is empty.
+    /// Copies a field's name, placeholder and edit handler into its slot `f`, and its step into its
+    /// side slot. Returns whether a client sees a change; a new placeholder shows while the field
+    /// is empty.
     fn update_field(
         &mut self,
         f: u32,
         name: &str,
         placeholder: &str,
         on_edit: Option<fn(TextEdit) -> M>,
+        step: Option<fn(bool) -> M>,
     ) -> bool {
         let slot = &mut self.fields[f as usize];
+        let i = slot.node;
         // Becoming read-only, or editable, is seen.
         let mut seen = slot.on_edit.is_some() != on_edit.is_some();
         slot.on_edit = on_edit;
@@ -267,18 +284,30 @@ impl<M> Ui<M> {
         if slot.placeholder != placeholder {
             slot.placeholder.clear();
             slot.placeholder.push_str(placeholder);
-            let i = slot.node;
             if self.nodes[i as usize].text.is_empty() {
                 self.damage_node(i);
             }
             seen = true;
         }
+        // Its step lives in its side slot, as a dropdown's does (A3.5 addition 6). A field with
+        // popup state had it kept by `update_rare`; one without has no tooltip either, so this
+        // keeps the step alone (and does nothing more after `update_rare`). A4.5's properties
+        // share the slot without being popup state, so they don't stop this.
+        let n = &self.nodes[i as usize];
+        let stepped = self
+            .sides
+            .get(n.side as usize)
+            .is_some_and(|s| s.step.is_some());
+        if n.rare & !rare::PROPS == 0 && (step.is_some() || stepped) {
+            self.update_side(i, "", "", step);
+        }
         seen
     }
 
     /// Copies a group, a progress bar's value, a column header's sort, a menu item's being a
-    /// check item or a hold button's Invoke message into node `i`, clearing what it had of the
-    /// others. Returns whether a client sees a change, and whether it shows.
+    /// check item, a hold button's Invoke message, a live region's politeness or a container's
+    /// presentational children into node `i`, clearing what it had of the others. Returns
+    /// whether a client sees a change, and whether it shows.
     fn update_extra(&mut self, i: u32, extra: Extra<'_, M>) -> (bool, bool) {
         let (group, value, invoke) = match extra {
             Extra::Group(g) => (Some(g), 0.0, None),
@@ -288,26 +317,46 @@ impl<M> Ui<M> {
             Extra::Sort(order) => (None, sort_value(order), None),
             // So is a menu item's being a check item: a client sees it, and the check shows.
             Extra::Check => (None, CHECK_ITEM, None),
-            Extra::None | Extra::Field { .. } | Extra::Combo { .. } => (None, 0.0, None),
+            // So is a glyph's icon (A3.5 addition 1): it shows, and a named one is an image.
+            Extra::Glyph(icon) => (None, crate::tree::glyph_value(icon), None),
+            // And a container's presentational children (addition 9): a client doesn't see them.
+            Extra::Presentation => (None, PRESENTATION, None),
+            // A live region's politeness (addition 5, A4.5) is read below.
+            Extra::None | Extra::Field { .. } | Extra::Combo { .. } | Extra::Live(_) => {
+                (None, 0.0, None)
+            }
+        };
+        let politeness = match extra {
+            Extra::Live(live) => live,
+            _ => Live::Off,
         };
         let n = &mut self.nodes[i as usize];
         // The group sets a client's role (a tab list, a radio group, a list).
         let regrouped = n.group != group;
         // A progress bar's fill shows, and a client reads it as its value.
         let revalued = n.value.to_bits() != value.to_bits();
+        // A client reads a live region's politeness; nothing shows it.
+        let repolite = n.politeness != politeness;
         n.group = group;
         n.value = value;
+        n.politeness = politeness;
         n.special = group.is_some() || invoke.is_some() || value.to_bits() != 0;
+        n.special |= politeness != Live::Off;
         // A menu item became or stopped being a check item: every label in its menu moves past
         // the checks' gutter or back, so the menu is laid out again.
         let rechecked = revalued && n.role == Role::MenuItem;
+        // A container's children became presentational or stopped being: the flag follows down.
+        let represented = revalued && n.role == Role::Container;
         if n.hold || invoke.is_some() {
             self.update_hold(i, invoke);
         }
         if rechecked {
             self.mark_dirty(i);
         }
-        (regrouped || revalued, revalued)
+        if represented {
+            self.presentation_changed(i);
+        }
+        (regrouped || revalued || repolite, revalued)
     }
 
     /// Node `i`'s popup state from its element's [`rare`] flags `r`, tooltip `tip` and `extra`:
@@ -317,7 +366,7 @@ impl<M> Ui<M> {
     fn update_rare(&mut self, i: u32, r: u8, tip: &str, extra: Extra<'_, M>) -> bool {
         let n = &mut self.nodes[i as usize];
         let scrolled = (n.rare | r) & rare::SCROLL != 0;
-        n.rare = r;
+        n.rare = r | n.rare & rare::PROPS;
         n.context = r & rare::CONTEXT != 0;
         // Whether its popup is open: a client sees it (ExpandCollapse).
         let expanded = rare::expanded(r);
@@ -325,6 +374,8 @@ impl<M> Ui<M> {
         n.expanded = expanded;
         let (label, step) = match extra {
             Extra::Combo { label, step } => (label, step),
+            // A field's name is in its field slot; only its step is here.
+            Extra::Field { step, .. } => ("", step),
             _ => ("", None),
         };
         if n.side != NIL || !tip.is_empty() || !label.is_empty() || step.is_some() {
@@ -336,14 +387,25 @@ impl<M> Ui<M> {
         seen
     }
 
-    /// Keeps node `i`'s tooltip, and a dropdown's name and step, in its side slot: a node that
-    /// gained one gets a slot, and one left with none gives it back (and its tooltip goes).
+    /// Keeps node `i`'s tooltip, a dropdown's name and step, and a field's step, in its side
+    /// slot: a node that gained one gets a slot, and one left with none gives it back (and its
+    /// tooltip goes).
     /// Returns whether a client sees a change: the tip is its description, the name its name.
     fn update_side(&mut self, i: u32, tip: &str, label: &str, step: Option<fn(bool) -> M>) -> bool {
         let mut s = self.nodes[i as usize].side;
         if tip.is_empty() && label.is_empty() && step.is_none() {
             if s == NIL {
                 return false;
+            }
+            // A4.5's properties keep the slot: `update_props` gives it back once they go.
+            if self.nodes[i as usize].rare & rare::PROPS != 0 {
+                let side = &mut self.sides[s as usize];
+                let seen = !side.tip.is_empty() || !side.label.is_empty();
+                side.tip.clear();
+                side.label.clear();
+                side.step = None;
+                self.tip_forget(i);
+                return seen;
             }
             self.nodes[i as usize].side = NIL;
             self.release_side(s);
@@ -375,7 +437,7 @@ impl<M> Ui<M> {
     }
 
     /// A side slot for node `i`, a freed one if there is one.
-    fn alloc_side(&mut self, i: u32) -> u32 {
+    pub(crate) fn alloc_side(&mut self, i: u32) -> u32 {
         if let Some(s) = self.free_sides.pop() {
             self.sides[s as usize].node = i;
             s
@@ -385,6 +447,7 @@ impl<M> Ui<M> {
                 tip: String::new(),
                 label: String::new(),
                 step: None,
+                props: SideProps::default(),
             });
             u32::try_from(self.sides.len() - 1).unwrap_or(NIL)
         }
@@ -397,6 +460,7 @@ impl<M> Ui<M> {
             side.tip.clear();
             side.label.clear();
             side.step = None;
+            side.props.clear();
             self.free_sides.push(s);
         }
     }

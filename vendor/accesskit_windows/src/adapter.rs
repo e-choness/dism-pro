@@ -658,30 +658,65 @@ impl QueuedEvents {
     /// It's not clear whether this is a strict requirement of UIA itself,
     /// but based on the known behavior of UIA, MSAA, and some ATs,
     /// it's strongly recommended.
-    pub fn raise(self) {
-        for event in self.0 {
-            match event {
-                QueuedEvent::Simple { element, event_id } => {
-                    unsafe { UiaRaiseAutomationEvent(&element, event_id) }.unwrap();
+    // dpro: returns how many raises UI Automation refused, instead of panicking on the first
+    // (PATCHES.md, 11; TD-0009 A4.5). One lost event must never abort the process, which the
+    // release profile's `panic = "abort"` would; the events after it are still raised.
+    pub fn raise(self) -> usize {
+        self.raise_with(
+            |element, event_id| {
+                // SAFETY: `element` is a live provider the queue owns; the call only reads it
+                // and the event id.
+                unsafe { UiaRaiseAutomationEvent(element, event_id) }
+            },
+            |element, property_id, old_value, new_value| {
+                // SAFETY: the provider and both variants are owned by the queue and live for
+                // the call, which only reads them.
+                unsafe {
+                    UiaRaiseAutomationPropertyChangedEvent(
+                        element,
+                        property_id,
+                        old_value,
+                        new_value,
+                    )
                 }
+            },
+        )
+    }
+
+    // dpro: `raise` through the given raisers, so a test can refuse a raise: Wine accepts any
+    // event id (PATCHES.md, 11).
+    pub(crate) fn raise_with(
+        self,
+        mut simple: impl FnMut(&IRawElementProviderSimple, UIA_EVENT_ID) -> windows::core::Result<()>,
+        mut changed: impl FnMut(
+            &IRawElementProviderSimple,
+            UIA_PROPERTY_ID,
+            &windows::Win32::System::Variant::VARIANT,
+            &windows::Win32::System::Variant::VARIANT,
+        ) -> windows::core::Result<()>,
+    ) -> usize {
+        let mut failed = 0;
+        for event in self.0 {
+            let raised = match event {
+                QueuedEvent::Simple { element, event_id } => simple(&element, event_id),
                 QueuedEvent::PropertyChanged {
                     element,
                     property_id,
                     old_value,
                     new_value,
-                } => {
-                    unsafe {
-                        UiaRaiseAutomationPropertyChangedEvent(
-                            &element,
-                            property_id,
-                            &old_value,
-                            &new_value,
-                        )
-                    }
-                    .unwrap();
-                }
-            }
+                } => changed(&element, property_id, &old_value, &new_value),
+            };
+            failed += usize::from(raised.is_err());
         }
+        failed
+    }
+}
+
+// dpro: the raise count's tests build a queue of their own (PATCHES.md, 11).
+#[cfg(test)]
+impl QueuedEvents {
+    pub(crate) fn of(events: Vec<QueuedEvent>) -> Self {
+        Self(events)
     }
 }
 
