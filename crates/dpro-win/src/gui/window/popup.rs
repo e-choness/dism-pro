@@ -1,5 +1,6 @@
-//! A window's popups (TD-0009 amendment A1.5): menus, a dropdown's list and tooltips, each a
-//! `WS_POPUP` window of class `dismpro.popup` owned by the main window, on its thread.
+//! A window's popups (TD-0009 amendment A1.5): menus, a dropdown's list and tooltips, and slice
+//! 6c's palette, toast and dialog (A3.5 addition 13), each a `WS_POPUP` window of class
+//! `dismpro.popup` owned by the main window, on its thread.
 //!
 //! - **One handler.** A popup has no handler of its own. Its events, paints and accessibility
 //!   trees go to its owner's handler, marked with the [`Surface`] they're for, and the
@@ -11,14 +12,20 @@
 //! - **Activation.** A menu or a list activates when it shows and takes the keyboard focus. The
 //!   owner keeps drawing its frame active meanwhile (`WM_NCACTIVATE`), and hears
 //!   [`Event::Focus`]`(false)` as usual. A tooltip never activates, and clicks fall through it to
-//!   the owner (`HTTRANSPARENT`, `MA_NOACTIVATE`).
-//! - **Light dismiss.** [`Event::Dismiss`] comes for a popup that's deactivated (a click outside
-//!   it, another window activated) or cancelled (`WM_CANCELMODE`), and for every shown popup when
-//!   the owner moves, resizes, minimizes or changes DPI. A click on the owner while a menu or a
-//!   list is shown activates the owner and reaches nothing else, neither its press
-//!   (`MA_ACTIVATEANDEAT`) nor its release, as with Windows' menus. One the handler hid while
-//!   the owner was minimized isn't shown again at the restore. Alt+F4 in a popup closes the
-//!   owner, not the popup's window.
+//!   the owner (`HTTRANSPARENT`, `MA_NOACTIVATE`). So do the palette and a dialog. A toast never
+//!   activates when it shows or is clicked (`SW_SHOWNOACTIVATE`, `MA_NOACTIVATE`), yet takes its
+//!   clicks, so it isn't `WS_EX_NOACTIVATE`: only [`WindowCx::activate`] (F6) gives it the
+//!   keyboard.
+//! - **Light dismiss.** [`Event::Dismiss`] comes for a menu, a list, a tooltip or the palette
+//!   that's deactivated (a click outside it, another window activated) or cancelled
+//!   (`WM_CANCELMODE`), and for every shown popup when the owner moves, resizes, minimizes or
+//!   changes DPI: a toast or a dialog hears it only then, to be placed again. A click on the owner
+//!   while a menu, a list or the palette is shown activates the owner and reaches nothing else,
+//!   neither its press (`MA_ACTIVATEANDEAT`) nor its release, as with Windows' menus. While a
+//!   dialog is shown, such a click reaches nothing and activates nothing
+//!   (`MA_NOACTIVATEANDEAT`), and the owner activated otherwise hands the activation to the
+//!   dialog. One the handler hid while the owner was minimized isn't shown again at the restore.
+//!   Alt+F4 in a popup closes the owner, not the popup's window.
 //! - **Reuse.** Each kind's window is made at its first show and kept, hidden, for the next, so a
 //!   later open makes no window, no swap chain and no UI Automation adapter. A popup presents on
 //!   its owner's device when the owner is composed, else with GDI. One whose presenter is lost
@@ -59,15 +66,16 @@ use windows_sys::{
             },
             WindowsAndMessaging::{
                 CS_DROPSHADOW, CreateWindowExW, DefWindowProcW, GetClientRect, HTCLIENT,
-                HTTRANSPARENT, HWND_TOP, MA_ACTIVATEANDEAT, MA_NOACTIVATE, PostMessageW, SC_CLOSE,
-                SW_HIDE, SW_PARENTOPENING, SW_SHOW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE,
-                SendMessageW, SetCursor, SetWindowPos, ShowWindow, WA_INACTIVE, WM_ACTIVATE,
-                WM_CANCELMODE, WM_CONTEXTMENU, WM_CREATE, WM_DPICHANGED, WM_GETMINMAXINFO,
-                WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEACTIVATE,
-                WM_MOVE, WM_NCACTIVATE, WM_NCHITTEST, WM_POWERBROADCAST, WM_RBUTTONDOWN,
-                WM_RBUTTONUP, WM_SETCURSOR, WM_SETTINGCHANGE, WM_SHOWWINDOW, WM_SYSCOLORCHANGE,
-                WM_SYSCOMMAND, WM_THEMECHANGED, WM_WTSSESSION_CHANGE, WM_XBUTTONDOWN, WM_XBUTTONUP,
-                WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_POPUP,
+                HTTRANSPARENT, HWND_TOP, IsIconic, MA_ACTIVATEANDEAT, MA_NOACTIVATE,
+                MA_NOACTIVATEANDEAT, PostMessageW, SC_CLOSE, SW_HIDE, SW_PARENTOPENING, SW_SHOW,
+                SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SendMessageW, SetCursor, SetWindowPos,
+                ShowWindow, WA_INACTIVE, WM_ACTIVATE, WM_CANCELMODE, WM_CONTEXTMENU, WM_CREATE,
+                WM_DPICHANGED, WM_GETMINMAXINFO, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
+                WM_MBUTTONUP, WM_MOUSEACTIVATE, WM_MOVE, WM_NCACTIVATE, WM_NCHITTEST,
+                WM_POWERBROADCAST, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETTINGCHANGE,
+                WM_SHOWWINDOW, WM_SYSCOLORCHANGE, WM_SYSCOMMAND, WM_THEMECHANGED,
+                WM_WTSSESSION_CHANGE, WM_XBUTTONDOWN, WM_XBUTTONUP, WS_EX_NOACTIVATE,
+                WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_POPUP,
             },
         },
     },
@@ -101,6 +109,8 @@ pub(super) enum Op {
         backdrop: Backdrop,
     },
     Hide(PopupKind),
+    /// The activation to a surface: the window, or a shown popup (F6 into a toast and out).
+    Activate(Surface),
 }
 
 /// A main window's popups. Only brief borrows are taken: showing, hiding and destroying a popup
@@ -108,9 +118,9 @@ pub(super) enum Op {
 #[derive(Default)]
 pub(super) struct Popups {
     /// Each kind's window, made at its first show.
-    windows: RefCell<[Option<Window>; 3]>,
+    windows: RefCell<[Option<Window>; 6]>,
     /// Which kinds are shown, as of the last op done.
-    shown: Cell<[bool; 3]>,
+    shown: Cell<[bool; 6]>,
     ops: RefCell<Vec<Op>>,
     /// The ops are being done: a handler call this brings queues more for the same loop.
     applying: Cell<bool>,
@@ -134,9 +144,10 @@ impl Popups {
         self.shown.set(shown);
     }
 
-    /// A menu or a list is shown, and so holds (or is taking) the activation.
+    /// A menu, a list or the palette is shown, and so holds (or is taking) the activation, and a
+    /// click outside it dismisses it.
     fn activating_shown(&self) -> bool {
-        self.shown(PopupKind::Menu) || self.shown(PopupKind::List)
+        self.shown(PopupKind::Menu) || self.shown(PopupKind::List) || self.shown(PopupKind::Palette)
     }
 
     /// The window of `kind`, if it's made and alive.
@@ -184,8 +195,8 @@ impl WindowCx<'_> {
     }
 
     /// Shows this window's popup of `kind` at `rect`, in screen pixels and already placed, over
-    /// `backdrop` if the popup is composed; moves it if it's shown. A menu or a list takes the
-    /// activation and the keyboard focus; a tooltip takes neither. This happens once the handler
+    /// `backdrop` if the popup is composed; moves it if it's shown. A menu, a list, the palette or
+    /// a dialog takes the activation and the keyboard focus; a tooltip or a toast takes neither. This happens once the handler
     /// returns: the popup's surface then hears its [`Event::Presenter`] (when it's made) and its
     /// [`Event::Resize`] (when its size changes), and it paints what the handler invalidates in it.
     pub fn show_popup(&mut self, kind: PopupKind, rect: RectPx, backdrop: Backdrop) {
@@ -202,6 +213,13 @@ impl WindowCx<'_> {
         self.state.popups.queue(Op::Hide(kind));
     }
 
+    /// Gives the activation, and so the keyboard focus, to `surface`: F6 into a shown toast, and
+    /// back to the window (A3.5 (7)). The window keeps its active frame. A popup that isn't
+    /// shown ignores it. This happens once the handler returns.
+    pub fn activate(&mut self, surface: Surface) {
+        self.state.popups.queue(Op::Activate(surface));
+    }
+
     /// Whether this window's popup of `kind` is shown, as of the last show or hide done.
     #[must_use]
     pub fn popup_shown(&self, kind: PopupKind) -> bool {
@@ -215,6 +233,14 @@ impl WindowCx<'_> {
         // SAFETY: hwnd is live, and pt a live local; on failure pt stays as it was.
         unsafe { ClientToScreen(self.hwnd, &raw mut pt) };
         PointPx { x: pt.x, y: pt.y }
+    }
+
+    /// Whether this window is minimized: its client area is nowhere on screen, so a popup placed
+    /// against it (a toast, a dialog) waits for the restore.
+    #[must_use]
+    pub fn minimized(&self) -> bool {
+        // SAFETY: no preconditions; hwnd is live.
+        unsafe { IsIconic(self.hwnd) != 0 }
     }
 
     /// The work area (the monitor less the taskbar) of the monitor nearest `r`, in screen pixels,
@@ -241,6 +267,7 @@ impl State {
                     backdrop,
                 }) => self.show_now(hwnd, kind, rect, backdrop),
                 Some(Op::Hide(kind)) => self.hide_now(hwnd, kind),
+                Some(Op::Activate(surface)) => self.activate_now(hwnd, surface),
                 None => break,
             }
         }
@@ -277,7 +304,7 @@ impl State {
         // SAFETY: as above. WM_SIZE comes back through the procedure, and the handler hears it.
         unsafe { SetWindowPos(hwnd, HWND_TOP, rect.x0, rect.y0, w, h, SWP_NOACTIVATE) };
         self.popups.set_shown(kind, true);
-        if kind == PopupKind::Tooltip {
+        if matches!(kind, PopupKind::Tooltip | PopupKind::Toast) {
             // SAFETY: as above.
             unsafe { ShowWindow(hwnd, SW_SHOWNOACTIVATE) };
         } else {
@@ -287,6 +314,24 @@ impl State {
             unsafe { ShowWindow(hwnd, SW_SHOW) };
             self.popups.keep_active.set(false);
         }
+    }
+
+    fn activate_now(&self, owner: HWND, surface: Surface) {
+        let to = match surface {
+            Surface::Main => owner,
+            Surface::Popup(kind) => {
+                let Some(hwnd) = self.popups.hwnd(kind).filter(|_| self.popups.shown(kind)) else {
+                    return;
+                };
+                hwnd
+            }
+        };
+        // The owner gives up the activation to its popup, not its active frame.
+        self.popups.keep_active.set(to != owner);
+        // SAFETY: a live window of this thread: the owner or one of its popups. WM_ACTIVATE and
+        // WM_SETFOCUS reach the handler.
+        unsafe { SetActiveWindow(to) };
+        self.popups.keep_active.set(false);
     }
 
     fn hide_now(&self, owner: HWND, kind: PopupKind) {
@@ -459,7 +504,7 @@ impl State {
             }
             WM_ACTIVATE if wp & 0xFFFF == usize::try_from(WA_INACTIVE).unwrap_or(0) => {
                 self.deactivating.set(true);
-                if !self.hiding.get() {
+                if !self.hiding.get() && light_dismissed(kind) {
                     self.send(hwnd, Event::Dismiss);
                 }
                 self.deactivating.set(false);
@@ -474,7 +519,7 @@ impl State {
                 Some(None)
             }
             WM_CANCELMODE => {
-                if !self.hiding.get() {
+                if !self.hiding.get() && light_dismissed(kind) {
                     self.send(hwnd, Event::Dismiss);
                 }
                 Some(None)
@@ -484,7 +529,9 @@ impl State {
             WM_NCHITTEST if kind == PopupKind::Tooltip => {
                 Some(Some(LRESULT::try_from(HTTRANSPARENT).unwrap_or(-1)))
             }
-            WM_MOUSEACTIVATE if kind == PopupKind::Tooltip => {
+            // A toast takes its clicks without the activation: the keyboard stays where it was
+            // (A3.5 (7)).
+            WM_MOUSEACTIVATE if matches!(kind, PopupKind::Tooltip | PopupKind::Toast) => {
                 Some(Some(LRESULT::try_from(MA_NOACTIVATE).unwrap_or(3)))
             }
             WM_SETCURSOR if low(lp) == HTCLIENT => {
@@ -545,6 +592,25 @@ impl State {
                 self.popups.eaten_up.set(button_up(high(lp)));
                 Some(Some(LRESULT::try_from(MA_ACTIVATEANDEAT).unwrap_or(2)))
             }
+            // A dialog over the window is modal: a click on the window reaches nothing and
+            // leaves the dialog active (A3.5 (13)).
+            WM_MOUSEACTIVATE if low(lp) == HTCLIENT && self.popups.shown(PopupKind::Dialog) => {
+                self.popups.eaten_up.set(button_up(high(lp)));
+                Some(Some(LRESULT::try_from(MA_NOACTIVATEANDEAT).unwrap_or(4)))
+            }
+            // Activated otherwise (its title bar, Alt+Tab, a menu over the dialog closing), the
+            // window hands the activation to its dialog, keeping its active frame.
+            WM_ACTIVATE
+                if wp & 0xFFFF != usize::try_from(WA_INACTIVE).unwrap_or(0)
+                    && self.popups.shown(PopupKind::Dialog) =>
+            {
+                let dialog = self.popups.hwnd(PopupKind::Dialog)?;
+                self.popups.keep_active.set(true);
+                // SAFETY: a live popup of this window, on this thread.
+                unsafe { SetActiveWindow(dialog) };
+                self.popups.keep_active.set(false);
+                Some(Some(0))
+            }
             // A press that reached the window: any release eaten earlier never came here.
             WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_XBUTTONDOWN => {
                 self.popups.eaten_up.set(0);
@@ -601,8 +667,8 @@ impl State {
 
     /// On a main window's state: a wheel turned (`WM_MOUSEWHEEL`, or `WM_MOUSEHWHEEL` if
     /// `horizontal`), sent to `hwnd` or one of its popups. The surface under the pointer hears
-    /// it in its client pixels: a shown menu or list, else the window's client area. A tooltip
-    /// is never under it, as clicks pass through it too.
+    /// it in its client pixels: a shown menu, list, palette, dialog or toast, else the window's
+    /// client area. A tooltip is never under it, as clicks pass through it too.
     pub(super) fn wheel(&self, hwnd: HWND, horizontal: bool, wp: WPARAM, lp: LPARAM) {
         // GET_WHEEL_DELTA_WPARAM: the high word, signed.
         let word = u16::try_from((wp >> 16) & 0xFFFF).unwrap_or(0);
@@ -613,7 +679,13 @@ impl State {
             horizontal,
             at,
         };
-        for kind in [PopupKind::Menu, PopupKind::List] {
+        for kind in [
+            PopupKind::Menu,
+            PopupKind::List,
+            PopupKind::Palette,
+            PopupKind::Dialog,
+            PopupKind::Toast,
+        ] {
             if !self.popups.shown(kind) {
                 continue;
             }
@@ -650,7 +722,7 @@ impl State {
             .try_borrow_mut()
             .map(|mut w| std::mem::take(&mut *w))
             .unwrap_or_default();
-        self.popups.shown.set([false; 3]);
+        self.popups.shown.set([false; 6]);
         drop(windows);
     }
 
@@ -780,6 +852,12 @@ fn create(owner: HWND, kind: PopupKind, rect: RectPx, gpu: Option<&Gpu>) -> Opti
         #[cfg(test)]
         _serial: serial,
     })
+}
+
+/// A popup of `kind` is dismissed when it loses the activation or is cancelled. A toast and a
+/// dialog aren't: they stay until the handler hides them.
+const fn light_dismissed(kind: PopupKind) -> bool {
+    !matches!(kind, PopupKind::Toast | PopupKind::Dialog)
 }
 
 /// The release of the button whose press is the mouse message `down`, or 0. Neither class asks
@@ -1084,6 +1162,148 @@ mod tests {
         assert_eq!(activate, LRESULT::try_from(MA_NOACTIVATE).unwrap_or(0));
         // SAFETY: no preconditions.
         assert_ne!(unsafe { GetActiveWindow() }, tip);
+        drop(window);
+        drain();
+    }
+
+    /// The `lParam` of a `WM_MOUSEACTIVATE` for a left press on the client area.
+    fn client_press() -> LPARAM {
+        LPARAM::try_from(HTCLIENT).unwrap_or(0)
+            | (LPARAM::try_from(WM_LBUTTONDOWN).unwrap_or(0) << 16)
+    }
+
+    /// T2 (slice 6c): a toast takes the activation neither when it shows nor when it's clicked,
+    /// yet takes its clicks: it's neither `WS_EX_NOACTIVATE` (F6 activates it) nor transparent to
+    /// hits. Losing the activation or a cancel doesn't dismiss it; the owner moving does, so that
+    /// it's placed again.
+    #[test]
+    fn a_toast_never_activates_on_show_or_click() {
+        let (window, log, _) = open();
+        let toast = Surface::Popup(PopupKind::Toast);
+        as_handler(&window, |cx| {
+            cx.show_popup(PopupKind::Toast, rect(10, 10, 370, 130), Backdrop::None);
+        });
+        let hwnd = popup(&window, PopupKind::Toast).expect("the toast's window");
+        assert!(visible(hwnd));
+        // SAFETY: no preconditions.
+        let active = unsafe { GetActiveWindow() };
+        assert_ne!(active, hwnd, "not activated by its show");
+        // SAFETY: the test's live windows, on its thread (every block below).
+        let ex_style = u32::try_from(unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) }).unwrap_or(0);
+        assert_eq!(ex_style & WS_EX_NOACTIVATE, 0, "F6 can activate it");
+        let inside = (LPARAM::from(40_i16) << 16) | LPARAM::from(40_i16);
+        // SAFETY: as above.
+        let hit = unsafe { SendMessageW(hwnd, WM_NCHITTEST, 0, inside) };
+        assert_ne!(
+            hit,
+            LRESULT::try_from(HTTRANSPARENT).unwrap_or(0),
+            "it takes its clicks"
+        );
+        // SAFETY: as above.
+        let activate = unsafe { SendMessageW(hwnd, WM_MOUSEACTIVATE, 0, client_press()) };
+        assert_eq!(activate, LRESULT::try_from(MA_NOACTIVATE).unwrap_or(0));
+        let at = (LPARAM::from(12_i16) << 16) | LPARAM::from(10_i16);
+        // SAFETY: as above.
+        unsafe {
+            SendMessageW(hwnd, WM_LBUTTONDOWN, 1, at);
+            SendMessageW(hwnd, WM_LBUTTONUP, 0, at);
+        };
+        // SAFETY: no preconditions.
+        assert_ne!(unsafe { GetActiveWindow() }, hwnd, "nor by a click");
+        // SAFETY: as above.
+        unsafe {
+            SendMessageW(hwnd, WM_ACTIVATE, 0, 0);
+            SendMessageW(hwnd, WM_CANCELMODE, 0, 0);
+        };
+        assert_eq!(heard(&log, toast, Event::Dismiss), 0, "{:?}", log.borrow());
+        assert!(visible(hwnd));
+        // F6, and back. Printed, not checked: Wine's null driver keeps the activation to itself.
+        as_handler(&window, |cx| cx.activate(toast));
+        // SAFETY: no preconditions.
+        let active = unsafe { GetActiveWindow() } == hwnd;
+        println!("the toast is active after F6: {active}");
+        as_handler(&window, |cx| cx.activate(Surface::Main));
+        // SAFETY: as above.
+        unsafe { SendMessageW(window.hwnd, WM_MOVE, 0, 0) };
+        assert_eq!(heard(&log, toast, Event::Dismiss), 1, "placed again");
+        drop(window);
+        drain();
+    }
+
+    /// T2 (slice 6c): the palette lives as a menu does: made at its first show, activated, a click
+    /// on the owner eaten, dismissed when it loses the activation, and kept for the next show.
+    #[test]
+    fn the_palette_s_lifecycle() {
+        let (window, log, _) = open();
+        let palette = Surface::Popup(PopupKind::Palette);
+        as_handler(&window, |cx| {
+            cx.show_popup(PopupKind::Palette, rect(40, 60, 680, 420), Backdrop::None);
+        });
+        let hwnd = popup(&window, PopupKind::Palette).expect("the palette's window");
+        assert!(visible(hwnd));
+        // SAFETY: the test's live windows, on its thread (every block below).
+        assert_eq!(unsafe { GetWindow(hwnd, GW_OWNER) }, window.hwnd);
+        assert_eq!(
+            heard(&log, palette, Event::Resize(SizePx { w: 640, h: 360 })),
+            1,
+            "{:?}",
+            log.borrow()
+        );
+        // SAFETY: no preconditions. Printed, as for the menu.
+        let active = unsafe { GetActiveWindow() } == hwnd;
+        println!("the palette is active after its show: {active}");
+        // SAFETY: as above.
+        let eaten = unsafe { SendMessageW(window.hwnd, WM_MOUSEACTIVATE, 0, client_press()) };
+        assert_eq!(eaten, LRESULT::try_from(MA_ACTIVATEANDEAT).unwrap_or(0));
+        // SAFETY: as above.
+        unsafe { SendMessageW(hwnd, WM_ACTIVATE, 0, 0) };
+        assert_eq!(heard(&log, palette, Event::Dismiss), 1);
+        assert!(!visible(hwnd), "the handler hid it");
+        as_handler(&window, |cx| {
+            cx.show_popup(PopupKind::Palette, rect(40, 60, 680, 300), Backdrop::None);
+        });
+        assert_eq!(popup(&window, PopupKind::Palette), Some(hwnd), "kept");
+        assert!(visible(hwnd));
+        as_handler(&window, |cx| cx.hide_popup(PopupKind::Palette));
+        assert!(!visible(hwnd));
+        drop(window);
+        drain();
+    }
+
+    /// T2 (slice 6c): a dialog over the owner is modal: a click on the owner reaches nothing and
+    /// activates nothing, losing the activation or a cancel doesn't dismiss it, and the owner
+    /// moving does, so that it's placed again.
+    #[test]
+    fn a_dialog_eats_the_owner_s_clicks_and_stays() {
+        let (window, log, _) = open();
+        let dialog = Surface::Popup(PopupKind::Dialog);
+        as_handler(&window, |cx| {
+            cx.show_popup(PopupKind::Dialog, rect(60, 60, 500, 300), Backdrop::None);
+        });
+        let hwnd = popup(&window, PopupKind::Dialog).expect("the dialog's window");
+        assert!(visible(hwnd));
+        // SAFETY: the test's live windows, on its thread (every block below).
+        let eaten = unsafe { SendMessageW(window.hwnd, WM_MOUSEACTIVATE, 0, client_press()) };
+        assert_eq!(eaten, LRESULT::try_from(MA_NOACTIVATEANDEAT).unwrap_or(0));
+        let at = (LPARAM::from(12_i16) << 16) | LPARAM::from(10_i16);
+        // SAFETY: as above. The eaten press's release reaches nothing either.
+        unsafe { SendMessageW(window.hwnd, WM_LBUTTONUP, 0, at) };
+        let ups = log
+            .borrow()
+            .iter()
+            .filter(|(s, e)| *s == Surface::Main && matches!(e, Event::PointerUp(_)))
+            .count();
+        assert_eq!(ups, 0, "{:?}", log.borrow());
+        // SAFETY: as above.
+        unsafe {
+            SendMessageW(hwnd, WM_ACTIVATE, 0, 0);
+            SendMessageW(hwnd, WM_CANCELMODE, 0, 0);
+        };
+        assert_eq!(heard(&log, dialog, Event::Dismiss), 0, "{:?}", log.borrow());
+        assert!(visible(hwnd));
+        // SAFETY: as above.
+        unsafe { SendMessageW(window.hwnd, WM_MOVE, 0, 0) };
+        assert_eq!(heard(&log, dialog, Event::Dismiss), 1, "placed again");
         drop(window);
         drain();
     }

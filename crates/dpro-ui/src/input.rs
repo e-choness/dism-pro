@@ -200,6 +200,8 @@ impl<M: Clone> Ui<M> {
                 } else {
                     self.key(k, out)
                 };
+                // Esc nothing took dismisses the toast shown here (A3.5 (7)).
+                let used = used || (k.down && k.key == KeyCode::Escape && self.escape_toast(out));
                 // Focus the keyboard moved shows its tip at once.
                 if self.focus != before && self.focus_visible {
                     self.tip_focus(self.focus);
@@ -537,6 +539,8 @@ impl<M: Clone> Ui<M> {
     pub fn tick(&mut self, now_ms: u64, out: &mut Vec<M>) {
         self.tick_hold(now_ms, out);
         self.tick_animations(now_ms);
+        // An ended toast's hide, once due (A3.5 (7)).
+        self.tick_expiry(now_ms, out);
     }
 
     fn tick_hold(&mut self, now_ms: u64, out: &mut Vec<M>) {

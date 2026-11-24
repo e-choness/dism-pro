@@ -175,7 +175,6 @@ fn negative_sizes_and_gaps_count_as_zero() {
 const CLIENT: RectPx = r(200, 100, 1200, 800);
 
 #[test]
-#[ignore = "slice 6c: lands with the code"]
 fn top_center_is_centered_at_its_offset_from_the_client_area_s_top() {
     assert_eq!(
         place(CLIENT, 640, 400, WORK, Placement::TopCenter(96), GAP),
@@ -189,7 +188,6 @@ fn top_center_is_centered_at_its_offset_from_the_client_area_s_top() {
 }
 
 #[test]
-#[ignore = "slice 6c: lands with the code"]
 fn bottom_end_is_inset_from_the_client_area_s_bottom_right() {
     assert_eq!(
         place(CLIENT, 360, 100, WORK, Placement::BottomEnd(16), GAP),
@@ -204,7 +202,6 @@ fn bottom_end_is_inset_from_the_client_area_s_bottom_right() {
 }
 
 #[test]
-#[ignore = "slice 6c: lands with the code"]
 fn center_is_centered_on_the_client_area() {
     assert_eq!(
         place(CLIENT, 440, 300, WORK, Placement::Center, GAP),
@@ -218,7 +215,6 @@ fn center_is_centered_on_the_client_area() {
 }
 
 #[test]
-#[ignore = "slice 6c: lands with the code"]
 fn negative_offsets_and_insets_count_as_zero() {
     assert_eq!(
         place(CLIENT, 640, 400, WORK, Placement::TopCenter(-50), GAP),

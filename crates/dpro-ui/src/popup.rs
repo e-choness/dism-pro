@@ -77,6 +77,10 @@ pub enum Placement {
 /// - **Horizontally** from the anchor's left edge, or, if that overflows the work area's right,
 ///   ending at the anchor's right edge (a zero-width anchor, a point, so opens leftward). Then it's
 ///   moved inside the work area.
+/// - [`TopCenter`](Placement::TopCenter), [`BottomEnd`](Placement::BottomEnd) and
+///   [`Center`](Placement::Center) place it in the anchor, the owner's client area, where they
+///   say (a negative offset or inset counts as 0, and `gap` doesn't apply), then move it inside
+///   the work area the same way (TD-0009 A3.5 addition 13).
 /// - A popup larger than the work area keeps its size and starts at the work area's top left.
 #[must_use]
 pub fn place(
@@ -88,27 +92,23 @@ pub fn place(
     gap: i32,
 ) -> RectPx {
     let (w, h, gap) = (w.max(0), h.max(0), gap.max(0));
-    let below = anchor.y1.saturating_add(gap);
-    let above = anchor.y0.saturating_sub(gap).saturating_sub(h);
-    let fits_below = below.saturating_add(h) <= work.y1;
-    let fits_above = above >= work.y0;
-    let room_below = work.y1.saturating_sub(below);
-    let room_above = anchor.y0.saturating_sub(gap).saturating_sub(work.y0);
-    // The preferred side if it fits, else the other if that fits, else the roomier.
-    let roomier_below = room_below >= room_above;
-    let go_below = match placement {
-        Placement::Above => !fits_above && (fits_below || roomier_below),
-        // Slice 6c's placements land with the code (the MEASURE commit's stub).
-        Placement::Below
-        | Placement::TopCenter(_)
-        | Placement::BottomEnd(_)
-        | Placement::Center => fits_below || (!fits_above && roomier_below),
-    };
-    let y = if go_below { below } else { above };
-    let x = if anchor.x0.saturating_add(w) <= work.x1 {
-        anchor.x0
-    } else {
-        anchor.x1.saturating_sub(w)
+    let (x, y) = match placement {
+        Placement::Below | Placement::Above => beside(anchor, w, h, work, placement, gap),
+        Placement::TopCenter(offset) => (
+            centered(anchor.x0, anchor.x1, w),
+            anchor.y0.saturating_add(offset.max(0)),
+        ),
+        Placement::BottomEnd(inset) => {
+            let inset = inset.max(0);
+            (
+                anchor.x1.saturating_sub(inset).saturating_sub(w),
+                anchor.y1.saturating_sub(inset).saturating_sub(h),
+            )
+        }
+        Placement::Center => (
+            centered(anchor.x0, anchor.x1, w),
+            centered(anchor.y0, anchor.y1, h),
+        ),
     };
     let (x, y) = (
         inside(x, w, work.x0, work.x1),
@@ -120,6 +120,43 @@ pub fn place(
         x1: x.saturating_add(w),
         y1: y.saturating_add(h),
     }
+}
+
+/// Where a popup goes beside `anchor`, `gap` pixels from it on the `placement` side ([`place`]'s
+/// first two rules), before it's moved inside `work`.
+fn beside(
+    anchor: RectPx,
+    w: i32,
+    h: i32,
+    work: RectPx,
+    placement: Placement,
+    gap: i32,
+) -> (i32, i32) {
+    let below = anchor.y1.saturating_add(gap);
+    let above = anchor.y0.saturating_sub(gap).saturating_sub(h);
+    let fits_below = below.saturating_add(h) <= work.y1;
+    let fits_above = above >= work.y0;
+    let room_below = work.y1.saturating_sub(below);
+    let room_above = anchor.y0.saturating_sub(gap).saturating_sub(work.y0);
+    // The preferred side if it fits, else the other if that fits, else the roomier.
+    let roomier_below = room_below >= room_above;
+    let go_below = if placement == Placement::Above {
+        !fits_above && (fits_below || roomier_below)
+    } else {
+        fits_below || (!fits_above && roomier_below)
+    };
+    let y = if go_below { below } else { above };
+    let x = if anchor.x0.saturating_add(w) <= work.x1 {
+        anchor.x0
+    } else {
+        anchor.x1.saturating_sub(w)
+    };
+    (x, y)
+}
+
+/// Where `len` starts to be centered on `[lo, hi)`.
+const fn centered(lo: i32, hi: i32, len: i32) -> i32 {
+    lo.saturating_add(hi.saturating_sub(lo).saturating_sub(len) / 2)
 }
 
 /// `start` moved so that `[start, start + len)` lies within `[lo, hi)`; `lo` if it can't.
@@ -156,9 +193,13 @@ impl<M> Ui<M> {
     }
 
     /// Focuses the first Tab stop (a menu's first item, a list's picked option), with the focus
-    /// ring if `visible` (opened by the keyboard): a popup that just opened.
+    /// ring if `visible` (opened by the keyboard): a popup that just opened. A dialog frame's
+    /// initial button comes first, if it can take focus (TD-0009 A3.5 (13)).
     pub fn focus_first(&mut self, visible: bool) {
-        let to = self.tab_from(NIL, true);
+        let to = match self.initial.and_then(|id| self.index(id)) {
+            Some(i) if self.nodes[i as usize].interactive() => i,
+            _ => self.tab_from(NIL, true),
+        };
         if to != NIL {
             self.move_focus(to);
         }

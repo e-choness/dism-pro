@@ -12,7 +12,7 @@
 use crate::{
     a11y::SideProps,
     field::TextEdit,
-    pool::capacity_for,
+    pool::{capacity_for, copy_text},
     table::sort_value,
     text::TextStyle,
     tree::{CHECK_ITEM, Element, Extra, Live, NIL, NodeId, PRESENTATION, Role, rare},
@@ -181,7 +181,13 @@ impl<M> Ui<M> {
         if n.text != el.text {
             n.text.clear();
             if n.text.capacity() < el.text.len() {
-                n.text.reserve_exact(capacity_for(el.text.len()));
+                // A spare buffer that holds it first: a text that grows (a toast's line as its
+                // job ends, slice 6c) takes back the one its node gave the pool last time (U8).
+                let old = std::mem::replace(&mut n.text, self.texts.take(el.text.len()));
+                self.texts.put(old);
+                if n.text.capacity() < el.text.len() {
+                    n.text.reserve_exact(capacity_for(el.text.len()));
+                }
             }
             n.text.push_str(el.text);
             if field == NIL {
@@ -254,6 +260,11 @@ impl<M> Ui<M> {
         if looks {
             // Where it is now; if layout moves it, layout damages where it goes.
             self.damage_node(i);
+            // A suggestion the field's step highlighted comes into view (the palette's, A3.5
+            // (3)): a highlight shows with its look.
+            if picked && self.nodes[i as usize].selected == Some(true) && self.suggestion(i) {
+                self.reveal(i);
+            }
         }
         if seen {
             self.a11y_touch(i);
@@ -423,13 +434,11 @@ impl<M> Ui<M> {
         let side = &mut self.sides[s as usize];
         side.step = step;
         if side.tip != tip {
-            side.tip.clear();
-            side.tip.push_str(tip);
+            copy_text(&mut side.tip, tip);
             seen = true;
         }
         if side.label != label {
-            side.label.clear();
-            side.label.push_str(label);
+            copy_text(&mut side.label, label);
             seen = true;
         }
         if tip.is_empty() {
@@ -446,10 +455,11 @@ impl<M> Ui<M> {
         } else {
             self.sides.push(Side {
                 node: i,
-                tip: String::new(),
+                // A description fits as it is: slots pass from node to node as they come and go.
+                tip: String::with_capacity(capacity_for(32)),
                 label: String::new(),
                 step: None,
-                props: SideProps::default(),
+                props: SideProps::new(),
             });
             u32::try_from(self.sides.len() - 1).unwrap_or(NIL)
         }

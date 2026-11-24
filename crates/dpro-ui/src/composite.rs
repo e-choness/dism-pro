@@ -51,6 +51,7 @@ pub use settings_row::{SETTINGS_DESCRIPTION, SETTINGS_HEADING, SETTINGS_LABEL, S
 pub use dialog::{DIALOG_BODY, DIALOG_FOOTER, DIALOG_TITLE, DialogFrame};
 pub use job_card::{JOB_BAR, JOB_CANCEL, JOB_ELAPSED, JOB_LINE, JOB_TITLE, JobCard};
 pub use palette::{PALETTE_FIELD, PALETTE_LIST, PALETTE_STATUS, PaletteRow, PaletteView};
+pub(crate) use toast::Expiry;
 pub use toast::{
     TOAST_ACTIONS, TOAST_BAR, TOAST_DISMISS, TOAST_LINE, TOAST_TITLE, Toast, ToastTone,
 };
@@ -105,10 +106,6 @@ const SECONDARY: Look = Look {
 
 /// A button's look for `emphasis`, on the page: the dialog frame's buttons. (The batch bar has
 /// its own: it's the inverse of the page.)
-#[allow(
-    dead_code,
-    reason = "slice 6c's dialog frame uses it with the code (the MEASURE commit's stub)"
-)]
 const fn button_look(emphasis: Emphasis) -> Look {
     match emphasis {
         Emphasis::Primary => Look::PRIMARY,

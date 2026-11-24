@@ -89,7 +89,6 @@ fn focus_stays_in_the_field() {
 }
 
 #[test]
-#[ignore = "slice 6c: lands with the code"]
 fn up_and_down_move_the_highlight_and_wrap() {
     let mut run = open();
     run.step(popup_key(KeyCode::Up));
@@ -149,7 +148,6 @@ fn a_disabled_result_can_be_highlighted_but_enter_does_nothing() {
 }
 
 #[test]
-#[ignore = "slice 6c: lands with the code"]
 fn a_click_on_an_option_picks_it_and_hover_never_moves_focus() {
     let mut run = open();
     let field = field(&run);
@@ -202,7 +200,6 @@ fn a_client_sees_a_dialog_named_by_the_palette() {
 }
 
 #[test]
-#[ignore = "slice 6c: lands with the code"]
 fn the_field_is_controller_for_the_list() {
     let mut run = Run::accessible(Model::new()).palette_open();
     let tree = run.a11y_tree_of(Window::Popup);
@@ -222,7 +219,6 @@ fn the_field_is_controller_for_the_list() {
 }
 
 #[test]
-#[ignore = "slice 6c: lands with the code"]
 fn exactly_one_option_is_selected_and_positions_skip_the_headers() {
     let mut run = Run::accessible(Model::new()).palette_open();
     let tree = run.a11y_tree_of(Window::Popup);
@@ -234,10 +230,15 @@ fn exactly_one_option_is_selected_and_positions_skip_the_headers() {
         .map(|(i, _)| i)
         .collect();
     assert_eq!(selected, [0]);
-    for (i, n) in (1..).zip(&found) {
+    // Zero-based, as AccessKit counts and slice 6a's suggestion lists place their options; the
+    // set's size is the list's.
+    for (i, n) in (0..).zip(&found) {
         assert_eq!(n.position_in_set(), Some(i));
-        assert_eq!(n.size_of_set(), Some(MAX_ROWS));
     }
+    let list = run
+        .ak_in(Window::Popup, &tree, list(&run))
+        .expect("the list");
+    assert_eq!(list.size_of_set(), Some(MAX_ROWS));
     // An option is read once: its parts are presentational.
     assert!(found.iter().all(|n| n.children().is_empty()));
     // Down moves the selection: one option changes, in the update.
@@ -252,7 +253,6 @@ fn exactly_one_option_is_selected_and_positions_skip_the_headers() {
 }
 
 #[test]
-#[ignore = "slice 6c: lands with the code"]
 fn the_status_is_a_polite_live_region() {
     let mut run = Run::accessible(Model::new()).palette_open();
     for c in "zzz".chars() {
@@ -286,7 +286,6 @@ fn scroller(run: &Run) -> Option<NodeId> {
 }
 
 #[test]
-#[ignore = "slice 6c: lands with the code"]
 fn at_most_8_rows_show_and_the_rest_scroll() {
     let run = open();
     let ui = run.ui_of(Window::Popup);
@@ -322,7 +321,6 @@ fn px(c: Color) -> u32 {
 }
 
 #[test]
-#[ignore = "slice 6c: lands with the code"]
 fn the_page_dims_under_the_scrim_except_in_high_contrast() {
     let sys = SysColors {
         window: Color::hex(0x00_0000),

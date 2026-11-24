@@ -117,7 +117,6 @@ fn count<M>(ui: &Ui<M>, id: NodeId) -> usize {
 /// Slice 6c's windows (TD-0009 A3.9): the palette's field and options, the toast's Dismiss and
 /// actions, the job card's Cancel and the dialog's buttons. A palette option is a target too.
 #[test]
-#[ignore = "slice 6c: lands with the code"]
 fn every_overlay_target_is_at_least_24_px() {
     use composites::{Model, Msg as C, Step as S, Window};
     let mut small = Vec::new();

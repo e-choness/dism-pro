@@ -203,7 +203,6 @@ fn a_switch_lays_out_once_and_the_same_size_again_changes_nothing() {
 /// Slice 6c's windows (TD-0009 A3.9): the palette, a running and an ended toast, the job card and
 /// the dialog, at 100 and 225 %: no text is clipped.
 #[test]
-#[ignore = "slice 6c: lands with the code"]
 fn no_overlay_text_is_clipped_at_100_or_225_percent() {
     use composites::{Model, Msg as C, Step as S, Window};
     for scale in [1.0, LARGEST] {

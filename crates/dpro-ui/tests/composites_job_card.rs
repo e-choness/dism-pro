@@ -34,7 +34,6 @@ fn it_shows_while_its_job_runs_and_leaves_when_it_ends() {
 }
 
 #[test]
-#[ignore = "slice 6c: lands with the code"]
 fn a_client_sees_a_group_named_by_its_title_with_a_named_bar() {
     let mut run = Run::accessible(Model::new()).job_running();
     let tree = run.ui.a11y_tree();
@@ -51,7 +50,6 @@ fn a_client_sees_a_group_named_by_its_title_with_a_named_bar() {
 }
 
 #[test]
-#[ignore = "slice 6c: lands with the code"]
 fn cancel_is_a_tab_stop_and_reads_cancelling_once_asked() {
     let mut run = Run::with(Model::new()).job_running();
     let cancel = card(&run, JOB_CANCEL);
@@ -91,7 +89,6 @@ fn alone(live: bool) -> Ui<u8> {
 }
 
 #[test]
-#[ignore = "slice 6c: lands with the code"]
 fn its_line_is_live_only_when_live() {
     for live in [true, false] {
         let mut ui = alone(live);

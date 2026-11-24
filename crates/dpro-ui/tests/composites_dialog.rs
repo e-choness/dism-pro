@@ -31,12 +31,11 @@ fn button(run: &Run, i: u64) -> dpro_ui::NodeId {
 }
 
 #[test]
-#[ignore = "slice 6c: lands with the code"]
 fn focus_starts_on_the_initial_button() {
     let run = Run::with(Model::new()).dialog_open();
     assert_eq!(run.ui_of(Window::Popup).focus(), Some(button(&run, 0)));
     // A frame alone, starting on its second button (A8 starts on Deny).
-    let mut ui = alone(1, Size { w: 440.0, h: 300.0 });
+    let mut ui = alone(1, Size { w: 440.0, h: 300.0 }, 1.0);
     ui.focus_first(true);
     let second = ui.find(&[Key::name("d")]).and_then(|_| {
         let footer = part(&ui, DIALOG_FOOTER)?;
@@ -56,7 +55,6 @@ fn esc_sends_cancel() {
 }
 
 #[test]
-#[ignore = "slice 6c: lands with the code"]
 fn enter_activates_only_the_focused_button() {
     let mut run = Run::with(Model::new()).dialog_open();
     // Focus on the body's text, nothing: no default button takes Enter.
@@ -72,12 +70,9 @@ fn enter_activates_only_the_focused_button() {
 }
 
 #[test]
-#[ignore = "slice 6c: lands with the code"]
 fn the_footer_stays_visible_at_225_percent() {
     // At 225 % in a short window, the body scrolls and the footer stays inside the window.
-    let mut ui = alone(0, Size { w: 440.0, h: 260.0 });
-    ui.set_text_scale(2.25);
-    ui.layout(&mut FakeText);
+    let ui = alone(0, Size { w: 440.0, h: 260.0 }, 2.25);
     let footer = part(&ui, DIALOG_FOOTER).expect("the footer");
     let rect = ui.info(footer).expect("the footer").rect;
     assert!(
@@ -105,7 +100,6 @@ fn a_client_sees_a_dialog_named_by_its_title() {
 }
 
 #[test]
-#[ignore = "slice 6c: lands with the code"]
 fn it_is_described_and_its_title_is_a_heading() {
     let mut run = Run::accessible(Model::new()).dialog_open();
     let tree = run.a11y_tree_of(Window::Popup);
@@ -114,7 +108,7 @@ fn it_is_described_and_its_title_is_a_heading() {
     assert_eq!(node.description(), Some("Cleanup is 40 % done."));
     let title = run.part_in(Window::Popup, DIALOG_TITLE).expect("the title");
     let title = run.ak_in(Window::Popup, &tree, title).expect("listed");
-    assert_eq!(title.level(), Some(2));
+    assert_eq!(title.level(), Some(1), "heading 2: aria-level less one");
     // Its buttons, in order, with the danger one last.
     let labels: Vec<&str> = (0..3)
         .map(|i| {
@@ -129,9 +123,11 @@ fn it_is_described_and_its_title_is_a_heading() {
     );
 }
 
-/// A dialog frame alone, in a window `size`, starting on button `initial`, with a long body.
-fn alone(initial: u8, size: Size) -> Ui<u8> {
+/// A dialog frame alone, in a window `size` at `text_scale`, starting on button `initial`, with
+/// a long body.
+fn alone(initial: u8, size: Size, text_scale: f32) -> Ui<u8> {
     let mut ui = Ui::new(size, 1.0, Motion::default());
+    ui.set_text_scale(text_scale);
     let buttons = [
         ("Deny", 1, Emphasis::Normal),
         ("Allow once", 2, Emphasis::Primary),

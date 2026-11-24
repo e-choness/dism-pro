@@ -388,7 +388,6 @@ fn the_composites_settle_after_each_change_and_stay_idle() {
 /// Slice 6c (A3.7's U6): a running toast, its card and the dialog settle and ask for nothing; an
 /// ended toast costs exactly one wake, the one that hides it, and nothing after.
 #[test]
-#[ignore = "slice 6c: lands with the code"]
 fn an_ended_toast_costs_exactly_one_wake() {
     use composites::{Model, Msg as C, Step as S};
     let mut run = composites::Run::accessible(Model::new())

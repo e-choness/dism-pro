@@ -20,6 +20,9 @@
 //! - **tooltip delay:** `GetDoubleClickTime`, which the common controls' tooltips use for their
 //!   delays; changing it (Settings › Bluetooth & devices › Mouse) broadcasts `WM_SETTINGCHANGE`.
 //!   *(verify the broadcast.)*
+//! - **message duration:** `SPI_GETMESSAGEDURATION`, in seconds (Settings › Accessibility › Visual
+//!   effects › *Dismiss notifications after this amount of time*): how long an ended toast stays
+//!   (TD-0009 A3.5 (7)). *(verify that changing it broadcasts `WM_SETTINGCHANGE`.)*
 //! - **battery saver:** `GetSystemPowerStatus`'s `SystemStatusFlag`; the window subscribes to
 //!   `GUID_POWER_SAVING_STATUS`. *(verify on Windows 11 24H2+, whose Energy saver replaced it.)*
 //! - **text size:** `TextScaleFactor` under `HKCU\Software\Microsoft\Accessibility`, a percent
@@ -60,8 +63,8 @@ use windows_sys::{
         UI::WindowsAndMessaging::{
             GetCaretBlinkTime, GetSystemMetrics, PostMessageW, SM_CXDRAG, SM_REMOTESESSION,
             SPI_GETCARETWIDTH, SPI_GETCLIENTAREAANIMATION, SPI_GETHIGHCONTRAST,
-            SPI_GETWHEELSCROLLCHARS, SPI_GETWHEELSCROLLLINES, SYSTEM_PARAMETERS_INFO_ACTION,
-            SystemParametersInfoW, WM_APP,
+            SPI_GETMESSAGEDURATION, SPI_GETWHEELSCROLLCHARS, SPI_GETWHEELSCROLLLINES,
+            SYSTEM_PARAMETERS_INFO_ACTION, SystemParametersInfoW, WM_APP,
         },
     },
     core::{BOOL, GUID},
@@ -135,6 +138,9 @@ pub struct Env {
     /// tooltips take it. A tip shows after it, hides after ten, and a neighbor's reshows within a
     /// fifth of it.
     pub tooltip_ms: u32,
+    /// How long a notification stays, in milliseconds: an ended toast hides after it. `Env`'s
+    /// default, 0, is taken as Windows' default, 5 s.
+    pub message_ms: u32,
     /// Windows' text size in percent, 100 to 225 (Settings › Accessibility › Text size). `Env`'s
     /// default, 0, is taken as 100.
     pub text_scale: u16,
@@ -178,6 +184,7 @@ impl Env {
             caret_blink_ms: caret_blink_ms(),
             caret_width: caret_width(),
             tooltip_ms: tooltip_ms(),
+            message_ms: message_ms(),
             text_scale: text_scale(),
             wheel_lines: wheel(SPI_GETWHEELSCROLLLINES),
             wheel_chars: wheel(SPI_GETWHEELSCROLLCHARS),
@@ -300,6 +307,19 @@ fn caret_blink_ms() -> u32 {
 fn tooltip_ms() -> u32 {
     // SAFETY: no preconditions.
     unsafe { GetDoubleClickTime() }
+}
+
+/// `SPI_GETMESSAGEDURATION`'s seconds, in milliseconds; 5 s, Windows' default, if it can't be read.
+fn message_ms() -> u32 {
+    let mut seconds: u32 = 0;
+    // SAFETY: a live out-pointer to the ULONG SPI_GETMESSAGEDURATION writes.
+    let ok =
+        unsafe { SystemParametersInfoW(SPI_GETMESSAGEDURATION, 0, (&raw mut seconds).cast(), 0) };
+    if ok != 0 && seconds > 0 {
+        seconds.saturating_mul(1000)
+    } else {
+        5000
+    }
 }
 
 /// `SPI_GETCARETWIDTH`; 1, Windows' default, if it can't be read.

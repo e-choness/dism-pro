@@ -70,7 +70,6 @@ fn a_job_shows_its_toast_and_its_card() {
 }
 
 #[test]
-#[ignore = "slice 6c: lands with the code"]
 fn the_toast_is_a_named_group_with_its_title_bar_and_dismiss() {
     let mut run = Run::accessible(Model::new()).job_running();
     let tree = run.a11y_tree_of(Window::Toast);
@@ -94,7 +93,6 @@ fn the_toast_is_a_named_group_with_its_title_bar_and_dismiss() {
 }
 
 #[test]
-#[ignore = "slice 6c: lands with the code"]
 fn its_line_is_live_and_two_live_views_of_a_job_never_coexist() {
     let mut run = Run::accessible(Model::new()).job_running();
     let toast_tree = run.a11y_tree_of(Window::Toast);
@@ -118,7 +116,6 @@ fn its_line_is_live_and_two_live_views_of_a_job_never_coexist() {
 }
 
 #[test]
-#[ignore = "slice 6c: lands with the code"]
 fn a_progress_event_damages_only_the_two_bars() {
     let mut run = running();
     run.step(Step::Update(Msg::Progress(41)));
@@ -154,7 +151,6 @@ fn a_progress_event_damages_only_the_two_bars() {
 }
 
 #[test]
-#[ignore = "slice 6c: lands with the code"]
 fn esc_or_dismiss_hides_it_and_the_job_goes_on() {
     let mut run = running();
     run.step(esc());
@@ -179,7 +175,6 @@ fn a_running_toast_never_hides_by_itself() {
 }
 
 #[test]
-#[ignore = "slice 6c: lands with the code"]
 fn an_ended_toast_hides_after_the_message_duration_in_one_wake() {
     let mut run = running();
     run.step(Step::Update(Msg::JobEnd(ToastTone::Done)));
@@ -196,7 +191,6 @@ fn an_ended_toast_hides_after_the_message_duration_in_one_wake() {
 }
 
 #[test]
-#[ignore = "slice 6c: lands with the code"]
 fn the_pointer_over_an_ended_toast_holds_it() {
     let mut run = running();
     run.step(Step::Update(Msg::JobEnd(ToastTone::Failed)));
@@ -219,7 +213,6 @@ fn the_pointer_over_an_ended_toast_holds_it() {
 }
 
 #[test]
-#[ignore = "slice 6c: lands with the code"]
 fn windows_message_duration_sets_the_wait() {
     let mut run = running();
     run.win.toast.set_message_duration(9_000);
@@ -229,7 +222,6 @@ fn windows_message_duration_sets_the_wait() {
 }
 
 #[test]
-#[ignore = "slice 6c: lands with the code"]
 fn an_ended_toast_shows_its_tone_and_actions() {
     let mut run = running();
     run.step(Step::Update(Msg::JobEnd(ToastTone::Done)));

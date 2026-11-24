@@ -125,6 +125,11 @@ impl<M> Ui<M> {
             self.paint_node(c, region, Tone::App, &mut p);
             c = self.nodes[c as usize].next;
         }
+        if self.scrim {
+            // Over everything (A3.5 addition 13). High contrast's smoke is clear: no scrim.
+            p.canvas.set_clip(region);
+            p.canvas.fill(region, theme.color(Tone::Smoke));
+        }
         let all = p.canvas.bounds();
         p.canvas.set_clip(all);
     }

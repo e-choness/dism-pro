@@ -133,13 +133,21 @@ pub(crate) struct SideProps {
 }
 
 impl SideProps {
+    /// None, with room for a shortcut: side slots pass from node to node as they come and go
+    /// (the palette's results, slice 6c), so each starts with a buffer a shortcut fits in.
+    pub(crate) fn new() -> Self {
+        Self {
+            props: A11yProps::NONE,
+            text: String::with_capacity(crate::pool::capacity_for(0)),
+        }
+    }
+
     /// Copies an element's props and text, reusing the buffer. Returns whether anything changed.
     fn set(&mut self, props: A11yProps, text: &str) -> bool {
         let mut changed = self.props != props;
         self.props = props;
         if self.text != text {
-            self.text.clear();
-            self.text.push_str(text);
+            crate::pool::copy_text(&mut self.text, text);
             changed = true;
         }
         changed
