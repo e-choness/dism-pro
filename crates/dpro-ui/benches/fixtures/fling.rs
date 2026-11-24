@@ -15,8 +15,8 @@
 //! [`Grouped`] is U18's table (A3.7): the same rows, two lines each (the name, and an evidence
 //! line under it), in 1,000 groups of 100 under their header rows. Its events (Down across a
 //! group's end, a far row realized for a client) run on it too, their frames ending at layout and
-//! damage as U2's do. It's a type of its own, so U1's [`Fling`], and its counts, stay as they
-//! were.
+//! damage as U2's do. It's a type of its own, with messages of their own ([`GroupMsg`]), so U1's
+//! [`Fling`] and the toolkit's code compiled for it, and their counts, stay as they were.
 
 #![allow(
     dead_code,
@@ -93,6 +93,11 @@ pub(crate) const fn grid_row(row: u32) -> u32 {
 /// The table's events; the script sends none.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Msg(pub(crate) TableEvent);
+
+/// U18's table's events: a type of its own, so the toolkit's code for U1's [`Msg`] is compiled as
+/// it was, whatever U18 calls.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct GroupMsg(pub(crate) TableEvent);
 
 /// The rows' text and values, made once.
 pub(crate) struct Data {
@@ -209,7 +214,7 @@ fn view(data: &Data, cx: &mut Cx<'_, Msg>) {
 
 /// U18's table (A3.7): [`view`]'s, its rows two lines each in [`GROUPS`] groups, `current` the
 /// current row.
-fn view_grouped(data: &GroupedData, current: Option<u32>, cx: &mut Cx<'_, Msg>) {
+fn view_grouped(data: &GroupedData, current: Option<u32>, cx: &mut Cx<'_, GroupMsg>) {
     let table = Table {
         rows: ROWS,
         lines: RowLines::Two,
@@ -223,7 +228,7 @@ fn view_grouped(data: &GroupedData, current: Option<u32>, cx: &mut Cx<'_, Msg>) 
         current,
         status: None,
         context: true,
-        on: Msg,
+        on: GroupMsg,
     };
     cx.table(
         Element::table(KEY)
@@ -284,12 +289,12 @@ pub(crate) struct Script {
 }
 
 /// The table's rows' view in `ui`.
-fn body(ui: &Ui<Msg>) -> Option<NodeId> {
+fn body<M>(ui: &Ui<M>) -> Option<NodeId> {
     ui.find(&[KEY, TABLE_BODY])
 }
 
 /// The most the rows of the table in `ui` scroll, and a page: logical pixels.
-fn extent(ui: &Ui<Msg>) -> (f32, f32) {
+fn extent<M>(ui: &Ui<M>) -> (f32, f32) {
     let Some((view, content, line)) = body(ui).and_then(|id| {
         let n = ui.info(id)?;
         let s = n.scroll?;
@@ -301,7 +306,7 @@ fn extent(ui: &Ui<Msg>) -> (f32, f32) {
 }
 
 /// S-01's script for the table in `ui`.
-fn script(ui: &Ui<Msg>) -> Script {
+fn script<M>(ui: &Ui<M>) -> Script {
     let (max, page) = extent(ui);
     let mut b = Builder {
         frames: Vec::new(),
@@ -335,7 +340,7 @@ fn script(ui: &Ui<Msg>) -> Script {
     clippy::cast_possible_truncation,
     reason = "an offset within the table's 8 M px"
 )]
-fn scroll(ui: &mut Ui<Msg>, scale: f32, offset: f32) {
+fn scroll<M>(ui: &mut Ui<M>, scale: f32, offset: f32) {
     if let Some(body) = body(ui) {
         let px = (f64::from(offset) * f64::from(scale)).round() as i64;
         ui.scroll_to(body, [0, px]);
@@ -343,7 +348,7 @@ fn scroll(ui: &mut Ui<Msg>, scale: f32, offset: f32) {
 }
 
 /// The window painted whole into `pixels`.
-fn paint(ui: &mut Ui<Msg>, pixels: &mut [u32]) {
+fn paint<M>(ui: &mut Ui<M>, pixels: &mut [u32]) {
     ui.repaint_all();
     let (w, h) = ui.pixel_size();
     if let Some(mut canvas) = Canvas::new(pixels, w, h) {
@@ -352,7 +357,7 @@ fn paint(ui: &mut Ui<Msg>, pixels: &mut [u32]) {
 }
 
 /// A window's pixels at `ui`'s size.
-fn pixels(ui: &Ui<Msg>) -> Vec<u32> {
+fn pixels<M>(ui: &Ui<M>) -> Vec<u32> {
     let (w, h) = ui.pixel_size();
     vec![0; usize::try_from(u64::from(w) * u64::from(h)).unwrap_or(0)]
 }
@@ -376,14 +381,56 @@ impl Fling {
         };
         f.ui.set_active(true);
         f.ui.set_formats(InvariantFormats::new(SizeUnits::new(UNITS)));
-        f.pixels = pixels(&f.ui);
+        let (w, h) = f.ui.pixel_size();
+        f.pixels = vec![0; usize::try_from(u64::from(w) * u64::from(h)).unwrap_or(0)];
         f.frame(0.0);
         f
     }
 
+    fn body(&self) -> Option<NodeId> {
+        self.ui.find(&[KEY, TABLE_BODY])
+    }
+
+    /// The most the rows scroll, and a page: logical pixels.
+    fn extent(&self) -> (f32, f32) {
+        let Some((view, content, line)) = self.body().and_then(|id| {
+            let n = self.ui.info(id)?;
+            let s = n.scroll?;
+            Some((n.rect.h, s.content.h, s.line.h))
+        }) else {
+            return (0.0, 0.0);
+        };
+        ((content - view).max(0.0), view - line)
+    }
+
     /// S-01's script for this table.
     pub(crate) fn script(&self) -> Script {
-        script(&self.ui)
+        let (max, page) = self.extent();
+        let mut b = Builder {
+            frames: Vec::new(),
+            max,
+        };
+        let mut s = 0.0;
+        for v0 in [3_000.0, 6_000.0, 12_000.0, -8_000.0] {
+            s = b.fling(s, v0);
+        }
+        // The thumb dragged from here to the end in 1.5 s.
+        let drag = b.frames.len();
+        let from = s;
+        for f in 1..=90_u8 {
+            s = b.go(from + (max - from) * f32::from(f) / 90.0);
+        }
+        b.fling(s, -12_000.0);
+        b.go(0.0);
+        b.go(max);
+        let mut s = b.go(0.0);
+        for _ in 0..30 {
+            s = b.go(s + page);
+        }
+        Script {
+            frames: b.frames,
+            drag,
+        }
     }
 
     /// One frame: the rows at `offset` (logical), built, laid out and the window painted whole.
@@ -392,7 +439,7 @@ impl Fling {
         reason = "an offset within the table's 8 M px"
     )]
     pub(crate) fn frame(&mut self, offset: f32) {
-        if let Some(body) = body(&self.ui) {
+        if let Some(body) = self.body() {
             let px = (f64::from(offset) * f64::from(self.scale)).round() as i64;
             self.ui.scroll_to(body, [0, px]);
         }
@@ -429,7 +476,7 @@ pub(crate) enum Step {
 
 /// U18's grouped, two-line table in its window (A3.7).
 pub(crate) struct Grouped {
-    pub(crate) ui: Ui<Msg>,
+    pub(crate) ui: Ui<GroupMsg>,
     data: GroupedData,
     pixels: Vec<u32>,
     scale: f32,
@@ -440,7 +487,7 @@ pub(crate) struct Grouped {
     /// Each frame takes the accessibility update, as the platform does while a client listens.
     accessible: bool,
     /// The events' messages.
-    msgs: Vec<Msg>,
+    msgs: Vec<GroupMsg>,
 }
 
 impl Grouped {
@@ -544,7 +591,7 @@ impl Grouped {
                 }
             }
         }
-        for Msg(e) in self.msgs.drain(..) {
+        for GroupMsg(e) in self.msgs.drain(..) {
             if let TableEvent::Current(at) = e {
                 self.current = Some(at);
             }

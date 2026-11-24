@@ -383,6 +383,10 @@ pub(crate) enum Extra<'s, M> {
     /// A container whose children are [presentational](Element::presentation): its node's value
     /// ([`PRESENTATION`]).
     Presentation,
+
+    /// A two-line table cell's first line's length in its text (TD-0009 A3.5 (10), slice 6b): its
+    /// node's value ([`lines_value`](crate::table::lines_value)).
+    Lines(u32),
 }
 
 /// A check item's value ([`Element::menu_check`]): its node's `value`, as a column header's sort
@@ -1391,6 +1395,18 @@ impl<M> Node<M> {
     /// A [glyph](Element::glyph): a label with a value, which is its icon's.
     pub(crate) fn is_glyph(&self) -> bool {
         self.role == Role::Label && self.value.to_bits() != 0
+    }
+
+    /// A two-line table cell's first line's length in its text, the rest its second (TD-0009
+    /// A3.5 (10), slice 6b); `None` for every other node.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a cell's value is a whole length below 2^24, or 0"
+    )]
+    pub(crate) fn lines(&self) -> Option<usize> {
+        (self.role == Role::Cell && self.value.to_bits() != 0)
+            .then(|| (self.value as usize).saturating_sub(1).min(self.text.len()))
     }
 
     /// The arrow keys can bring focus to it: an interactive node, or a disabled menu item, which

@@ -49,11 +49,11 @@ use crate::{
     canvas::Canvas,
     geom::{Rect, RectPx, Size},
     style::Justify,
-    table::{TABLE_CHECK, sort_of},
-    text::{GlyphSink, Icon, TextSystem},
+    table::{TABLE_CHECK, lines_of, second_line, sort_of},
+    text::{GlyphSink, Icon, TextMetrics, TextStyle, TextSystem},
     theme::{
         Color, Scheme, Theme, Tone,
-        tokens::{radius, stroke},
+        tokens::{radius, stroke, table as tok},
     },
     tree::{NIL, Node, Role},
     ui::{ROOT, Ui},
@@ -205,7 +205,7 @@ impl<M> Ui<M> {
             }
             Role::ComboBox => p.combo(node, ink),
             Role::Separator => p.separator(rect),
-            Role::Cell => p.cell(node, ink),
+            Role::Cell => p.cell(node, ink, under),
             Role::ColumnHeader => p.column_header(node, ink),
             Role::Container if self.is_table_header(i) => p.rule_below(rect),
             Role::Container
@@ -673,30 +673,67 @@ impl Painter<'_, '_> {
     /// `justify` says; trimmed if it doesn't fit.
     fn aligned_text<M>(&mut self, n: &Node<M>, content: Rect, ink: Color) {
         let m = self.text.measure(&n.text, &n.text_style, content.w);
+        let y = content.y + ((content.h - m.height) / 2.0).max(0.0);
+        self.text_line(&n.text, n.text_style, n.style.justify, content, y, m, ink);
+    }
+
+    /// `text`, measured `m`, at `y` in `ink`, placed across `content` as `justify` says.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "a line's text, face, place and ink"
+    )]
+    fn text_line(
+        &mut self,
+        text: &str,
+        style: TextStyle,
+        justify: Justify,
+        content: Rect,
+        y: f32,
+        m: TextMetrics,
+        ink: Color,
+    ) {
         let free = (content.w - m.width).max(0.0);
         let x = content.x
-            + match n.style.justify {
+            + match justify {
                 Justify::Center => free / 2.0,
                 Justify::End => free,
                 Justify::Start | Justify::SpaceBetween => 0.0,
             };
-        let y = content.y + ((content.h - m.height) / 2.0).max(0.0);
         let rect = Rect::new(x, y, content.right() - x, m.height);
         let mut sink = Ink {
             canvas: &mut *self.canvas,
             color: ink,
         };
-        self.text
-            .draw(&n.text, &n.text_style, rect, self.scale, &mut sink);
+        self.text.draw(text, &style, rect, self.scale, &mut sink);
     }
 
-    /// A table cell: its text, or a check cell's box (none in a row that can't be checked).
-    fn cell<M>(&mut self, n: &Node<M>, ink: Color) {
+    /// A table cell: its text, or a check cell's box (none in a row that can't be checked). A
+    /// two-line cell's second line is under its first in caption secondary text, the two centered
+    /// together; a badge cell's badge, its child, says its word (TD-0009 A3.5 (10)).
+    fn cell<M>(&mut self, n: &Node<M>, ink: Color, under: Tone) {
         if n.key == TABLE_CHECK {
             if n.enabled {
                 self.centered_box(n);
             }
-        } else if !n.text.is_empty() {
+            return;
+        }
+        if n.first != NIL || n.text.is_empty() {
+            return;
+        }
+        if let Some(split) = n.lines() {
+            let content = n.rect.inset(n.style.padding);
+            let (first, second) = lines_of(&n.text, split);
+            let small = second_line(n.text_style);
+            let m1 = self.text.measure(first, &n.text_style, content.w);
+            let m2 = self.text.measure(second, &small, content.w);
+            let block = m1.height + tok::LINE_GAP + m2.height;
+            let y = content.y + ((content.h - block) / 2.0).max(0.0);
+            let justify = n.style.justify;
+            self.text_line(first, n.text_style, justify, content, y, m1, ink);
+            let dim = self.theme.ink(Tone::TextSecondary, under);
+            let y = y + m1.height + tok::LINE_GAP;
+            self.text_line(second, small, justify, content, y, m2, dim);
+        } else {
             self.aligned_text(n, n.rect.inset(n.style.padding), ink);
         }
     }

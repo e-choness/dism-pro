@@ -557,13 +557,12 @@ impl<M> Ui<M> {
                 content_px[a] = content_px[a].min(view[a]);
             }
         }
-        // A table's rows: their height exactly, past what `f32` counts.
-        if t != NIL {
-            let st = &self.tables[t as usize];
-            if st.rows > 0 && st.row_px > 0 {
-                content_px[1] = i64::from(st.rows).saturating_mul(st.row_px);
-                content.h = to_logical(content_px[1], self.scale);
-            }
+        // A table's rows and group headers: their height exactly, past what `f32` counts.
+        if t != NIL
+            && let Some(h) = self.table_content_px(t)
+        {
+            content_px[1] = h;
+            content.h = to_logical(h, self.scale);
         }
         let sc = &mut self.scrolls[s as usize];
         let seen = sc.content != content || sc.content_px != content_px;

@@ -434,7 +434,6 @@ fn by_id(tree: &accesskit::TreeUpdate, k: AkId) -> &accesskit::Node {
 // ---- geometry --------------------------------------------------------------------------------
 
 #[test]
-#[ignore = "slice 6b: lands with the code"]
 fn two_line_rows_headers_and_the_column_header_have_their_heights() {
     let run = Run::new(Page::new(40, &STARTS));
     let body = run.rect(run.body());
@@ -459,7 +458,6 @@ fn two_line_rows_headers_and_the_column_header_have_their_heights() {
 /// A3.9: going from y to a row and back, at every group's edges. Each offset builds what's in
 /// view and half a view either side, headers and rows, each where the arithmetic puts it.
 #[test]
-#[ignore = "slice 6b: lands with the code"]
 fn rows_and_headers_round_trip_through_y_at_every_group_edge() {
     let mut run = Run::new(Page::new(40, &STARTS));
     let max = run.content() - VIEW;
@@ -496,7 +494,6 @@ fn rows_and_headers_round_trip_through_y_at_every_group_edge() {
 
 /// Rows before the first group have no header.
 #[test]
-#[ignore = "slice 6b: lands with the code"]
 fn rows_before_the_first_group_have_no_header() {
     let run = Run::new(Page::new(20, &[4, 12]));
     let origin = run.rect(run.body()).y;
@@ -513,7 +510,6 @@ fn rows_before_the_first_group_have_no_header() {
 
 /// A new text size keeps the row at the top of the view there, groups and all.
 #[test]
-#[ignore = "slice 6b: lands with the code"]
 fn a_text_size_change_keeps_the_top_row() {
     let mut run = Run::new(Page::new(40, &STARTS));
     run.scroll_to(run.row_top(12));
@@ -533,7 +529,6 @@ fn a_text_size_change_keeps_the_top_row() {
 /// A3.9: Down and Up cross groups, past the headers between them; Home and End go to the first
 /// and last rows.
 #[test]
-#[ignore = "slice 6b: lands with the code"]
 fn down_and_up_cross_groups_past_their_headers() {
     let mut run = Run::new(Page::new(40, &STARTS));
     run.focus_row(2);
@@ -569,7 +564,6 @@ fn down_and_up_cross_groups_past_their_headers() {
 /// Page Down and Page Up move by the view's height: a view's rows less one, as A2's do, in
 /// pixels, so the headers in between count.
 #[test]
-#[ignore = "slice 6b: lands with the code"]
 fn page_down_and_up_move_by_the_view_s_height() {
     let mut run = Run::new(Page::new(40, &STARTS));
     run.focus_row(0);
@@ -585,7 +579,6 @@ fn page_down_and_up_move_by_the_view_s_height() {
 
 /// A header isn't a row of the view: a click on it does nothing.
 #[test]
-#[ignore = "slice 6b: lands with the code"]
 fn a_click_on_a_header_does_nothing() {
     let mut run = Run::new(Page::new(40, &STARTS));
     let head = run.header(1).expect("built");
@@ -600,7 +593,6 @@ fn a_click_on_a_header_does_nothing() {
 /// A header: its label at its start in caption semibold, its count at its end in caption, both
 /// secondary (A3.5 (10), A3.10 item 10: no case transform).
 #[test]
-#[ignore = "slice 6b: lands with the code"]
 fn a_header_shows_its_label_and_count() {
     let run = Run::new(Page::new(40, &STARTS));
     let head = run.header(1).expect("built");
@@ -665,7 +657,6 @@ impl TextSystem for Recorder {
 /// A two-line cell draws its first line in its column's face and its second under it, the gap
 /// apart, in caption text; the two are centred in the row together.
 #[test]
-#[ignore = "slice 6b: lands with the code"]
 fn a_two_line_cell_draws_its_second_line_under_its_first() {
     let mut run = Run::new(Page::new(40, &STARTS));
     let (w, h) = run.ui.pixel_size();
@@ -695,7 +686,6 @@ fn a_two_line_cell_draws_its_second_line_under_its_first() {
 /// A3.5 (10): a two-line cell is named by its first line, which names its row, and described by
 /// its second. On one-line rows the second line is left out.
 #[test]
-#[ignore = "slice 6b: lands with the code"]
 fn a_two_line_cell_is_named_by_its_first_line_and_described_by_its_second() {
     let mut run = Run::new(Page::new(40, &STARTS));
     let tree = run.ui.a11y_tree();
@@ -718,7 +708,6 @@ fn a_two_line_cell_is_named_by_its_first_line_and_described_by_its_second() {
 /// A badge cell holds the badge, centred in the row, and is named by its word; the badge itself
 /// is the cell's to say.
 #[test]
-#[ignore = "slice 6b: lands with the code"]
 fn a_badge_cell_holds_its_badge_and_is_named_by_its_word() {
     let mut run = Run::new(Page::new(40, &STARTS));
     let cell = run.cell(4, STATE);
@@ -747,7 +736,6 @@ fn a_badge_cell_holds_its_badge_and_is_named_by_its_word() {
 /// A3.9: a header row is one row header spanning every column, named by the group's words, with
 /// no selection; its label and count are its name's.
 #[test]
-#[ignore = "slice 6b: lands with the code"]
 fn a_header_is_a_row_of_one_spanning_unselectable_row_header() {
     let mut run = Run::new(Page::new(40, &STARTS));
     let tree = run.ui.a11y_tree();
@@ -780,32 +768,37 @@ fn a_header_is_a_row_of_one_spanning_unselectable_row_header() {
 /// A3.9: the grid's row count, and every row's and cell's index, count the headers; a row's
 /// place in the set doesn't.
 #[test]
-#[ignore = "slice 6b: lands with the code"]
 fn the_row_count_and_the_rows_indices_count_the_headers() {
     let mut run = Run::new(Page::new(40, &STARTS));
     let tree = run.ui.a11y_tree();
-    let ui = &run.ui;
-    let grid = node(&tree, ui, run.table());
+    let grid = node(&tree, &run.ui, run.table());
     assert_eq!((grid.row_count(), grid.column_count()), (Some(44), Some(4)));
     assert_eq!(grid.size_of_set(), Some(40), "the view's rows");
     assert_eq!(grid.scroll_y_max(), Some(f64::from(run.content() - VIEW)));
-    for r in [0, 2, 3, 9, 10] {
-        let row = node(&tree, ui, run.row(r).expect("built"));
-        assert_eq!(row.row_index(), Some(us(run.grid_row(r))), "row {r}");
-        assert_eq!(row.position_in_set(), Some(us(r)), "row {r}");
-        let size = node(&tree, ui, run.cell(r, SIZE));
-        assert_eq!(
-            (size.row_index(), size.column_index()),
-            (Some(us(run.grid_row(r))), Some(2))
-        );
-    }
+    let check = |run: &mut Run, rows: &[u32]| {
+        let tree = run.ui.a11y_tree();
+        let ui = &run.ui;
+        for &r in rows {
+            let row = node(&tree, ui, run.row(r).expect("built"));
+            assert_eq!(row.row_index(), Some(us(run.grid_row(r))), "row {r}");
+            assert_eq!(row.position_in_set(), Some(us(r)), "row {r}");
+            let size = node(&tree, ui, run.cell(r, SIZE));
+            assert_eq!(
+                (size.row_index(), size.column_index()),
+                (Some(us(run.grid_row(r))), Some(2))
+            );
+        }
+    };
+    check(&mut run, &[0, 2, 3, 9]);
+    // Further down, under groups 2 and 3: from row 20, rows 16 to 29 are built.
+    run.scroll_to(run.row_top(20));
+    check(&mut run, &[16, 24, 25, 29]);
 }
 
 /// A3.9: a client realizes a row by its index, headers counted; the row, under its group, is
 /// built and scrolled into view. A header's index reveals the header, and a search by name
 /// answers in the same indices.
 #[test]
-#[ignore = "slice 6b: lands with the code"]
 fn realizing_a_row_under_a_group_counts_the_headers() {
     let starts: Vec<u32> = (0..10).map(|g| g * 100).collect();
     let mut run = Run::new(Page::new(1_000, &starts));
@@ -837,15 +830,17 @@ fn realizing_a_row_under_a_group_counts_the_headers() {
     assert!(run.ui.realize(run.table(), 1_009), "the last row");
     assert!(!run.ui.realize(run.table(), 1_010), "past the end");
 
+    // Row 420 is under 5 headers.
     assert!(run.ui.find_row(run.table(), None, &name(420)));
     run.frame();
-    assert_eq!(run.ui.take_found(run.table()), Some(424));
+    assert_eq!(run.ui.take_found(run.table()), Some(425));
     assert!(run.row(420).is_some(), "realized");
-    // After group 5's header (504), the next row named row 500's is row 500 itself.
-    assert!(run.ui.find_row(run.table(), Some(504), &name(500)));
-    run.frame();
-    assert_eq!(run.ui.take_found(run.table()), Some(505));
+    // After group 5's header (500 + 5), the next row named row 500's is row 500 itself (506).
     assert!(run.ui.find_row(run.table(), Some(505), &name(500)));
+    run.frame();
+    assert_eq!(run.ui.take_found(run.table()), Some(506));
+    assert_eq!(run.grid_row(500), 506);
+    assert!(run.ui.find_row(run.table(), Some(506), &name(500)));
     run.frame();
     assert_eq!(run.ui.take_found(run.table()), None);
 }
@@ -854,7 +849,6 @@ fn realizing_a_row_under_a_group_counts_the_headers() {
 
 /// U18: the same nodes for 100 or 100k rows, in 1 or 1,000 groups.
 #[test]
-#[ignore = "slice 6b: lands with the code"]
 fn nodes_stay_as_many_for_100k_rows_in_1000_groups() {
     let thousand: Vec<u32> = (0..1_000).map(|g| g * 100).collect();
     let mut small = Run::new(Page::new(100, &[0]));
@@ -881,7 +875,6 @@ fn nodes_stay_as_many_for_100k_rows_in_1000_groups() {
 /// U6: moving across groups, to the ends and realizing a far row each settle at once, and an
 /// idle frame then finds nothing to do.
 #[test]
-#[ignore = "slice 6b: lands with the code"]
 fn every_move_settles_at_once() {
     let thousand: Vec<u32> = (0..1_000).map(|g| g * 100).collect();
     let mut run = Run::new(Page::new(100_000, &thousand));
@@ -891,11 +884,17 @@ fn every_move_settles_at_once() {
     let idle = |run: &mut Run, when: &str| {
         assert!(!run.ui.wants_frame(), "{when}: asks for frames");
         assert!(!run.ui.wants_build(), "{when}: asks for a build");
+        // The presenter took the move's frame, and a client its update.
         drop(run.ui.a11y_update());
+        run.ui.clear_damage();
         let page = &run.page;
         run.ui.build(|cx| page.view(cx));
         run.ui.layout(&mut FakeText);
-        assert!(run.ui.damage().is_empty(), "{when}: an idle frame damaged");
+        assert!(
+            run.ui.damage().is_empty(),
+            "{when}: an idle frame damaged {:?}",
+            run.ui.damage()
+        );
         assert!(
             run.ui.a11y_update().is_none(),
             "{when}: an idle frame changed the tree"

@@ -321,6 +321,9 @@ impl<M> Ui<M> {
             Extra::Glyph(icon) => (None, crate::tree::glyph_value(icon), None),
             // And a container's presentational children (addition 9): a client doesn't see them.
             Extra::Presentation => (None, PRESENTATION, None),
+            // And where a two-line cell's first line ends (slice 6b): both lines show it, and a
+            // client reads the first as its name and the second as its description.
+            Extra::Lines(split) => (None, crate::table::lines_value(split), None),
             // A live region's politeness (addition 5, A4.5) is read below.
             Extra::None | Extra::Field { .. } | Extra::Combo { .. } | Extra::Live(_) => {
                 (None, 0.0, None)
@@ -343,8 +346,9 @@ impl<M> Ui<M> {
         n.special = group.is_some() || invoke.is_some() || value.to_bits() != 0;
         n.special |= politeness != Live::Off;
         // A menu item became or stopped being a check item: every label in its menu moves past
-        // the checks' gutter or back, so the menu is laid out again.
-        let rechecked = revalued && n.role == Role::MenuItem;
+        // the checks' gutter or back, so the menu is laid out again. A two-line cell whose lines
+        // split elsewhere (slice 6b) repaints, as its text would.
+        let rechecked = revalued && matches!(n.role, Role::MenuItem | Role::Cell);
         // A container's children became presentational or stopped being: the flag follows down.
         let represented = revalued && n.role == Role::Container;
         if n.hold || invoke.is_some() {
