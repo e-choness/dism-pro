@@ -343,6 +343,14 @@ pub(crate) enum QueuedEvent {
         old_value: VARIANT,
         new_value: VARIANT,
     },
+    // dpro: a UI Automation notification (PATCHES.md, 7; TD-0009 A4.5).
+    Notification {
+        element: IRawElementProviderSimple,
+        kind: NotificationKind,
+        processing: NotificationProcessing,
+        text: BSTR,
+        activity: BSTR,
+    },
 }
 
 pub(crate) fn not_implemented() -> Error {
