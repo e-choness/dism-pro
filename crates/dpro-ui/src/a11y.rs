@@ -133,13 +133,21 @@ pub(crate) struct SideProps {
 }
 
 impl SideProps {
+    /// None, with room for a shortcut: side slots pass from node to node as they come and go
+    /// (the palette's results, slice 6c), so each starts with a buffer a shortcut fits in.
+    pub(crate) fn new() -> Self {
+        Self {
+            props: A11yProps::NONE,
+            text: String::with_capacity(crate::pool::capacity_for(0)),
+        }
+    }
+
     /// Copies an element's props and text, reusing the buffer. Returns whether anything changed.
     fn set(&mut self, props: A11yProps, text: &str) -> bool {
         let mut changed = self.props != props;
         self.props = props;
         if self.text != text {
-            self.text.clear();
-            self.text.push_str(text);
+            crate::pool::copy_text(&mut self.text, text);
             changed = true;
         }
         changed
@@ -170,8 +178,9 @@ impl<M> UiNode<M> {
     pub(crate) fn presents_children(&self) -> bool {
         match self.role {
             // A table cell's too: a badge cell's badge, a group header's label and count, which
-            // the cell's name says (TD-0009 A3.5 (10)).
-            Role::CheckBox | Role::Cell => true,
+            // the cell's name says (TD-0009 A3.5 (10)). And a menu item's parts (a palette
+            // result's label, detail, badge and keys: slice 6c), which its text names.
+            Role::CheckBox | Role::Cell | Role::MenuItem => true,
             Role::Button => !self.text.is_empty(),
             Role::Container => self.is_presentation(),
             _ => false,
@@ -396,6 +405,8 @@ impl<M> Ui<M> {
             Role::Container if self.is_table_header(i) => AkRole::RowGroup,
             // A group's header is a row of the grid (A3.10 item 5).
             Role::Container if self.is_group_header(i) => AkRole::Row,
+            // UI Automation's Window with IsDialog (TD-0009 A3.5 addition 12).
+            Role::Container if n.is_dialog() => AkRole::Dialog,
             Role::Container => match n.group {
                 // A table's rows' viewport: the client leaves it out, so its rows are the grid's.
                 Some(Group::Rows) => AkRole::GenericContainer,
@@ -599,6 +610,10 @@ impl<M> Ui<M> {
                     node.set_read_only();
                 } else if n.enabled {
                     node.add_action(Action::SetValue);
+                }
+                // The list it drives: the palette's results (ControllerFor, A3.5 (3)).
+                if self.id(f.controls).is_some() {
+                    node.set_controls(vec![self.ak_id(f.controls)]);
                 }
             }
             // A label's text is its value, which clients read as its name.

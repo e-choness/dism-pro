@@ -5,12 +5,17 @@
 //! different program.
 //!
 //! `shell [--size WxH] [--materials auto|solid|glass] [--ui-probe first-frame|idle --probe-out
-//! <file>] [--rows N]`: the arguments of dpro-win's `bare_window`, which `.github/scripts/ui-gates.ps1`
-//! measures it against, and the table's data rows (G1's "Data table" walks 100,000). It follows
-//! Windows' theme, high contrast and animation settings live.
+//! <file>] [--rows N] [--composites]`: the arguments of dpro-win's `bare_window`, which
+//! `.github/scripts/ui-gates.ps1` measures it against, the table's data rows (G1's "Data table"
+//! walks 100,000), and slice 6c's composites page instead of the shell (G1's "Composites"): Ctrl+K
+//! opens the palette, Ctrl+J starts a job (its toast and card), Ctrl+E ends it, and Ctrl+D opens
+//! the close-while-running dialog. It follows Windows' theme, high contrast and animation settings
+//! live.
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+#[path = "../benches/fixtures/composites.rs"]
+mod composites;
 #[path = "../benches/fixtures/shell.rs"]
 mod shell;
 
@@ -32,7 +37,8 @@ mod win {
     use std::{ffi::OsString, process::ExitCode};
 
     use dpro_ui::{
-        Cx, Key, Popup, SizeUnits,
+        Cx, Key, KeyCode, KeyEvent, Popup, SizeUnits,
+        composite::ToastTone,
         materials::GlassPref,
         platform::{self, DirectWrite, Host, Model},
     };
@@ -41,7 +47,10 @@ mod win {
         probe::{self, Args, ForceMaterials},
     };
 
-    use crate::shell::{self, Msg, Shell, popup_view, view};
+    use crate::{
+        composites as page,
+        shell::{self, Msg, Shell, popup_view, view},
+    };
 
     impl Model for Shell {
         type Msg = Msg;
@@ -71,8 +80,57 @@ mod win {
         }
     }
 
+    /// Slice 6c's composites page (`--composites`), with its palette, toast and dialog.
+    impl Model for page::Model {
+        type Msg = page::Msg;
+
+        fn view(&self, cx: &mut Cx<'_, page::Msg>) {
+            page::view(self, cx);
+        }
+
+        fn update(&mut self, msg: page::Msg) {
+            page::Model::update(self, msg);
+        }
+
+        fn popup(&self) -> Option<Popup<page::Msg>> {
+            page::popup(self)
+        }
+
+        fn popup_view(&self, cx: &mut Cx<'_, page::Msg>) {
+            page::popup_view(self, cx);
+        }
+
+        fn size_units(&self) -> SizeUnits {
+            shell::units()
+        }
+
+        fn toast(&self) -> bool {
+            self.over.toast()
+        }
+
+        fn toast_view(&self, cx: &mut Cx<'_, page::Msg>) {
+            page::toast_view(self, cx);
+        }
+
+        /// Ctrl+K, Ctrl+J, Ctrl+E and Ctrl+D: the palette, a job's start and end, the dialog.
+        fn accelerator(&self, key: KeyEvent) -> Option<page::Msg> {
+            let ctrl = key.mods.ctrl && !key.mods.alt && !key.mods.shift;
+            match key.key {
+                KeyCode::Other(0x4B) if ctrl => Some(page::Msg::PaletteOpen),
+                KeyCode::Other(0x4A) if ctrl => Some(page::Msg::JobStart),
+                KeyCode::Other(0x45) if ctrl => Some(page::Msg::JobEnd(ToastTone::Done)),
+                KeyCode::Other(0x44) if ctrl => Some(page::Msg::DialogOpen),
+                _ => None,
+            }
+        }
+    }
+
     pub(crate) fn main() -> ExitCode {
-        let Some((rows, rest)) = rows(std::env::args_os().skip(1)) else {
+        let mut args: Vec<OsString> = std::env::args_os().skip(1).collect();
+        let before = args.len();
+        args.retain(|a| a != "--composites");
+        let composites = args.len() != before;
+        let Some((rows, rest)) = rows(args.into_iter()) else {
             return ExitCode::from(2);
         };
         let Ok(args) = Args::parse(rest) else {
@@ -94,9 +152,16 @@ mod win {
             ForceMaterials::Solid => GlassPref::Off,
             ForceMaterials::Glass => GlassPref::Force,
         };
-        let shell = rows.map_or_else(Shell::new, Shell::with_rows);
-        let host = Host::new(shell, Box::new(text), glass);
-        match platform::run(&options, host) {
+        let ran = if composites {
+            platform::run(
+                &options,
+                Host::new(page::Model::new(), Box::new(text), glass),
+            )
+        } else {
+            let shell = rows.map_or_else(Shell::new, Shell::with_rows);
+            platform::run(&options, Host::new(shell, Box::new(text), glass))
+        };
+        match ran {
             Ok(()) => ExitCode::SUCCESS,
             Err(_) => ExitCode::FAILURE,
         }

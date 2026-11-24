@@ -5,6 +5,10 @@
 //! Tab through the page) runs twice to warm up, painted. A third run must neither allocate nor
 //! reallocate, for the page's model as well as the Ui.
 //!
+//! Slice 6c's overlays join it (A3.9): the palette opened, typed into and moved through, a job's
+//! progress in its toast and card, its end and its toast dismissed, and the dialog, each in its
+//! own window.
+//!
 //! One test only: the counting allocator is global, and `cargo test` runs tests on threads.
 
 #![allow(missing_docs)]
@@ -24,7 +28,8 @@ static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 #[test]
 fn a_warm_composites_session_allocates_nothing() {
     let mut run = Run::painted(Model::new(), Theme::LIGHT);
-    let steps = Run::session();
+    let mut steps = Run::session();
+    steps.extend(Run::overlay_session());
     for _ in 0..2 {
         for s in &steps {
             run.step(s.clone());

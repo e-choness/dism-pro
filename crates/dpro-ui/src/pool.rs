@@ -15,6 +15,17 @@ pub(crate) fn capacity_for(len: usize) -> usize {
     len.max(MIN).next_power_of_two()
 }
 
+/// `dst` set to `src`, growing to [`capacity_for`] its length when it must, as a node's text
+/// does: a side slot's buffers, which nodes pass on as they come and go (the palette's results,
+/// slice 6c), settle in a few classes instead of growing a byte at a time.
+pub(crate) fn copy_text(dst: &mut String, src: &str) {
+    dst.clear();
+    if dst.capacity() < src.len() {
+        dst.reserve_exact(capacity_for(src.len()));
+    }
+    dst.push_str(src);
+}
+
 /// The class of a buffer of `capacity` (rounded down), or of the buffer `len` bytes need when
 /// `capacity_for(len)` is passed.
 fn class(capacity: usize) -> usize {

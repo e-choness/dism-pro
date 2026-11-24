@@ -93,16 +93,35 @@ pub enum PopupKind {
     List,
     /// A tooltip: never activates, never takes focus, and clicks pass through it.
     Tooltip,
+    /// The command palette (TD-0009 A3.5 (3)): activates and takes keyboard focus; a click
+    /// outside it or losing activation dismisses it.
+    Palette,
+    /// A job's toast (A3.5 (7)): never activates on show or click, takes clicks, and stays when
+    /// the owner loses activation; only [`WindowCx::activate`] (F6) gives it the keyboard.
+    Toast,
+    /// A dialog over the owner (A3.5 (13)): activates and takes keyboard focus, and isn't
+    /// dismissed by a click outside it or losing activation; clicks on the owner are eaten.
+    Dialog,
 }
 
 impl PopupKind {
-    pub(crate) const ALL: [Self; 3] = [Self::Menu, Self::List, Self::Tooltip];
+    pub(crate) const ALL: [Self; 6] = [
+        Self::Menu,
+        Self::List,
+        Self::Tooltip,
+        Self::Palette,
+        Self::Toast,
+        Self::Dialog,
+    ];
 
     pub(crate) const fn index(self) -> usize {
         match self {
             Self::Menu => 0,
             Self::List => 1,
             Self::Tooltip => 2,
+            Self::Palette => 3,
+            Self::Toast => 4,
+            Self::Dialog => 5,
         }
     }
 }

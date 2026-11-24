@@ -392,7 +392,13 @@ pub(crate) enum Extra<'s, M> {
     Scope {
         on_escape: Option<fn() -> M>,
     },
+    /// A [dialog](Element::dialog) (TD-0009 A3.5 addition 12): its node's value ([`DIALOG`]).
+    Dialog,
 }
+
+/// A [dialog](Element::dialog)'s value, as a presentation container's is: a container has no
+/// other.
+pub(crate) const DIALOG: f32 = 2.0;
 
 /// A check item's value ([`Element::menu_check`]): its node's `value`, as a column header's sort
 /// is its.
@@ -1046,6 +1052,22 @@ impl<M> Element<'_, M> {
     }
 }
 
+/// Slice 6c's dialogs (A3.5 addition 12).
+impl<'s, M> Element<'s, M> {
+    /// A dialog named `name`: a container a client sees as a window that is a dialog (UI
+    /// Automation's Window with `IsDialog`), whose adapter raises `WindowOpened` when it
+    /// appears. The command palette and the dialog frame are one; give it a
+    /// [description](Self::describe) for what a screen reader reads with its name.
+    #[must_use]
+    pub fn dialog(key: Key, name: &'s str) -> Self {
+        Self {
+            extra: Extra::Dialog,
+            ..Self::stack(key)
+        }
+        .name(name)
+    }
+}
+
 /// [`Element::a11y`]: A4.5's properties that few elements have, in one byte beside
 /// [`Element::a11y_text`]. A heading's level or a landmark, and what that text is; zero for
 /// none, so building a node tests this byte with its [`rare`] flags. The node keeps a copy in
@@ -1386,6 +1408,11 @@ impl<M> Node<M> {
     /// A container whose children are presentational ([`Element::presentation`]).
     pub(crate) fn is_presentation(&self) -> bool {
         self.role == Role::Container && self.value.to_bits() == PRESENTATION.to_bits()
+    }
+
+    /// A [dialog](Element::dialog) (TD-0009 A3.5 addition 12).
+    pub(crate) fn is_dialog(&self) -> bool {
+        self.role == Role::Container && self.value.to_bits() == DIALOG.to_bits()
     }
 
     /// A [glyph](Element::glyph)'s icon; `None` for every other node.

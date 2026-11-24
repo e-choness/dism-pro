@@ -12,7 +12,7 @@ use crate::{
     field::{Caret, ClipboardRequest, Field},
     geom::{Point, Rect, RectPx, Size},
     layout::Shown,
-    pool::TextPool,
+    pool::{TextPool, capacity_for},
     scroll::{Drag, Scroll},
     table::{DRAG_DISTANCE, Divider, Press, TableState},
     tooltip::Tip,
@@ -155,7 +155,19 @@ pub struct Ui<M> {
     pub(crate) slides: Vec<crate::slide::Slide>,
     pub(crate) scopes: Vec<crate::scope::ScopeSlot<M>>,
     pub(crate) scope_closed: crate::scope::Closed,
+    // Slice 6c (TD-0009 A3.5 (7), (13), addition 13).
+    /// The scrim shows over the window: the palette or a dialog is open over it.
+    pub(crate) scrim: bool,
+    /// The toast shown here, its Dismiss and its hide (A3.5 (7)).
+    pub(crate) expiry: crate::composite::Expiry<M>,
+    /// The node [`focus_first`](Self::focus_first) lands on: a dialog frame's initial button
+    /// (A3.5 (13)).
+    pub(crate) initial: Option<NodeId>,
 }
+
+/// Windows' message duration when the window hasn't said (`SPI_GETMESSAGEDURATION`'s default): 5
+/// seconds.
+pub const MESSAGE_MS: u32 = 5_000;
 
 /// A node's tooltip, a dropdown's accessible name and step, and a field's step: in a side table,
 /// so the nodes without them (nearly all) carry one index.
@@ -268,6 +280,9 @@ impl<M> Ui<M> {
             slides: Vec::new(),
             scopes: Vec::new(),
             scope_closed: crate::scope::Closed::default(),
+            scrim: false,
+            expiry: crate::composite::Expiry::new(),
+            initial: None,
         };
         ui.damage_all();
         ui
@@ -447,10 +462,21 @@ impl<M> Ui<M> {
         })
     }
 
-    /// A new detached node, from the free list when possible, with a spare text buffer that holds
-    /// `text_len` bytes when there is one.
+    /// A new detached node, from the free list when possible, with a text buffer that holds
+    /// `text_len` bytes: a spare one when there is one.
     pub(crate) fn alloc(&mut self, key: Key, role: Role, text_len: usize) -> u32 {
-        let text = self.texts.take(text_len);
+        // A field opened empty takes a buffer too: its first keystroke then allocates nothing
+        // (U8; slice 6c's palette opens empty).
+        let mut text = self.texts.take(if role == Role::Field {
+            text_len.max(1)
+        } else {
+            text_len
+        });
+        if text.capacity() < text_len {
+            // None spare: the buffer its text goes into, so that copy (`update`) doesn't look in
+            // the pool again.
+            text.reserve_exact(capacity_for(text_len));
+        }
         let i = if let Some(i) = self.free.pop() {
             self.nodes[i as usize].reuse(key, role, text);
             i

@@ -27,8 +27,9 @@
 //! focus. Over a field the pointer is an I-beam.
 //!
 //! **Popups** (TD-0009 A1, `popups.rs`). The model's menu or dropdown list, and the toolkit's
-//! tooltip, each show in a popup window of the main one, with a [`Ui`] of its own. Every
-//! surface's events reach this one handler, marked with the surface they're for.
+//! tooltip, each show in a popup window of the main one, with a [`Ui`] of its own. So do slice
+//! 6c's palette, dialog and toast. Every surface's events reach this one handler, marked with the
+//! surface they're for.
 
 mod popups;
 
@@ -41,9 +42,9 @@ use dpro_win::gui::{
 
 use crate::{
     Bytes, Canvas, Caret, CaretStop, ClipboardRequest, Color, Cursor, Cx, Formats, GlyphSink, Icon,
-    Input, Key, KeyCode, KeyEvent, MAX_FIELD_LEN, Mods, Motion, NodeId, Point, Popup, Rect, Scheme,
-    Size, SizeUnits, SysColors, TextMetrics, TextStyle, TextSystem, Theme, Ui, UnixMillis,
-    format_size,
+    Input, Key, KeyCode, KeyEvent, MAX_FIELD_LEN, Mods, Motion, NodeId, Point, Popup, PopupKind,
+    Rect, Scheme, Size, SizeUnits, SysColors, TextMetrics, TextStyle, TextSystem, Theme, Ui,
+    UnixMillis, format_size,
     materials::{
         Environment, GLASS_BUILD, GlassPref, Materials, PresenterKind, SolidReason, materials,
     },
@@ -162,6 +163,23 @@ pub trait Model {
     fn size_units(&self) -> SizeUnits {
         SizeUnits::default()
     }
+
+    // Slice 6c (TD-0009 A3.5 addition 13).
+
+    /// Whether the model's toast shows. After every event the host shows, rebuilds or hides the
+    /// toast window, at the owner's bottom end, to match; it never takes activation.
+    fn toast(&self) -> bool {
+        false
+    }
+
+    /// What the [`toast`](Self::toast) window shows: one [`Cx::toast`].
+    fn toast_view(&self, _cx: &mut Cx<'_, Self::Msg>) {}
+
+    /// The message a key pressed in the main window sends that no part of the page used: the
+    /// app's accelerators (Ctrl+K opens the palette). `None` if it's none.
+    fn accelerator(&self, _key: KeyEvent) -> Option<Self::Msg> {
+        None
+    }
 }
 
 /// The user's formats (TD-0009 A2.5): Windows' days, moments and decimal separator, with the
@@ -202,10 +220,10 @@ pub struct Host<P: Model> {
     /// When the window's wake is set for, on that clock: the caret's next blink, or a tooltip's
     /// next change.
     wake_due: Option<u64>,
-    /// The popup windows' UIs, in [`popups::KINDS`]' order: a menu, a dropdown's list and the
-    /// tooltip.
-    layers: [popups::Layer<P::Msg>; 3],
-    /// Which of the menu and the list shows the model's popup.
+    /// The popup windows' UIs, in [`popups::KINDS`]' order: a menu, a dropdown's list, the
+    /// tooltip, the palette, the toast and a dialog.
+    layers: [popups::Layer<P::Msg>; 6],
+    /// Which of the menu, the list, the palette and the dialog shows the model's popup.
     open: Option<gui::PopupKind>,
     /// Whose tip the tooltip window shows, and its text.
     tip_for: Option<(Surface, NodeId)>,
@@ -305,6 +323,7 @@ impl<P: Model> Host<P> {
             layer.ui.set_tooltip_delay(env.tooltip_ms);
             layer.ui.set_wheel(env.wheel_lines, env.wheel_chars);
             layer.ui.set_auto_hide_scroll_bars(auto_hide);
+            layer.ui.set_message_duration(env.message_ms);
         }
         self.restyle()
     }
@@ -406,15 +425,19 @@ impl<P: Model> Host<P> {
         {
             self.model.update(msg);
         }
+        let scrim = self.wants_scrim();
+        self.ui.set_scrim(scrim);
         self.build();
-        // A popup whose anchor went away closes (A1.8).
+        // A menu or a list whose anchor went away closes (A1.8).
         if self.ui.popup_anchor().is_none()
             && let Some(popup) = self.model.popup()
+            && matches!(popup.kind, PopupKind::Menu | PopupKind::List)
         {
             self.model.update(popup.on_close);
             self.build();
         }
         self.sync_popup(cx);
+        self.sync_toast(cx);
         // Before the damage goes out: a blink damages the caret.
         let now = self.now_ms();
         let next = [
@@ -422,6 +445,7 @@ impl<P: Model> Host<P> {
             self.ui.tooltip_timer(now),
             self.layers[0].ui.tooltip_timer(now),
             self.layers[1].ui.tooltip_timer(now),
+            self.popup_timers(now),
         ]
         .into_iter()
         .flatten()
@@ -503,11 +527,7 @@ impl<P: Model> Host<P> {
             Event::Char(c) => self.input(Input::Char(c)),
             Event::PointerUp(p) => self.input(Input::PointerUp(at(p))),
             Event::PointerLeave => self.input(Input::PointerLeave),
-            Event::Key { vk, down, mods } => self.input(Input::Key(KeyEvent {
-                key: key_code(vk),
-                down,
-                mods: mods_of(mods),
-            })),
+            Event::Key { vk, down, mods } => self.main_key(vk, down, mods, cx),
             Event::ContextMenu(p) => self.input(Input::ContextMenu(p.map(at))),
             // A wheel over the window closes its menu or list, whose anchor it may scroll away
             // (TD-0009 A2.4), and scrolls what's under the pointer.
@@ -544,6 +564,8 @@ impl<P: Model> Host<P> {
             Event::Wake => {
                 // One shot: it's gone, and the frame sets the next.
                 self.wake_due = None;
+                let now = self.now_ms();
+                self.wake_popups(now);
                 true
             }
             Event::Frame => {
@@ -574,6 +596,10 @@ impl<P: Model> Handler for Host<P> {
                 Some(used) => used,
                 None => return true,
             },
+            Surface::Popup(kind) if popups::hands_back(kind, &event) => {
+                cx.activate(Surface::Main);
+                true
+            }
             Surface::Popup(kind) => self.popup_event(kind, event),
         };
         self.clipboard(cx);
@@ -626,12 +652,13 @@ impl<P: Model> Handler for Host<P> {
             Surface::Popup(kind) => &mut self.layers[popups::slot(kind)].ui,
         };
         if ui.a11y_action(request, &mut self.msgs) {
-            if surface == Surface::Main {
-                for msg in self.msgs.drain(..) {
-                    self.model.update(msg);
+            match surface {
+                Surface::Main => {
+                    for msg in self.msgs.drain(..) {
+                        self.model.update(msg);
+                    }
                 }
-            } else {
-                self.item_messages();
+                Surface::Popup(kind) => self.popup_messages(kind),
             }
             self.frame(cx);
         }

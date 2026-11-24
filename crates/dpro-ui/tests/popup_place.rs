@@ -166,3 +166,62 @@ fn negative_sizes_and_gaps_count_as_zero() {
         r(300, 432, 300, 432)
     );
 }
+
+// Slice 6c (TD-0009 A3.5 addition 13): the palette, the toast and the dialog are placed in the
+// owner's client area, the anchor, then kept inside the work area as any popup is. The gap
+// doesn't apply.
+
+/// The owner's client area: 1000 × 700 at (200, 100).
+const CLIENT: RectPx = r(200, 100, 1200, 800);
+
+#[test]
+fn top_center_is_centered_at_its_offset_from_the_client_area_s_top() {
+    assert_eq!(
+        place(CLIENT, 640, 400, WORK, Placement::TopCenter(96), GAP),
+        r(380, 196, 1020, 596)
+    );
+    // Taller than the room under its offset: kept inside the work area.
+    assert_eq!(
+        place(CLIENT, 640, 1000, WORK, Placement::TopCenter(96), GAP),
+        r(380, 40, 1020, 1040)
+    );
+}
+
+#[test]
+fn bottom_end_is_inset_from_the_client_area_s_bottom_right() {
+    assert_eq!(
+        place(CLIENT, 360, 100, WORK, Placement::BottomEnd(16), GAP),
+        r(824, 684, 1184, 784)
+    );
+    // A client area running off the right of the monitor: the toast stays on it.
+    let off = r(1400, 100, 2400, 800);
+    assert_eq!(
+        place(off, 360, 100, WORK, Placement::BottomEnd(16), GAP),
+        r(1560, 684, 1920, 784)
+    );
+}
+
+#[test]
+fn center_is_centered_on_the_client_area() {
+    assert_eq!(
+        place(CLIENT, 440, 300, WORK, Placement::Center, GAP),
+        r(480, 300, 920, 600)
+    );
+    // Larger than the work area: its top left.
+    assert_eq!(
+        place(CLIENT, 2000, 1200, WORK, Placement::Center, GAP),
+        r(0, 0, 2000, 1200)
+    );
+}
+
+#[test]
+fn negative_offsets_and_insets_count_as_zero() {
+    assert_eq!(
+        place(CLIENT, 640, 400, WORK, Placement::TopCenter(-50), GAP),
+        r(380, 100, 1020, 500)
+    );
+    assert_eq!(
+        place(CLIENT, 360, 100, WORK, Placement::BottomEnd(-5), GAP),
+        r(840, 700, 1200, 800)
+    );
+}

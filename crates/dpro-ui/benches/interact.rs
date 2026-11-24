@@ -7,11 +7,17 @@
 //!   canvas, and whole-window repaints. Budget: input to visual ≤ 50 ms (doc 04 §2); presenting is
 //!   measured on G1.
 //!
+//! - `composites`, U2 for slice 6c's composites (TD-0009 A3.7) on `fixtures/composites.rs`: a
+//!   character typed in the palette and deleted, painted (U14: ≤ 2 ms a keystroke, ranking
+//!   aside), and a job's progress with its toast and its card both showing it (U17).
+//!
 //! C1: `docker compose run --rm bench -p dpro-ui --bench interact`. Advisory timings; the gate is
 //! the instruction count in `ir.rs`.
 
 #![allow(missing_docs)]
 
+#[path = "fixtures/composites.rs"]
+mod composites;
 #[path = "fixtures/shell.rs"]
 mod shell;
 
@@ -218,5 +224,51 @@ fn paint(c: &mut Criterion) {
     g.finish();
 }
 
-criterion_group!(benches, interact, paint);
+/// Slice 6c (TD-0009 A3.7): the composites page after its session and the overlays'.
+fn overlays(c: &mut Criterion) {
+    let overlaid = |mut run: composites::Run| {
+        run = run.warmed();
+        for s in composites::Run::overlay_session() {
+            run.step(s);
+        }
+        run.settle();
+        run
+    };
+    let mut g = c.benchmark_group("composites");
+
+    // U14's view part: 'c' typed in the palette's field, then deleted with Backspace. Each
+    // filters the results, builds the 50 rows again, and lays out and paints the popup.
+    let mut run = overlaid(composites::Run::painted(
+        composites::Model::new(),
+        Theme::LIGHT,
+    ))
+    .palette_open();
+    let (typed, deleted) = (
+        composites::popup_char('c'),
+        composites::popup_key(KeyCode::Backspace),
+    );
+    g.throughput(Throughput::Elements(2));
+    g.bench_function("palette_keystroke", |b| {
+        b.iter(|| {
+            run.step(black_box(typed.clone()));
+            run.step(black_box(deleted.clone()));
+        });
+    });
+
+    // U17: a job's progress, 41 then 42 %, with its toast and its card both showing it.
+    let mut run = overlaid(composites::Run::with(composites::Model::new())).job_running();
+    let (p41, p42) = (
+        composites::Step::Update(composites::Msg::Progress(41)),
+        composites::Step::Update(composites::Msg::Progress(42)),
+    );
+    g.bench_function("toast_progress", |b| {
+        b.iter(|| {
+            run.step(black_box(p41.clone()));
+            run.step(black_box(p42.clone()));
+        });
+    });
+    g.finish();
+}
+
+criterion_group!(benches, interact, paint, overlays);
 criterion_main!(benches);
