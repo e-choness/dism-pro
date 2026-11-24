@@ -328,13 +328,16 @@ impl<M> Ui<M> {
         }
     }
 
-    /// A reconcile under `parent` moves a later sibling ahead of `cursor`, the first child not
-    /// matched yet. If `cursor` is the focused node or holds it, its place is recorded, before
-    /// the move leaves it behind (see [`Lost`]); the first move to pass it decides.
+    /// A reconcile under `parent` moves `found`, a later child, ahead of `cursor`, the first child
+    /// not matched yet. If the move passes the child holding the focus (it lies from `cursor` up
+    /// to `found`, which the reconcile's search just walked), that child's place is recorded
+    /// before the move leaves it behind (see [`Lost`]): after the last child placed, which came
+    /// before it. The first move to pass it decides. An unmatched sibling before it (`cursor`,
+    /// when two rows go at once) doesn't hide the pass.
     #[cold]
     #[inline(never)]
-    pub(crate) fn focus_passed(&mut self, parent: u32, cursor: u32) {
-        if self.lost.parent == parent && self.lost.node == cursor {
+    pub(crate) fn focus_passed(&mut self, parent: u32, cursor: u32, found: u32) {
+        if self.lost.parent == parent {
             return;
         }
         let mut at = self.focus;
@@ -345,14 +348,22 @@ impl<M> Ui<M> {
             }
             at = up;
         }
-        if at == cursor {
-            self.lost = Lost {
-                parent,
-                prev: self.nodes[cursor as usize].prev,
-                node: cursor,
-            };
-            // The build's end drops the record if focus stayed.
-            self.focus_pending = true;
+        if at == NIL || at == ROOT || at == found {
+            return;
+        }
+        let mut c = cursor;
+        while c != found && c != NIL {
+            if c == at {
+                self.lost = Lost {
+                    parent,
+                    prev: self.nodes[cursor as usize].prev,
+                    node: at,
+                };
+                // The build's end drops the record if focus stayed.
+                self.focus_pending = true;
+                return;
+            }
+            c = self.nodes[c as usize].next;
         }
     }
 

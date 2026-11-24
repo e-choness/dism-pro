@@ -509,6 +509,7 @@ dependencies = [
  "dpro-core",
  "dpro-win",
  "gungraun",
+ "proptest",
  "stats_alloc",
 ]
 

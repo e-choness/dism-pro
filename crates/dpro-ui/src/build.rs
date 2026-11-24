@@ -132,7 +132,7 @@ impl<M> Cx<'_, M> {
                 // Moved: its old place is damaged, and layout finds its new one. A focus the
                 // move passes has its place recorded first (A4.4, slice 7c).
                 if ui.focus != NIL {
-                    ui.focus_passed(self.parent, self.next);
+                    ui.focus_passed(self.parent, self.next, found);
                 }
                 ui.damage_view(found);
                 ui.unlink(found);

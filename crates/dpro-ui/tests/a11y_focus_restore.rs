@@ -246,6 +246,31 @@ fn a_removed_card_gives_focus_to_the_next_cards_review() {
     assert_eq!(run.ui.focus(), run.ui.find(&shell::Run::card_review(4)));
 }
 
+#[test]
+fn with_a_sibling_before_it_removed_too_the_next_control_after_it() {
+    // Two controls go at once, the focused one second, as a refresh drops two rows: focus goes
+    // to the first control after its place (the panel's first), not to the last control, nor to
+    // the panel's last. The reconcile moves the panel and button 5 ahead of button 1 before
+    // either removal, which leaves button 2 behind them.
+    fn view(cx: &mut Cx<'_, u8>, gone: bool) {
+        cx.add(button(0));
+        if !gone {
+            cx.add(button(1));
+            cx.add(button(2));
+        }
+        cx.add_with(Element::stack(PANEL), |cx| {
+            cx.add(button(3));
+            cx.add(button(4));
+        });
+        cx.add(button(5));
+    }
+    let mut ui = ui();
+    build(&mut ui, |cx| view(cx, false));
+    ui.set_focus(Some(id(&ui, &[index(2)])));
+    build(&mut ui, |cx| view(cx, true));
+    assert_eq!(ui.focus(), ui.find(&[PANEL, index(3)]));
+}
+
 // ---- the parked focus ------------------------------------------------------------------------
 
 /// Buttons 0 to 2, the middle one enabled or not, and a hold button (3) enabled or not.
