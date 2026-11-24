@@ -292,7 +292,7 @@ fn event_after(jobs: u64, permille: u64, now_ms: u64) -> ProgressEvent {
         total: 1000,
     };
     for n in 0..jobs {
-        drop(black_box(a.progress(job(n), thirty, 3_000 + 1_000 * n)));
+        let _ = black_box(a.progress(job(n), thirty, 3_000 + 1_000 * n));
     }
     let p = Progress {
         done: permille,
