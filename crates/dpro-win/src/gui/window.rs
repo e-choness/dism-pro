@@ -156,8 +156,9 @@ pub struct Window {
 /// Tests run on threads of their own, and under Wine (T2) another test's new window takes the
 /// activation, which dismisses this test's popups as the user's click elsewhere would. Each
 /// window holds one lock while its thread has any (a popup's owner already does), so the window
-/// tests run one after another. T3 runs them with `--test-threads 1` for the same reason. A
-/// `file_dialog` test whose dialog may show takes it too (slice 6e).
+/// tests run one after another. T3 runs them with `--test-threads 1` for the same reason. Every
+/// `file_dialog` test that enters COM takes it too (slice 6e): under Wine 10, a thread entering
+/// and leaving apartments while another shows the dialog can hang both.
 #[cfg(test)]
 pub(super) mod serial {
     use std::{

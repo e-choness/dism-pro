@@ -124,8 +124,10 @@ pub type Picked = Result<Option<PathBuf>, PickError>;
 /// # Errors
 /// [`PickError::Unavailable`] where there's no dialog; [`PickError::Failed`] if it failed.
 pub fn pick(owner: Hwnd, pick: &Pick<'_>) -> Picked {
+    // Made before the dialog and released after it, which may read them until then.
+    let strings = Strings::new(pick)?;
     let ole32 = Ole32::load().map_err(PickError::Unavailable)?;
-    // Declared first, so it's left last: every object below is released inside it.
+    // Declared before every object, so it's left last: they're released inside it.
     let _apartment = ComApartment::enter(&ole32)?;
     let dialog = take::<DialogVtbl>("CoCreateInstance", |out| {
         // SAFETY: the class and interface IDs are live constants, `out` a live out parameter;
@@ -141,8 +143,7 @@ pub fn pick(owner: Hwnd, pick: &Pick<'_>) -> Picked {
         }
     })
     .map_err(PickError::Unavailable)?;
-    // The strings the dialog was given, kept until it has closed.
-    let _strings = set_up(&dialog, pick)?;
+    set_up(&dialog, pick, &strings)?;
     // SAFETY: the dialog is live; `owner` is a window of this thread, or null. Runs the modal
     // loop until the user answers.
     let hr = unsafe { (dialog.vtbl().show)(dialog.as_raw(), owner.0) };
@@ -304,19 +305,57 @@ fn shown(hr: HRESULT) -> Result<bool, PickError> {
     }
 }
 
-/// The strings a dialog was given, which it may read until it closes.
+/// The strings a dialog is given: its title and a file's types, each NUL-terminated.
 struct Strings {
-    _title: WideCString,
+    title: WideCString,
+    /// What `specs` points into.
     _types: Vec<(WideCString, WideCString)>,
-    _specs: Vec<COMDLG_FILTERSPEC>,
+    specs: Vec<COMDLG_FILTERSPEC>,
+}
+
+impl Strings {
+    /// The request's strings, checked before any COM.
+    ///
+    /// # Errors
+    /// [`PickError::Failed`] for a NUL in the title or a type, which no dialog could show.
+    fn new(pick: &Pick<'_>) -> Result<Self, PickError> {
+        let title = WideCString::new(pick.title).map_err(|_| invalid("IFileDialog::SetTitle"))?;
+        let types = match pick.mode {
+            PickMode::Folder => Vec::new(),
+            PickMode::File { types } => types
+                .iter()
+                .map(|&(label, patterns)| {
+                    Ok((WideCString::new(label)?, WideCString::new(patterns)?))
+                })
+                .collect::<Result<Vec<_>, Error>>()
+                .map_err(|_| invalid("IFileDialog::SetFileTypes"))?,
+        };
+        // The pointers are into the strings' heap buffers, which moving them doesn't move.
+        let specs = types
+            .iter()
+            .map(|(label, patterns)| COMDLG_FILTERSPEC {
+                pszName: label.as_ptr(),
+                pszSpec: patterns.as_ptr(),
+            })
+            .collect();
+        Ok(Self {
+            title,
+            _types: types,
+            specs,
+        })
+    }
+}
+
+/// A request no dialog could take, as the call it would have failed.
+fn invalid(api: &'static str) -> PickError {
+    PickError::Failed(OsError::from_win32(ERROR_INVALID_PARAMETER, api))
 }
 
 /// Sets the dialog's options, title, types and start folder.
 ///
 /// # Errors
-/// [`PickError::Unavailable`] if it refuses one; [`PickError::Failed`] for a NUL in the title or
-/// a type, which no dialog could show.
-fn set_up(dialog: &Com<DialogVtbl>, pick: &Pick<'_>) -> Result<Strings, PickError> {
+/// [`PickError::Unavailable`] if it refuses one.
+fn set_up(dialog: &Com<DialogVtbl>, pick: &Pick<'_>, strings: &Strings) -> Result<(), PickError> {
     let (vtbl, this) = (dialog.vtbl(), dialog.as_raw());
     let refused = |hr: HRESULT, api| {
         if hr < 0 {
@@ -325,7 +364,6 @@ fn set_up(dialog: &Com<DialogVtbl>, pick: &Pick<'_>) -> Result<Strings, PickErro
             Ok(())
         }
     };
-    let nul = |api| PickError::Failed(OsError::from_win32(ERROR_INVALID_PARAMETER, api));
 
     let mut options: FILEOPENDIALOGOPTIONS = 0;
     // SAFETY: the dialog is live; `options` a live out parameter.
@@ -339,41 +377,22 @@ fn set_up(dialog: &Com<DialogVtbl>, pick: &Pick<'_>) -> Result<Strings, PickErro
     let hr = unsafe { (vtbl.set_options)(this, options) };
     refused(hr, "IFileDialog::SetOptions")?;
 
-    let title = WideCString::new(pick.title).map_err(|_| nul("IFileDialog::SetTitle"))?;
-    // SAFETY: the dialog is live; the title is NUL-terminated and outlives the dialog's use.
-    let hr = unsafe { (vtbl.set_title)(this, title.as_ptr()) };
+    // SAFETY: the dialog is live; the title is NUL-terminated and outlives the dialog (`pick`).
+    let hr = unsafe { (vtbl.set_title)(this, strings.title.as_ptr()) };
     refused(hr, "IFileDialog::SetTitle")?;
 
-    let types = match pick.mode {
-        PickMode::Folder => Vec::new(),
-        PickMode::File { types } => types
-            .iter()
-            .map(|&(label, patterns)| Ok((WideCString::new(label)?, WideCString::new(patterns)?)))
-            .collect::<Result<Vec<_>, Error>>()
-            .map_err(|_| nul("IFileDialog::SetFileTypes"))?,
-    };
-    let specs: Vec<COMDLG_FILTERSPEC> = types
-        .iter()
-        .map(|(label, patterns)| COMDLG_FILTERSPEC {
-            pszName: label.as_ptr(),
-            pszSpec: patterns.as_ptr(),
-        })
-        .collect();
-    if !specs.is_empty() {
-        let count = u32::try_from(specs.len()).map_err(|_| nul("IFileDialog::SetFileTypes"))?;
-        // SAFETY: the dialog is live; `count` specs, whose strings outlive the dialog's use.
-        let hr = unsafe { (vtbl.set_file_types)(this, count, specs.as_ptr()) };
+    if !strings.specs.is_empty() {
+        let count =
+            u32::try_from(strings.specs.len()).map_err(|_| invalid("IFileDialog::SetFileTypes"))?;
+        // SAFETY: the dialog is live; `count` specs, whose strings outlive the dialog (`pick`).
+        let hr = unsafe { (vtbl.set_file_types)(this, count, strings.specs.as_ptr()) };
         refused(hr, "IFileDialog::SetFileTypes")?;
     }
 
     if let Some(start) = pick.start {
         set_start(dialog, start);
     }
-    Ok(Strings {
-        _title: title,
-        _types: types,
-        _specs: specs,
-    })
+    Ok(())
 }
 
 /// Opens the dialog in `start` when there's no folder the user chose last, if the shell can
@@ -698,6 +717,9 @@ pub(crate) mod tests {
 
     #[test]
     fn the_apartment_balances_its_enters() {
+        // Every test that enters COM takes the window tests' lock: under Wine 10 this test hung
+        // with another's dialog up in 3 of 8 runs (WINE_CPU_TOPOLOGY=4), both waiting forever.
+        let _serial = Serial::take();
         let mta = on_thread(|| {
             let outer = ComApartment::sta().unwrap_or_else(|e| unreachable!("{e}"));
             let inner = ComApartment::sta().unwrap_or_else(|e| unreachable!("{e}"));
@@ -719,6 +741,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_thread_in_the_multithreaded_apartment_has_no_dialog() {
+        let _serial = Serial::take();
         let entered = on_thread(|| {
             let (init, uninit) = ole32();
             // SAFETY: no preconditions; balanced below on this thread.
@@ -794,36 +817,37 @@ pub(crate) mod tests {
         }
     }
 
-    /// A request no dialog could show fails before one shows, and isn't taken for the dialog
-    /// being unavailable.
+    /// A request no dialog could show fails before any COM, so it's never taken for the dialog
+    /// being unavailable: a NUL in the title, or in a file's type.
     #[test]
     fn a_nul_in_the_title_fails_before_the_dialog_shows() {
-        // No dialog shows, but Wine fails to make one (E_FAIL) while another thread makes one.
-        let _serial = Serial::take();
+        const TYPES: &[(&str, &str)] = &[("Images", "*.wim"), ("dpro-win \0type", "*.*")];
         let picked = on_thread(|| {
-            pick(
-                Hwnd::NONE,
-                &Pick {
-                    mode: PickMode::Folder,
-                    title: "dpro-win file_dialog test: \0nul",
+            [
+                (PickMode::Folder, "dpro-win file_dialog test: \0nul"),
+                (PickMode::File { types: TYPES }, "dpro-win file_dialog test"),
+            ]
+            .map(|(mode, title)| {
+                let pick_ = Pick {
+                    mode,
+                    title,
                     start: None,
-                },
-            )
+                };
+                pick(Hwnd::NONE, &pick_)
+            })
         });
-        match picked {
-            Err(PickError::Failed(e)) => {
-                assert_eq!(e, OsError::from_win32(ERROR_INVALID_PARAMETER, e.api));
-                assert_eq!(e.api, "IFileDialog::SetTitle");
-            }
-            Err(PickError::Unavailable(e)) => {
-                eprintln!("file_dialog: the system dialog is unavailable here: {e}");
-            }
-            other => panic!("expected Failed(ERROR_INVALID_PARAMETER), got {other:?}"),
-        }
+        assert_eq!(
+            picked,
+            [
+                Err(invalid("IFileDialog::SetTitle")),
+                Err(invalid("IFileDialog::SetFileTypes"))
+            ]
+        );
     }
 
     #[test]
     fn a_window_remembers_the_dialog_is_unavailable() {
+        let _serial = Serial::take();
         let (first, second) = on_thread(|| {
             let pending = Pending::default();
             let pick = Pick {

@@ -183,6 +183,7 @@ mod probe {
                 "picked={answer}\nticks={}\npaints={}\n",
                 self.ticks, self.paints
             );
+            // ignore: writing to a String can't fail.
             if let Some(e) = error {
                 let _ = writeln!(out, "code={:#010x}\napi={}", e.hresult_bits(), e.api);
             }
@@ -262,6 +263,7 @@ mod probe {
         let Ok(args) = Args::parse() else {
             return ExitCode::from(2);
         };
+        // ignore: no earlier report is the usual case; G1 waits for this run's.
         let _ = fs::remove_file(&args.out);
         let probe = Probe {
             args,

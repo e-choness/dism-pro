@@ -2080,15 +2080,22 @@ foreach ($mode in @('folder', 'file')) {
         $dialog = $script:fileDialog
         $dialogHwnd = [IntPtr] $dialog.Current.NativeWindowHandle
         $checks["${mode}: owned by the probe's window, which it disables"] = [FileDialogGateWin32]::GetWindow($dialogHwnd, 4) -eq $owner -and -not [FileDialogGateWin32]::IsWindowEnabled($owner) # GW_OWNER
-        $status = { $b = Find-First $ownerRoot $types::Button $null; if ($null -ne $b) { $b.Current.Name } }
+        # The probe's Button, a child of its window's element: an owned dialog may be one too, and
+        # its own buttons further down.
+        $statusButton = [Windows.Automation.PropertyCondition]::new($ae::ControlTypeProperty, $types::Button)
+        $status = { $b = $ownerRoot.FindFirst([Windows.Automation.TreeScope]::Children, $statusButton); if ($null -ne $b) { $b.Current.Name } }
         $checks["${mode}: the probe's tree answers while it's up"] = Wait-Until { (& $status) -eq 'pick: asked' } 2000
         $lines += Save-Screen ([PopupGateWin32]::Rect($dialogHwnd)) "file-dialog-$mode.png"
         $cancelId = [Windows.Automation.AndCondition]::new(
             [Windows.Automation.PropertyCondition]::new($ae::ControlTypeProperty, $types::Button),
             [Windows.Automation.PropertyCondition]::new($ae::AutomationIdProperty, '2'))
-        $cancel = $dialog.FindFirst([Windows.Automation.TreeScope]::Descendants, $cancelId)
-        if ($null -eq $cancel) { $cancel = Find-First $dialog $types::Button 'Cancel' }
-        if ($null -eq $cancel) { throw 'the dialog has no Cancel button (AutomationId 2, or named Cancel)' }
+        $hasCancel = Wait-Until {
+            $script:fileDialogCancel = $dialog.FindFirst([Windows.Automation.TreeScope]::Descendants, $cancelId)
+            if ($null -eq $script:fileDialogCancel) { $script:fileDialogCancel = Find-First $dialog $types::Button 'Cancel' }
+            $null -ne $script:fileDialogCancel
+        } 5000
+        if (-not $hasCancel) { throw 'the dialog has no Cancel button (AutomationId 2, or named Cancel) in 5 s' }
+        $cancel = $script:fileDialogCancel
         $sw = [Diagnostics.Stopwatch]::StartNew()
         (Get-Pattern $cancel ([Windows.Automation.InvokePattern]::Pattern)).Invoke()
         $answered = Wait-Until { Test-Path $report } 5000

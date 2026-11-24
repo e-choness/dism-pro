@@ -1182,6 +1182,77 @@ mod tests {
         assert!(out.is_empty(), "taken once");
     }
 
+    /// A model that asks for one pick (TD-0009 A3.5 (12), slice 6e) and keeps its answers.
+    struct Asker {
+        want: bool,
+        title: &'static str,
+        answers: std::rc::Rc<std::cell::RefCell<Vec<file_dialog::Picked>>>,
+    }
+
+    #[derive(Clone, Debug, PartialEq)]
+    enum Asked {
+        Answer(file_dialog::Picked),
+    }
+
+    impl Model for Asker {
+        type Msg = Asked;
+
+        fn view(&self, cx: &mut Cx<'_, Asked>) {
+            cx.add(Element::button(
+                Key::name("b"),
+                "b",
+                Asked::Answer(Ok(None)),
+            ));
+        }
+
+        fn update(&mut self, msg: Asked) {
+            let Asked::Answer(picked) = msg;
+            self.answers.borrow_mut().push(picked);
+        }
+
+        fn picks(
+            &mut self,
+            mut f: impl FnMut(&file_dialog::Pick<'_>, fn(file_dialog::Picked) -> Asked),
+        ) {
+            if std::mem::take(&mut self.want) {
+                let pick = file_dialog::Pick {
+                    mode: file_dialog::PickMode::Folder,
+                    title: self.title,
+                    start: None,
+                };
+                f(&pick, Asked::Answer);
+            }
+        }
+    }
+
+    /// T2: the model's pick runs once the event that asked is done, and its answer comes back as
+    /// the message the model named, once. The title holds a NUL, which fails the pick before any
+    /// COM, so no dialog shows and nobody needs to close one.
+    #[test]
+    fn a_model_s_pick_comes_back_as_its_message() {
+        let answers = std::rc::Rc::default();
+        let model = Asker {
+            want: true,
+            title: "dpro-ui platform test: \0pick",
+            answers: std::rc::Rc::clone(&answers),
+        };
+        let host = Host::new(model, Box::new(FakeText), GlassPref::Auto);
+        let options = WindowOptions {
+            title: "dpro-ui platform test: pick",
+            size: (200, 100),
+            min_size: (100, 100),
+            compose: Compose::Never,
+        };
+        // Its first event (before the window returns) frames, and the frame hands the pick over.
+        let window = Window::new(&options, Box::new(host)).expect("a window");
+        let answers: Vec<file_dialog::Picked> = answers.borrow().clone();
+        match answers.as_slice() {
+            [Err(file_dialog::PickError::Failed(e))] => assert_eq!(e.api, "IFileDialog::SetTitle"),
+            other => panic!("expected one Failed answer, got {other:?}"),
+        }
+        drop(window);
+    }
+
     #[test]
     fn keys_map_to_the_toolkit_s() {
         assert_eq!(key_code(0x09), KeyCode::Tab);
