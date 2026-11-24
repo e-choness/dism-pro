@@ -6,16 +6,19 @@
 //! set, and the UI thread clears it before the handler hears the event, so a wake meanwhile
 //! posts a new one rather than wait for one that already came (the same handshake as UI
 //! Automation's requests, `a11y.rs`). A destroyed window drops wakes.
-//!
-//! Slice 6e's MEASURE stub: [`Waker::wake`] posts nothing yet, and the test that needs it is
-//! ignored until the code lands.
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, AtomicUsize, Ordering},
+use std::{
+    ffi::c_void,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
 };
 
-use windows_sys::Win32::{Foundation::HWND, UI::WindowsAndMessaging::WM_APP};
+use windows_sys::Win32::{
+    Foundation::HWND,
+    UI::WindowsAndMessaging::{PostMessageW, WM_APP},
+};
 
 /// Posted by a [`Waker`]: the window clears the flag and sends `Event::Wake`.
 pub(super) const WM_APP_WAKE: u32 = WM_APP + 4;
@@ -29,7 +32,21 @@ impl Waker {
     /// Has the window send `Event::Wake` soon, on its thread, unless a wake is on its way
     /// already. Never waits; after the window is destroyed, does nothing.
     pub fn wake(&self) {
-        let _ = &self.0;
+        let wakes = &self.0;
+        if wakes.woken.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let hwnd = wakes.hwnd.load(Ordering::Acquire);
+        let posted = hwnd != 0 && {
+            let hwnd: HWND = std::ptr::with_exposed_provenance_mut::<c_void>(hwnd);
+            // SAFETY: posting to a window needs no access to it from this thread; a destroyed
+            // window fails the call.
+            unsafe { PostMessageW(hwnd, WM_APP_WAKE, 0, 0) != 0 }
+        };
+        if !posted {
+            // No wake is on its way, so the next one must try again.
+            wakes.woken.store(false, Ordering::SeqCst);
+        }
     }
 }
 
@@ -54,6 +71,6 @@ impl Wakes {
 
     /// On the UI thread, before the handler hears the wake: a wake from now on posts again.
     pub(super) fn clear(&self) {
-        let _ = &self.woken;
+        self.woken.store(false, Ordering::SeqCst);
     }
 }
