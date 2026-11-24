@@ -119,6 +119,13 @@ raw-API baseline, measured in this job, so it holds on whatever machine the runn
       first change; Esc closes it and focus goes back to "Review changes". Those are gates. A
       second run under --ui-probe idle counts the slide's frame timers: 12 with animations on
       (U16), none off; advisory, as the runner's timing is.
+  Composites: picker dialog (TD-0009 A3.5 (12), slice 6e): the file dialog probe
+      (crates/dpro-win/examples/file_dialog_t3.rs), choosing a folder, then a file. The system
+      dialog, found through UIA by its title, is owned by the probe's window and disables it; the
+      probe's tree answers through UIA while it's up; Invoke on Cancel closes it, the probe
+      reports Ok(None) and the timer wakes its window heard through the modal loop, and afterwards
+      the window is enabled and its tree answers again. Those are gates; Cancel to the answer is
+      advisory (100 ms).
   Accessibility depth, notifications (TD-0009 A4.5, A4.7 U23, slice 7b): the shell with
       --job-ms 4000, whose drawer job runs 4 s from the drawer opening. A COM IUIAutomation5 client
       (managed UIA can't hear notifications) subscribes to the window's notifications, and Invoke on
@@ -2007,6 +2014,109 @@ try {
 foreach ($k in $checks.Keys) { $lines += '{0,-50} {1}' -f $k, (Format-Verdict $checks[$k]) }
 $ok = $checks.Count -gt 0 -and -not ($checks.Values -contains $false)
 Publish 'Composites: drawer' $lines $ok
+if (-not $ok) { $failed++ }
+
+# Composites: picker dialog (TD-0009 A3.5 (12), A3.9, slice 6e) ------------------------------------
+# G1's picker dialog check, on the file dialog probe (crates/dpro-win/examples/file_dialog_t3.rs),
+# once choosing a folder and once a file (two file types), starting in %TEMP%. The probe's window
+# asks for the system dialog as the GUI does (WindowCx::pick, shown once its handler returned).
+# Gates: a Window named by the probe's title is found through UIA, owned by the probe's window
+# (GW_OWNER), which it disables while up (modal); the probe's own tree still answers through UIA
+# while it's up (its Button reads "pick: asked": AccessKit's provider while the UI thread is in
+# the dialog's single-threaded apartment, A3.5 (12)'s verify); Invoke on its Cancel button
+# (AutomationId 2, IDCANCEL, else the Button "Cancel") closes it; the probe reports
+# picked=cancelled (the Ok(None) mapping), and ticks >= 1, the timer wakes its window heard through
+# the dialog's modal loop; afterwards its window is enabled again and its Button reads
+# "pick: cancelled" through UIA (the tree served after the apartment was left). The time from
+# Invoke to the report is advisory (100 ms). A screenshot of each dialog goes to -Out.
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class FileDialogGateWin32 {
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetWindow(IntPtr hwnd, uint cmd);
+    [DllImport("user32.dll")]
+    public static extern bool IsWindowEnabled(IntPtr hwnd);
+}
+'@
+$fileDialogExe = Join-Path $Bin 'file_dialog_t3.exe'
+$fileDialogProbe = 'DISM Pro file dialog probe'
+# Start-Process joins its arguments with spaces and quotes none.
+function Format-Arg([string] $Value) { if ($Value -match '\s') { "`"$Value`"" } else { $Value } }
+
+$lines = @("Picker dialog on the file dialog probe, choosing a folder and a file from %TEMP% (the checks are gates; Invoke on Cancel to the probe's answer is advisory: 100 ms)")
+$checks = [ordered]@{}
+foreach ($mode in @('folder', 'file')) {
+    $title = "DISM Pro probe: choose a $mode"
+    $report = Join-Path $Out "file-dialog-$mode.txt"
+    $p = $null
+    $owner = [IntPtr]::Zero
+    try {
+        if (-not (Test-Path $fileDialogExe)) { throw "missing $fileDialogExe (docker compose run --rm t3-tools builds it)" }
+        Remove-Item $report -ErrorAction SilentlyContinue
+        $p = Start-Process -FilePath $fileDialogExe -ArgumentList @('--mode', $mode, '--start', (Format-Arg $env:TEMP), '--out', (Format-Arg $report)) -PassThru
+        $null = $p.Handle
+        $shown = Wait-Until {
+            $script:fileDialogOwner = [UiaGateWin32]::FindWindowW('dismpro.window', $fileDialogProbe)
+            $script:fileDialogOwner -ne [IntPtr]::Zero -and [UiaGateWin32]::IsWindowVisible($script:fileDialogOwner)
+        } 30000
+        if (-not $shown) { throw "the probe showed no window in 30 s ($(if ($p.HasExited) { "exited with code $($p.ExitCode)" } else { 'still running' }))" }
+        $owner = $script:fileDialogOwner
+        $ownerRoot = $ae::FromHandle($owner)
+        # The dialog: a Window named by its title, under its owner in UIA's tree or else the desktop.
+        $named = [Windows.Automation.AndCondition]::new(
+            [Windows.Automation.PropertyCondition]::new($ae::ControlTypeProperty, $types::Window),
+            [Windows.Automation.PropertyCondition]::new($ae::NameProperty, $title))
+        $found = Wait-Until {
+            $script:fileDialog = $ownerRoot.FindFirst([Windows.Automation.TreeScope]::Children, $named)
+            if ($null -eq $script:fileDialog) { $script:fileDialog = $ae::RootElement.FindFirst([Windows.Automation.TreeScope]::Children, $named) }
+            $null -ne $script:fileDialog
+        } 15000
+        $checks["${mode}: a Window `"$title`" shows (UIA)"] = $found
+        if (-not $found) {
+            if (Test-Path $report) { $lines += "  ${mode}: the probe answered with no dialog: $((Get-Content $report) -join ' ')" }
+            throw "no Window `"$title`" in 15 s"
+        }
+        $dialog = $script:fileDialog
+        $dialogHwnd = [IntPtr] $dialog.Current.NativeWindowHandle
+        $checks["${mode}: owned by the probe's window, which it disables"] = [FileDialogGateWin32]::GetWindow($dialogHwnd, 4) -eq $owner -and -not [FileDialogGateWin32]::IsWindowEnabled($owner) # GW_OWNER
+        $status = { $b = Find-First $ownerRoot $types::Button $null; if ($null -ne $b) { $b.Current.Name } }
+        $checks["${mode}: the probe's tree answers while it's up"] = Wait-Until { (& $status) -eq 'pick: asked' } 2000
+        $lines += Save-Screen ([PopupGateWin32]::Rect($dialogHwnd)) "file-dialog-$mode.png"
+        $cancelId = [Windows.Automation.AndCondition]::new(
+            [Windows.Automation.PropertyCondition]::new($ae::ControlTypeProperty, $types::Button),
+            [Windows.Automation.PropertyCondition]::new($ae::AutomationIdProperty, '2'))
+        $cancel = $dialog.FindFirst([Windows.Automation.TreeScope]::Descendants, $cancelId)
+        if ($null -eq $cancel) { $cancel = Find-First $dialog $types::Button 'Cancel' }
+        if ($null -eq $cancel) { throw 'the dialog has no Cancel button (AutomationId 2, or named Cancel)' }
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        (Get-Pattern $cancel ([Windows.Automation.InvokePattern]::Pattern)).Invoke()
+        $answered = Wait-Until { Test-Path $report } 5000
+        $answerMs = $sw.Elapsed.TotalMilliseconds
+        $fields = @{}
+        if ($answered) {
+            foreach ($line in (Get-Content $report)) {
+                $key, $value = $line -split '=', 2
+                $fields[$key] = $value
+            }
+        }
+        $lines += "  ${mode}: Invoke on Cancel to the answer $(Format-Ms $answerMs); report: $((Get-Content $report -ErrorAction SilentlyContinue) -join ' ')"
+        $checks["${mode}: Cancel answers Ok(None) (picked=cancelled)"] = $answered -and $fields.picked -eq 'cancelled'
+        $checks["${mode}: the modal loop dispatched the window's timers"] = $answered -and [int] $fields.ticks -ge 1
+        $checks["${mode}: after it, the window is enabled and its tree says so"] = (Wait-Until { [FileDialogGateWin32]::IsWindowEnabled($owner) } 2000) -and (Wait-Until { (& $status) -eq 'pick: cancelled' } 2000)
+    } catch {
+        $lines += "${mode} FAILED: $($_.Exception.Message)"
+        $checks["${mode}: client"] = $false
+    } finally {
+        if ($null -ne $p -and -not $p.HasExited) {
+            if ($owner -ne [IntPtr]::Zero) { [void][UiaGateWin32]::PostMessageW($owner, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) } # WM_CLOSE
+            if (-not $p.WaitForExit(5000)) { $p.Kill(); $lines += "the $mode probe did not close on WM_CLOSE"; $checks["${mode}: closes"] = $false }
+        }
+    }
+}
+foreach ($k in $checks.Keys) { $lines += '{0,-62} {1}' -f $k, (Format-Verdict $checks[$k]) }
+$ok = $checks.Count -gt 0 -and -not ($checks.Values -contains $false)
+Publish 'Composites: picker dialog' $lines $ok
 if (-not $ok) { $failed++ }
 
 # Composites (TD-0009 A3.5, slice 6c) ---------------------------------------------------------------
