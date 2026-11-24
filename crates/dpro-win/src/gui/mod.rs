@@ -44,21 +44,29 @@
 //!   tooltips take neither, nor clicks. A popup that must close (a click outside it, another
 //!   window activated, the main window moving) sends [`Event::Dismiss`]. One hidden window per
 //!   kind is kept, so opening again creates nothing.
+//! - **Picking a path** (TD-0009 A3.5 (12), slice 6e): the handler asks for the system's file
+//!   dialog with [`WindowCx::pick`]; the window runs it once the handler has returned, and the
+//!   answer comes back through [`Handler::picked`] ([`file_dialog`]).
+//! - **Waking** (§5.3): work finished on another thread wakes the window's with a [`Waker`], and
+//!   the handler hears [`Event::Wake`].
 
 mod a11y;
 mod clipboard;
 mod compose;
 pub mod env;
+pub mod file_dialog;
 pub mod locale;
 mod lru;
 pub mod probe;
 pub mod text;
+mod wake;
 mod window;
 
 pub use a11y::{Activity, Notice, NoticeKind};
 pub use accesskit;
 pub use accesskit_windows::{Realize, Realized};
 pub use compose::Compose;
+pub use wake::Waker;
 pub use window::{Window, WindowCx};
 
 /// How a window puts its frames on screen (TD-0009 §5.2), as [`Event::Presenter`] reports it.
@@ -319,6 +327,14 @@ pub trait Handler {
     /// the window raises them on its root, after the tree update. Popups never raise one.
     fn a11y_notices(&mut self, surface: Surface, out: &mut Vec<Notice>) {
         let _ = (surface, out);
+    }
+
+    /// The answer to the pick the handler asked for with [`WindowCx::pick`] (TD-0009 A3.5
+    /// (12)): the path, `Ok(None)` if the user cancelled, or why there's none. Comes after the
+    /// event that asked, once the dialog closed; [`file_dialog::PickError::Unavailable`] at once
+    /// where there's no system dialog.
+    fn picked(&mut self, picked: file_dialog::Picked, cx: &mut WindowCx<'_>) {
+        let _ = (picked, cx);
     }
 }
 

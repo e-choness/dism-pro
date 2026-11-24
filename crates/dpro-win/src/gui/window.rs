@@ -98,7 +98,9 @@ use super::{
     clipboard,
     compose::{Composer, Device, Gpu, Rects, after_loss},
     env::{Env, GUID_POWER_SAVING_STATUS, WM_APP_ENV, Watch},
+    file_dialog::{Pending, Pick},
     probe,
+    wake::{WM_APP_WAKE, Waker, Wakes},
 };
 use crate::{
     error::{Result, last_os_error},
@@ -558,6 +560,20 @@ impl WindowCx<'_> {
         }
     }
 
+    /// Asks for the system's file dialog (TD-0009 A3.5 (12)): the window shows it, modal to
+    /// itself, once the handler has returned, and the answer comes back through
+    /// [`Handler::picked`]. Returns false, asking nothing, while another pick is asked for or up.
+    pub fn pick(&mut self, pick: &Pick<'_>) -> bool {
+        self.state.picks.request(pick)
+    }
+
+    /// A [`Waker`] for this window: another thread wakes it with one, and the handler hears
+    /// [`Event::Wake`] (TD-0009 §5.3).
+    #[must_use]
+    pub fn waker(&self) -> Waker {
+        Waker(Arc::clone(&self.state.wakes))
+    }
+
     /// Draws the title bar and frame dark or light, to match the client area (and a composed
     /// window's Mica). Windows before 10 20H1, and `WinPE` without DWM, keep their frame.
     pub fn set_dark_frame(&mut self, dark: bool) {
@@ -649,6 +665,10 @@ struct State {
     /// Calls into the state that haven't returned.
     depth: Cell<u32>,
     life: Rc<Cell<Life>>,
+    /// The pick the handler asked for, run once it returns (`file_dialog.rs`, slice 6e).
+    picks: Pending,
+    /// What this window's [`Waker`]s share (`wake.rs`, slice 6e).
+    wakes: Arc<Wakes>,
 }
 
 /// What a window of this module is.
@@ -778,6 +798,8 @@ impl State {
             broken: Cell::new(false),
             depth: Cell::new(0),
             life,
+            picks: Pending::default(),
+            wakes: Arc::new(Wakes::default()),
         }
     }
 
@@ -884,17 +906,21 @@ impl State {
                 self.send(hwnd, Event::Close);
             }
             WM_GETOBJECT => return self.get_object(wp, lp),
-            WM_APP_A11Y => {
-                for request in self.requests.drain() {
-                    self.dispatch(hwnd, |h, cx| h.a11y_action(&request, cx));
-                }
-            }
+            WM_APP_A11Y => self.a11y_requests(hwnd),
             WM_APP_REALIZE => self.realize(hwnd, wp),
             WM_APP_ENV => self.env_changed(hwnd),
+            WM_APP_WAKE => self.woken(hwnd),
             WM_DESTROY => self.destroyed(hwnd),
             _ => return self.input(hwnd, msg, wp, lp),
         }
         Some(0)
+    }
+
+    /// `WM_APP_A11Y`: clients' queued requests, each to the handler.
+    fn a11y_requests(&self, hwnd: HWND) {
+        for request in self.requests.drain() {
+            self.dispatch(hwnd, |h, cx| h.a11y_action(&request, cx));
+        }
     }
 
     /// `WM_APP_REALIZE`: a client waits for a table's row, the realize numbered `id` (TD-0009
@@ -909,6 +935,13 @@ impl State {
         self.requests.realize_answer(id, answer);
     }
 
+    /// `WM_APP_WAKE`: a [`Waker`] woke the window. The flag is cleared first, so a wake meanwhile
+    /// posts again rather than wait for this one.
+    fn woken(&self, hwnd: HWND) {
+        self.wakes.clear();
+        self.send(hwnd, Event::Wake);
+    }
+
     /// `WM_DESTROY`: unsubscribes, lets UI Automation go, and ends the loop. Windows has destroyed
     /// a main window's popups already, as it does owned windows.
     fn destroyed(&self, hwnd: HWND) {
@@ -917,6 +950,7 @@ impl State {
         }
         self.unsubscribe(hwnd);
         self.requests.detach();
+        self.wakes.detach();
         if self.a11y_served.get() {
             // UI Automation may release what it holds for this window (the documented call for a
             // window that served it).
@@ -1101,8 +1135,10 @@ impl State {
 
     /// Subscribes to the signals that aren't broadcast: session changes, battery saver and the
     /// text size, before the first reading of [`Env`] so no change falls between. Each may be
-    /// unavailable (no session manager); the window then misses that change only.
+    /// unavailable (no session manager); the window then misses that change only. Its
+    /// [`Waker`]s reach it from here on.
     fn subscribe(&self, hwnd: HWND) {
+        self.wakes.attach(hwnd);
         self.watch.set(Watch::start(hwnd));
         // SAFETY: hwnd is live; unsubscribed at WM_DESTROY.
         self.sessions
@@ -1195,7 +1231,20 @@ impl State {
             // SAFETY: hwnd is live. The state outlives this call (with_state's depth count).
             unsafe { DestroyWindow(hwnd) };
         }
+        self.run_pick(hwnd);
         Some(r)
+    }
+
+    /// The pick the handler asked for, now that it has returned and nothing of it is borrowed
+    /// (TD-0009 A3.5 (12)): the dialog's modal loop dispatches this window's messages meanwhile,
+    /// and its answer goes to [`Handler::picked`]. Nothing once the window is going.
+    fn run_pick(&self, hwnd: HWND) {
+        if self.kind != Kind::Main || self.life.get() != Life::Alive {
+            return;
+        }
+        if let Some(picked) = self.picks.run(hwnd) {
+            self.dispatch_as(hwnd, Surface::Main, |h, cx| h.picked(picked, cx));
+        }
     }
 
     /// Runs `f` on the state whose handler serves this window: its own, or a popup's owner's.
@@ -2671,5 +2720,192 @@ mod tests {
         let mut msg: MSG = unsafe { std::mem::zeroed() };
         // SAFETY: msg is a live local; PM_REMOVE takes the message.
         while unsafe { PeekMessageW(&raw mut msg, null_mut(), 0, 0, PM_REMOVE) } != 0 {}
+    }
+
+    // Slice 6e: the pick after the event (TD-0009 A3.5 (12)) and the waker (§5.3).
+
+    /// The dialog's title in these tests: the helper thread finds it by it.
+    const PICK_TITLE: &str = "dpro-win gui test: pick";
+
+    /// Asks for a pick on `p` (and a wake in 10 ms first, on `w`), and logs what it hears, in
+    /// order, noting an answer that came while it was handling an event.
+    struct Picker {
+        log: Rc<RefCell<Vec<String>>>,
+        handling: bool,
+    }
+
+    impl Handler for Picker {
+        fn event(&mut self, event: Event, cx: &mut WindowCx<'_>) -> bool {
+            self.handling = true;
+            match event {
+                Event::Char(c @ ('p' | 'w')) => {
+                    if c == 'w' {
+                        cx.wake_after(Some(10));
+                    }
+                    let asked = cx.pick(&Pick {
+                        mode: crate::gui::file_dialog::PickMode::Folder,
+                        title: PICK_TITLE,
+                        start: None,
+                    });
+                    self.log.borrow_mut().push(format!("asked {asked}"));
+                    // A second request while one waits is refused.
+                    let again = cx.pick(&Pick {
+                        mode: crate::gui::file_dialog::PickMode::Folder,
+                        title: PICK_TITLE,
+                        start: None,
+                    });
+                    self.log.borrow_mut().push(format!("again {again}"));
+                }
+                Event::Wake => self.log.borrow_mut().push("wake".into()),
+                Event::Close => cx.close(),
+                _ => {}
+            }
+            self.handling = false;
+            true
+        }
+
+        fn paint(&mut self, frame: &mut Frame<'_>) {
+            frame.pixels.fill(0xFF33_6699);
+        }
+
+        fn picked(&mut self, picked: crate::gui::file_dialog::Picked, _: &mut WindowCx<'_>) {
+            let when = if self.handling { "inside" } else { "after" };
+            let answer = match picked {
+                Ok(None) => "cancelled",
+                Ok(Some(_)) => "a path",
+                Err(crate::gui::file_dialog::PickError::Unavailable(_)) => "unavailable",
+                Err(crate::gui::file_dialog::PickError::Failed(_)) => "failed",
+            };
+            self.log
+                .borrow_mut()
+                .push(format!("picked {answer} {when}"));
+        }
+    }
+
+    fn open_picker() -> (Window, Rc<RefCell<Vec<String>>>) {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let handler = Picker {
+            log: Rc::clone(&log),
+            handling: false,
+        };
+        let options = WindowOptions {
+            title: "dpro-win gui test",
+            size: (320, 200),
+            min_size: (100, 100),
+            compose: Compose::Never,
+        };
+        let window = Window::new(&options, Box::new(handler)).expect("a window");
+        (window, log)
+    }
+
+    fn pump_until(done: impl Fn() -> bool) {
+        let start = Instant::now();
+        while !done() && start.elapsed() < Duration::from_secs(5) {
+            // SAFETY: plain data; all-zero is a valid value.
+            let mut msg: MSG = unsafe { std::mem::zeroed() };
+            // SAFETY: msg is a live local; the message is dispatched to its window.
+            while unsafe { PeekMessageW(&raw mut msg, null_mut(), 0, 0, PM_REMOVE) } != 0 {
+                // SAFETY: msg is the message PeekMessageW just filled.
+                unsafe { DispatchMessageW(&raw const msg) };
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn a_pick_runs_after_the_event_and_its_answer_comes_back() {
+        let (window, log) = open_picker();
+        // Under Wine or Windows the dialog may show: the helper presses its Esc.
+        let closer = crate::gui::file_dialog::tests::close_with_esc(PICK_TITLE);
+        // SAFETY: a message sent to this test's live window, on its thread. The dialog's modal
+        // loop (if one shows) runs before it returns.
+        unsafe { SendMessageW(window.hwnd, WM_CHAR, 0x70, 0) };
+        let found = closer.finish();
+        let log = log.borrow().clone();
+        let answer = if found {
+            "picked cancelled after"
+        } else {
+            "picked unavailable after"
+        };
+        assert_eq!(log, ["asked true", "again false", answer]);
+        drop(window);
+        pump_until(|| true);
+    }
+
+    #[test]
+    #[ignore = "slice 6e: lands with the code"]
+    fn the_dialog_s_modal_loop_still_dispatches_the_window_s_messages() {
+        let (window, log) = open_picker();
+        let closer = crate::gui::file_dialog::tests::close_with_esc_after(
+            PICK_TITLE,
+            Duration::from_millis(500),
+        );
+        // SAFETY: as above.
+        unsafe { SendMessageW(window.hwnd, WM_CHAR, 0x77, 0) };
+        let found = closer.finish();
+        let log = log.borrow().clone();
+        if found {
+            // The wake came through the dialog's loop, before its answer.
+            assert_eq!(
+                log,
+                [
+                    "asked true",
+                    "again false",
+                    "wake",
+                    "picked cancelled after"
+                ]
+            );
+        } else {
+            eprintln!("window: no system dialog here, so no modal loop to test: {log:?}");
+            assert_eq!(
+                log,
+                ["asked true", "again false", "picked unavailable after"]
+            );
+        }
+        drop(window);
+        pump_until(|| true);
+    }
+
+    #[test]
+    #[ignore = "slice 6e: lands with the code"]
+    fn a_waker_on_another_thread_sends_one_wake_until_it_is_heard() {
+        let (window, events, _) = open(0);
+        let hwnd = window.hwnd;
+        // SAFETY: this test's window, on its thread.
+        let waker = unsafe {
+            with_state(hwnd, |state| {
+                WindowCx {
+                    hwnd,
+                    state,
+                    surface: Surface::Main,
+                }
+                .waker()
+            })
+        }
+        .expect("the window's state");
+        let heard = || {
+            events
+                .borrow()
+                .iter()
+                .filter(|e| **e == Event::Wake)
+                .count()
+        };
+        // Three wakes before the thread looks: one message.
+        let other = waker.clone();
+        std::thread::spawn(move || (0..3).for_each(|_| other.wake()))
+            .join()
+            .expect("the waking thread");
+        pump_until(|| heard() > 0);
+        std::thread::sleep(Duration::from_millis(30));
+        pump_until(|| true);
+        assert_eq!(heard(), 1, "{:?}", events.borrow());
+        // Heard: the next wake posts again.
+        std::thread::spawn(move || waker.wake())
+            .join()
+            .expect("the waking thread");
+        pump_until(|| heard() > 1);
+        assert_eq!(heard(), 2);
+        drop(window);
+        pump_until(|| true);
     }
 }

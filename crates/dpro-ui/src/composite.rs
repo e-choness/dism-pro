@@ -35,6 +35,9 @@ mod toast;
 // Slice 6d: the drawer frame (A3.5 (6)).
 mod drawer;
 
+// Slice 6e: the in-app path picker (A3.5 (12)).
+mod picker;
+
 pub use badge::{BadgeSpec, BadgeTone};
 pub use batch_bar::{BATCH_CLEAR, BATCH_COUNT, BATCH_HIDDEN, BATCH_NOTE, BatchBar};
 pub use card::{
@@ -63,6 +66,11 @@ pub use drawer::{
     CALLOUT_TEXT, CALLOUT_TITLE, CODE_COPY, CODE_TEXT, Callout, DRAWER_BADGES, DRAWER_BODY,
     DRAWER_CANCEL, DRAWER_CLOSE, DRAWER_FOOTER, DRAWER_HEADER, DRAWER_PRIMARY, DRAWER_SUMMARY,
     DRAWER_TITLE, DrawerFooter, DrawerFrame, DrawerPrimary, SECTION_TITLE, drawer_is_sheet,
+};
+
+pub use picker::{
+    PICKER_CANCEL, PICKER_CLOSE, PICKER_DRIVES, PICKER_ERROR, PICKER_FOOTER, PICKER_PATH,
+    PICKER_PATH_ROW, PICKER_SELECT, PICKER_TABLE, PICKER_TITLE, PICKER_UP, PathPicker,
 };
 
 use crate::{

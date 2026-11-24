@@ -966,6 +966,27 @@ pub mod tokens {
         /// The buttons' least height.
         pub const BUTTON_H: f32 = 40.0;
     }
+
+    // Slice 6e: the in-app path picker (TD-0009 A3.5 (12)).
+
+    /// The in-app path picker: the drawer frame's sheet (its sides and footer, [`drawer`]), and
+    /// its path row.
+    pub mod picker {
+        /// The sides' padding, the header's top and the footer's above and below: the drawer's.
+        pub const PAD_X: f32 = super::drawer::PAD_X;
+        pub const HEADER_TOP: f32 = super::drawer::HEADER_TOP;
+        pub const FOOTER_PAD_Y: f32 = super::drawer::FOOTER_PAD_Y;
+        /// Under the header, the path row and the error panel.
+        pub const GAP: f32 = super::drawer::GAP;
+        /// Close's square.
+        pub const CLOSE: f32 = super::drawer::CLOSE;
+        /// The footer's buttons' least height.
+        pub const BUTTON_H: f32 = super::drawer::BUTTON_H;
+        /// The path row's controls' least height, and Up's square: a field's.
+        pub const CONTROL_H: f32 = 32.0;
+        /// The drive list's least width: `C:\` and its chevron at 100 % text.
+        pub const DRIVES_W: f32 = 88.0;
+    }
 }
 
 #[cfg(test)]

@@ -433,6 +433,7 @@ dependencies = [
  "dpro-core",
  "gungraun",
  "proptest",
+ "thiserror",
 ]
 
 [[package]]

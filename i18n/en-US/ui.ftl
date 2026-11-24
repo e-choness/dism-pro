@@ -86,6 +86,33 @@ ui-drawer-close = Close
 ui-drawer-cancel = Cancel
 ui-code-copy = Copy command
 
+## The path picker (A3.5 (12)), slice 6e: the system's file dialog, or the in-app picker in a
+## sheet where Windows has none. The sheet's Close and Cancel are the drawer's.
+
+ui-picker-folder-title = Choose a folder
+ui-picker-file-title = Choose a file
+ui-picker-path = Path
+ui-picker-up = Up one level
+ui-picker-drives = Drive
+ui-picker-select-folder = Select this folder
+ui-picker-select-file = Open
+ui-picker-name-column = Name
+ui-picker-modified-column = Date modified
+# The table's status line while a folder's first entries haven't come.
+ui-loading = Loading…
+ui-picker-empty-folders = This folder has no subfolders.
+ui-picker-empty-files = No matching files in this folder.
+# $path (String) - the path as typed
+ui-picker-not-found = “{ $path }” doesn't exist.
+# $path (String) - the path as typed
+ui-picker-not-folder = “{ $path }” isn't a folder.
+# $path (String) - the path as typed
+ui-picker-refused = “{ $path }” isn't a full path. Type the whole path from its drive, without “..”.
+# $path (String) - the folder
+ui-picker-denied = You don't have permission to open “{ $path }”.
+# $path (String) - the folder
+ui-picker-failed = Couldn't list “{ $path }”.
+
 ## The command palette (A3.5 (3)).
 
 ui-palette-name = Command palette

@@ -30,6 +30,17 @@
 //! tooltip, each show in a popup window of the main one, with a [`Ui`] of its own. So do slice
 //! 6c's palette, dialog and toast. Every surface's events reach this one handler, marked with the
 //! surface they're for.
+//!
+//! **Picking a path** (TD-0009 A3.5 (12), slice 6e). The model asks for the system's file dialog
+//! through [`Model::picks`], after the event's update; the window shows it once the event is
+//! done, never inside [`Ui::dispatch`], and the answer comes back as the message the model named.
+//! Where there's no system dialog the answer is [`file_dialog::PickError::Unavailable`] (the
+//! window remembers it for the session), and the model opens the in-app picker
+//! ([`Cx::path_picker`]). A5's `Effect::Pick` replaces the hook.
+//!
+//! **Waking** (§5.3). The model gets the window's [`Waker`] once ([`Model::attach`]), for work it
+//! runs off the UI thread (the in-app picker's listing): a wake sends the window
+//! [`Event::Wake`], and the model polls in [`Model::wake`].
 
 mod popups;
 
@@ -39,6 +50,7 @@ use dpro_win::gui::{
     self, Backdrop, Compose, Event, Frame, Handler, PointPx, Presenter, Realize, Realized, SizePx,
     Surface, Window, WindowCx, WindowOptions, text,
 };
+pub use dpro_win::gui::{Waker, file_dialog};
 
 use crate::{Activity, Notice, NoticeKind};
 use crate::{
@@ -195,6 +207,22 @@ pub trait Model {
     /// Hands the model's waiting notices to `f` (TD-0009 A4.4's announcements, their text
     /// resolved from the catalog), after every event; the host queues them with [`Ui::notify`].
     fn notices(&mut self, _f: impl FnMut(Notice<'_>)) {}
+
+    // Slice 6e (TD-0009 A3.5 (12), §5.3).
+
+    /// The window's [`Waker`], once, before the first frame: work the model runs on another
+    /// thread wakes the window with it, and the model takes its results in [`wake`](Self::wake).
+    fn attach(&mut self, _waker: Waker) {}
+
+    /// Hands the pick the model asks for, if any, to `f`: what the system dialog picks, and the
+    /// message its answer comes back as. After every event, once the view is built; the model
+    /// forgets the request once handed. The host takes it unless an answer is still to come, and
+    /// the window shows the dialog once the event is done.
+    fn picks(
+        &mut self,
+        _f: impl FnMut(&file_dialog::Pick<'_>, fn(file_dialog::Picked) -> Self::Msg),
+    ) {
+    }
 }
 
 /// The user's formats (TD-0009 A2.5): Windows' days, moments and decimal separator, with the
@@ -243,6 +271,10 @@ pub struct Host<P: Model> {
     /// Whose tip the tooltip window shows, and its text.
     tip_for: Option<(Surface, NodeId)>,
     tip_text: String,
+    /// The model has the window's [`Waker`] (slice 6e).
+    attached: bool,
+    /// What the answer to the pick the window will show, or shows, becomes (slice 6e).
+    pick_on: Option<fn(file_dialog::Picked) -> P::Msg>,
 }
 
 /// What new settings or a new presenter changed in how the window looks.
@@ -287,6 +319,8 @@ impl<P: Model> Host<P> {
             open: None,
             tip_for: None,
             tip_text: String::new(),
+            attached: false,
+            pick_on: None,
         }
     }
 
@@ -455,6 +489,7 @@ impl<P: Model> Host<P> {
             self.build();
         }
         self.queue_notices();
+        self.request_pick(cx);
         self.sync_popup(cx);
         self.sync_toast(cx);
         // Before the damage goes out: a blink damages the caret.
@@ -515,6 +550,17 @@ impl<P: Model> Host<P> {
     fn queue_notices(&mut self) {
         let ui = &mut self.ui;
         self.model.notices(|n| ui.notify(n));
+    }
+
+    /// The pick the model asks for, unless an answer is still to come (TD-0009 A3.5 (12)): the
+    /// window shows the dialog once this event is done, and [`Handler::picked`] brings the answer.
+    fn request_pick(&mut self, cx: &mut WindowCx<'_>) {
+        let pending = &mut self.pick_on;
+        self.model.picks(|pick, on| {
+            if pending.is_none() && cx.pick(pick) {
+                *pending = Some(on);
+            }
+        });
     }
 }
 
@@ -618,6 +664,10 @@ impl<P: Model> Host<P> {
 
 impl<P: Model> Handler for Host<P> {
     fn event(&mut self, event: Event, cx: &mut WindowCx<'_>) -> bool {
+        if !self.attached {
+            self.attached = true;
+            self.model.attach(cx.waker());
+        }
         let used = match cx.surface() {
             Surface::Main => match self.main_event(event, cx) {
                 Some(used) => used,
@@ -732,6 +782,15 @@ impl<P: Model> Handler for Host<P> {
             }
         };
         found.map_or(Realized::NotFound, |at| Realized::Row(at as usize))
+    }
+
+    /// The system dialog's answer (TD-0009 A3.5 (12)) becomes the message the model named, and
+    /// the frame shows what it did.
+    fn picked(&mut self, picked: file_dialog::Picked, cx: &mut WindowCx<'_>) {
+        if let Some(on) = self.pick_on.take() {
+            self.model.update(on(picked));
+        }
+        self.frame(cx);
     }
 }
 

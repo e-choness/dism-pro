@@ -46,6 +46,7 @@
     "crates/dpro-ui/benches/ir.rs composite_drawer::drawer_frame.painted": 1029113,
     "crates/dpro-ui/benches/ir.rs composite_drawer::drawer_open.painted": 835125,
     "crates/dpro-ui/benches/ir.rs composite_drawer::drawer_open.pane": 94436,
+    "crates/dpro-ui/benches/ir.rs composite_picker::picker_listing.first_screen": 1137375,
     "crates/dpro-ui/benches/ir.rs grouped::event.realize": 929525,
     "crates/dpro-ui/benches/ir.rs grouped::event.row_down": 188496,
     "crates/dpro-ui/benches/ir.rs grouped::fling.frames": 206607056,
