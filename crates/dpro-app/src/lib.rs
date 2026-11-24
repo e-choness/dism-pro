@@ -8,6 +8,7 @@
 
 pub mod announce;
 pub mod badges;
+pub mod display;
 mod fold;
 pub mod palette;
 pub mod picker;

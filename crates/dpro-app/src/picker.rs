@@ -15,6 +15,13 @@
 //! - **Rows.** Folders first, then (choosing a file) the files of the allowed [`Types`], each in
 //!   name order, ignoring case. Choosing a folder lists no files. Hidden entries are listed: a
 //!   servicing tool's user often wants `ProgramData` or a `$`-folder.
+//! - **Untrusted names** (A3.8). A name or path is shown as [`display_text`] shows it, its control
+//!   and bidirectional characters as escapes (`<U+202E>`), so a folder can't disguise what it
+//!   is. A [`Lister`] hands names so, made on its own thread (A3.7: the picker's O(entries) work
+//!   is off the UI thread), and the path field shows the folder so. An escape keeps every other
+//!   character where it was, so a name's extension is the real one's for the file types. Opening
+//!   a row, choosing a file and going where the field says turn the escapes back first
+//!   ([`real_text`]), so the path listed or chosen is the real one.
 
 use std::{
     cmp::Ordering,
@@ -33,7 +40,10 @@ use std::{
 
 use dpro_core::units::UnixMillis;
 
-use crate::table::TableModel;
+use crate::{
+    display::{display_text, push_display, real_text},
+    table::TableModel,
+};
 
 /// The most entries a [`ListBatch`] holds.
 pub const BATCH: usize = 512;
@@ -123,8 +133,9 @@ pub struct ListRequest {
 /// One entry of a listed folder.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
-    /// Its name in the folder, not its path. A name that isn't valid Unicode shows with U+FFFD
-    /// where it isn't, and then can't be opened.
+    /// Its name in the folder, not its path, as [`display_text`] shows it (the lister made it
+    /// so). A name that isn't valid Unicode shows with U+FFFD where it isn't, and then can't be
+    /// opened.
     pub name: Box<str>,
     /// A folder, or a link to one (a junction, a folder symbolic link): opening it lists its
     /// target, one level.
@@ -197,8 +208,8 @@ pub enum Activated {
     Chose(PathBuf),
 }
 
-/// Runs [`ListRequest`]s off the UI thread and hands back their batches. The UI thread only ever
-/// calls these, and neither waits.
+/// Runs [`ListRequest`]s off the UI thread and hands back their batches, each entry's name as
+/// [`display_text`] shows it. The UI thread only ever calls these, and neither waits.
 pub trait Lister {
     /// Starts listing `request`. A listing still running is abandoned: what it sends later is
     /// stale, and dropped by [`FolderModel::accept`].
@@ -348,7 +359,7 @@ fn entry(item: &fs::DirEntry) -> Entry {
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
         .map(|d| UnixMillis(u64::try_from(d.as_millis()).unwrap_or(u64::MAX)));
     Entry {
-        name: item.file_name().to_string_lossy().into(),
+        name: display_text(&item.file_name().to_string_lossy()).into(),
         folder,
         modified,
     }
@@ -508,8 +519,9 @@ impl FolderModel {
         self.listing
     }
 
-    /// Opens `path`: a new generation, no rows, [`Listing::Loading`], the path field showing it.
-    /// Nothing touches the file system: the returned request is the lister's to run.
+    /// Opens `path`: a new generation, no rows, [`Listing::Loading`], the path field showing it
+    /// ([`display_text`]'s form). Nothing touches the file system: the returned request is the
+    /// lister's to run.
     ///
     /// # Errors
     /// [`Refused`] if `path` holds `..` or has no root; nothing changes, not even the field's
@@ -519,7 +531,7 @@ impl FolderModel {
         self.generation = self.generation.next();
         self.folder = Some(path.to_path_buf());
         self.path.clear();
-        self.path.push_str(&path.to_string_lossy());
+        push_display(&path.to_string_lossy(), &mut self.path);
         self.listing = Listing::Loading;
         self.found = false;
         self.entries.clear();
@@ -530,8 +542,9 @@ impl FolderModel {
         })
     }
 
-    /// Enter in the path field: opens what it says. Spaces around it, and the quotes File
-    /// Explorer's "Copy as path" puts around a path, are left out.
+    /// Enter in the path field: opens what it says, its escapes turned back into the characters
+    /// they show ([`real_text`]). Spaces around it, and the quotes File Explorer's "Copy as path"
+    /// puts around a path, are left out.
     ///
     /// # Errors
     /// As [`open`](Self::open): a refused path stays in the field, for the user to fix.
@@ -541,7 +554,7 @@ impl FolderModel {
             .strip_prefix('"')
             .and_then(|t| t.strip_suffix('"'))
             .unwrap_or(typed);
-        let path = PathBuf::from(typed);
+        let path = PathBuf::from(&*real_text(typed));
         self.open(&path)
     }
 
@@ -556,7 +569,7 @@ impl FolderModel {
     /// no such row.
     pub fn activate(&mut self, row: u32) -> Option<Activated> {
         let entry = self.entry(row)?;
-        let path = self.folder.as_deref()?.join(&*entry.name);
+        let path = self.folder.as_deref()?.join(&*real_text(&entry.name));
         if entry.folder {
             self.open(&path).ok().map(Activated::Open)
         } else {
@@ -639,7 +652,7 @@ impl FolderModel {
             Mode::Folder => self.found_folder().map(Path::to_path_buf),
             Mode::File(_) => {
                 let file = self.current_file()?;
-                Some(self.folder.as_deref()?.join(&*file.name))
+                Some(self.folder.as_deref()?.join(&*real_text(&file.name)))
             }
         }
     }
@@ -822,6 +835,44 @@ mod tests {
         assert!(!Types::new(&["install*.wim"]).allows("install.wim"));
         // Lowered per character, as the names are.
         assert!(Types::new(&["*.ÄBC"]).allows("x.äBc"));
+    }
+
+    /// A3.8: a name that would disguise its extension shows its override as an escape (as a
+    /// lister hands it), the file types judge it as the real name, and opening or choosing it, or
+    /// going where the field shows, uses the real path.
+    #[test]
+    fn untrusted_names_show_escaped_and_open_as_themselves() {
+        let listed = |name: &str, folder| named(&crate::display::display_text(name), folder);
+        let mut m = FolderModel::new(Mode::File(Types::new(&["*.jpg"])));
+        let request = m.open(&full("in")).expect("a full path");
+        assert!(m.accept(ListBatch {
+            generation: request.generation,
+            entries: vec![
+                listed("photo\u{202E}gpj.exe", false),
+                listed("x\u{1b}[31m.jpg", false),
+                listed("dir\u{2067}", true)
+            ],
+            end: Some(Ok(())),
+        }));
+        let names: Vec<_> = (0..m.len())
+            .filter_map(|r| m.entry(r).map(|e| &*e.name))
+            .collect();
+        assert_eq!(
+            names,
+            ["dir<U+2067>", "x<U+001B>[31m.jpg"],
+            "the .exe isn't a .jpg, whatever it shows"
+        );
+        m.table_mut().set_current(1);
+        assert_eq!(m.choice(), Some(full("in").join("x\u{1b}[31m.jpg")));
+        let Some(Activated::Open(opened)) = m.activate(0) else {
+            panic!("the folder opens");
+        };
+        let real = full("in").join("dir\u{2067}");
+        assert_eq!(opened.path, real);
+        assert!(m.path().ends_with("dir<U+2067>"), "{}", m.path());
+        assert!(!m.path().contains('\u{2067}'));
+        let again = m.go().expect("the field's path");
+        assert_eq!(again.path, real, "the field's escapes go back");
     }
 
     #[test]

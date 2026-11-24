@@ -395,6 +395,53 @@ fn the_file_system_lister_says_not_found_and_not_folder() {
     drop(std::fs::remove_dir_all(&dir));
 }
 
+/// Lists `request` with the real lister into `m` until it ends (or 10 s pass).
+fn list(m: &mut FolderModel, request: ListRequest) {
+    let mut lister = FsLister::new(Box::new(|| {}));
+    lister.start(request);
+    let start = Instant::now();
+    while m.listing() == Listing::Loading && start.elapsed() < Duration::from_secs(10) {
+        match lister.poll() {
+            Some(b) => drop(m.accept(b)),
+            None => std::thread::sleep(Duration::from_millis(1)),
+        }
+    }
+}
+
+/// A3.8 on a real folder: a folder whose name holds a right-to-left override lists with the
+/// override as an escape, so it can't pass for an `.exe`, and opening its row lists the real
+/// folder. T1 runs it on Linux. Under T2, Wine in the C locale stores file names in ASCII and
+/// refuses the name; the test then checks that's why (a plain name in the same place is made)
+/// and says so, as the lister's code is the same `std::fs` T1 ran.
+#[test]
+fn a_disguised_name_lists_escaped_and_opens_as_itself() {
+    let dir = std::env::temp_dir().join(format!("dpro-picker-bidi-{}", std::process::id()));
+    drop(std::fs::remove_dir_all(&dir));
+    let disguised = dir.join("photo\u{202E}gpj.exe");
+    if let Err(e) = std::fs::create_dir_all(&disguised) {
+        assert!(cfg!(windows), "a test folder: {e}");
+        std::fs::create_dir_all(dir.join("photo gpj.exe")).expect("a plain test folder");
+        eprintln!("this file system can't store a U+202E name ({e}); T1 lists one");
+        drop(std::fs::remove_dir_all(&dir));
+        return;
+    }
+    std::fs::write(disguised.join("inner.txt"), b"x").expect("a test file");
+    let mut m = FolderModel::new(Mode::File(Types::new(&["*.txt"])));
+    let request = m.open(&dir).expect("a full path");
+    list(&mut m, request);
+    assert_eq!(m.listing(), Listing::Listed);
+    assert_eq!(names(&m), ["photo<U+202E>gpj.exe"]);
+    let Some(Activated::Open(request)) = m.activate(0) else {
+        panic!("the folder opens");
+    };
+    assert_eq!(request.path, disguised, "the real path is listed");
+    assert!(m.path().ends_with("photo<U+202E>gpj.exe"), "{}", m.path());
+    list(&mut m, request);
+    assert_eq!(m.listing(), Listing::Listed);
+    assert_eq!(names(&m), ["inner.txt"]);
+    drop(std::fs::remove_dir_all(&dir));
+}
+
 /// `Path` is only used for its type in signatures.
 #[test]
 fn a_folder_model_starts_empty() {
