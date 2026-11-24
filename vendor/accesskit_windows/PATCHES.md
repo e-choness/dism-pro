@@ -153,7 +153,11 @@ amendment).
    - **New file:** `src/tests/notify.rs`: nothing is queued before a client asks; once one has,
      a notification is queued exactly when the function exists, and raised without a panic; with
      the function forced missing, nothing is queued. The tests run on the window's own thread
-     with no client, so Wine runs them too (T2), and print which path it takes.
+     with no client, so Wine runs them too (T2), and print which path it takes. Measured in T2:
+     the image's Wine exports the function and accepts the raise. They activate the adapter
+     through `handle_wm_getobject` without handing its answer on, because Wine faults in
+     `UiaReturnRawElementProvider` from the harness's window (why T2 skips `tests::simple`).
+     `cargo xtask pe-compat --exe` checks that G1's shell probe doesn't import the function.
    - **`src/tests/mod.rs`:** the `mod notify;` line.
 
 8. **HeadingLevel** (TD-0009 A4.5, slice 6a). Narrator's scan mode jumps by heading (H, and 1–9
