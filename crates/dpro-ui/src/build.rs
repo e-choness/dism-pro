@@ -148,6 +148,16 @@ impl<M> Cx<'_, M> {
     }
 }
 
+/// Slice 6d: the window's size for views (TD-0009 A3.5 addition 14).
+impl<M> Cx<'_, M> {
+    /// The window's logical size from the last [`Ui::set_viewport`], so a view can choose its
+    /// layout by width: the rail's, a drawer's pane or sheet, a settings row's line.
+    #[must_use]
+    pub fn viewport(&self) -> crate::Size {
+        self.ui.viewport()
+    }
+}
+
 impl<M> Ui<M> {
     /// Copies what changed from `el` into node `i`: layout changes mark it dirty, looks (check
     /// state, enabled, [`Look`](crate::Look)) damage it, and what a client sees (text, check

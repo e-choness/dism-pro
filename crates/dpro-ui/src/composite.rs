@@ -27,6 +27,9 @@ mod error_panel;
 mod info_bar;
 mod settings_row;
 
+// Slice 6d: the drawer frame (A3.5 (6)).
+mod drawer;
+
 pub use badge::{BadgeSpec, BadgeTone};
 pub use batch_bar::{BATCH_CLEAR, BATCH_COUNT, BATCH_HIDDEN, BATCH_NOTE, BatchBar};
 pub use card::{
@@ -42,6 +45,12 @@ pub use info_bar::{
     INFO_ACTION, INFO_DISMISS, INFO_GLYPH, INFO_MESSAGE, INFO_TITLE, InfoBar, InfoTone,
 };
 pub use settings_row::{SETTINGS_DESCRIPTION, SETTINGS_HEADING, SETTINGS_LABEL, SettingsRow};
+
+pub use drawer::{
+    CALLOUT_TEXT, CALLOUT_TITLE, CODE_COPY, CODE_TEXT, Callout, DRAWER_BADGES, DRAWER_BODY,
+    DRAWER_CANCEL, DRAWER_CLOSE, DRAWER_FOOTER, DRAWER_HEADER, DRAWER_PRIMARY, DRAWER_SUMMARY,
+    DRAWER_TITLE, DrawerFooter, DrawerFrame, DrawerPrimary, SECTION_TITLE, drawer_is_sheet,
+};
 
 use crate::{
     Look, Radius, TextStyle, Tone,

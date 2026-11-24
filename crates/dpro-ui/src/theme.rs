@@ -734,6 +734,46 @@ pub mod tokens {
         /// A window narrower than this puts every row's control under its text.
         pub const NARROW: f32 = 600.0;
     }
+
+    // Slice 6d: the drawer frame and slides (TD-0009 A3.5 (6), addition 11).
+
+    /// The Preview drawer (A3.5 (6)).
+    pub mod drawer {
+        /// Its width as a pane beside the page.
+        pub const WIDTH: f32 = 460.0;
+        /// A sheet's narrowest: it covers the page, and never gets narrower than this.
+        pub const MIN_W: f32 = 300.0;
+        /// The page's narrowest beside a pane (artboard 02's content basis): where it would be
+        /// narrower, the drawer is a sheet over it.
+        pub const PAGE_MIN: f32 = 480.0;
+        /// The header's padding: 24 above, 24 at the sides, 16 below. The body and footer share
+        /// the sides.
+        pub const PAD_X: f32 = 24.0;
+        pub const HEADER_TOP: f32 = 24.0;
+        pub const HEADER_BOTTOM: f32 = 16.0;
+        /// The footer's padding above and below: 16 × 24.
+        pub const FOOTER_PAD_Y: f32 = 16.0;
+        /// The footer's buttons' least height; taller when the text size needs it.
+        pub const BUTTON_H: f32 = 40.0;
+        /// Close's square, in the header's top corner.
+        pub const CLOSE: f32 = 32.0;
+        /// Between the body's sections, and under the last.
+        pub const GAP: f32 = 16.0;
+        /// Inside a callout's edge.
+        pub const CALLOUT_PAD: f32 = 14.0;
+        /// Inside a code block's edge, beside its text.
+        pub const CODE_PAD: f32 = 12.0;
+        /// The code block's Copy button's least height.
+        pub const COPY_H: f32 = 32.0;
+    }
+
+    /// Slides (A3.5 addition 11).
+    pub mod slide {
+        /// The platform's frame period (dpro-win's frame timer): a slide's clock starts one
+        /// frame before its first tick, when the frame that showed it was painted, so a slide of
+        /// `drawer_ms` takes ⌈`drawer_ms` / `FRAME_MS`⌉ frames (U16).
+        pub const FRAME_MS: u16 = 16;
+    }
 }
 
 #[cfg(test)]
