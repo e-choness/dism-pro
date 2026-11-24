@@ -150,11 +150,18 @@ pub enum Tone {
     InverseAccent,
     /// Text on [`InverseAccent`](Self::InverseAccent).
     OnInverseAccent,
+    // Slice 6d: the drawer's callout (A3.5 (6), artboard 02).
+    /// A callout's tint: the permanent note in the Preview drawer.
+    CalloutFill,
+    /// Its border.
+    CalloutBorder,
+    /// Its title and text, on [`CalloutFill`](Self::CalloutFill).
+    CalloutText,
 }
 
 impl Tone {
     /// Every tone, in declaration order (the theme's table order).
-    pub const ALL: [Self; 36] = [
+    pub const ALL: [Self; 39] = [
         Self::App,
         Self::Surface,
         Self::Subtle,
@@ -191,6 +198,9 @@ impl Tone {
         Self::InverseText,
         Self::InverseAccent,
         Self::OnInverseAccent,
+        Self::CalloutFill,
+        Self::CalloutBorder,
+        Self::CalloutText,
     ];
 
     /// A fill high contrast shows as `Highlight`: accent, danger, the selection and the batch
@@ -297,6 +307,10 @@ impl Theme {
                 Color::hex(0xE8_EAEE),
                 Color::hex(0x6E_A0FF),
                 Color::hex(0x0B_1630),
+                // The callout's fill, border and ink (A3.5 (6), from artboard 02).
+                Color::hex(0xFE_F4EE),
+                Color::hex(0xF6_CDB5),
+                Color::hex(0x7C_2D12),
             ],
             sys: None,
         }
@@ -353,6 +367,11 @@ impl Theme {
                 Color::hex(0x14_171C),
                 Color::hex(0x25_63EB),
                 Color::hex(0xFF_FFFF),
+                // The callout's, computed as the badges' are (decision #45): light orange text
+                // on a dark orange tint, in a darker orange border.
+                Color::hex(0x2A_1D17),
+                Color::hex(0x6B_3A22),
+                Color::hex(0xFD_BA8C),
             ],
             sys: None,
         }
@@ -413,6 +432,10 @@ impl Theme {
                 sys.window_text,
                 sys.highlight,
                 sys.highlight_text,
+                // The callout: no fill, window text and border.
+                sys.window,
+                sys.window_text,
+                sys.window_text,
             ],
             sys: Some(sys),
         }
@@ -895,12 +918,18 @@ mod tests {
             (Text, Tone::InfoFill),
             (Tone::Danger, Tone::ErrorFill),
             (Tone::InverseText, Tone::InverseFill),
+            (Tone::CalloutText, Tone::CalloutFill),
         ] {
             assert_eq!(t.color(fill), sys.window, "{fill:?}");
             assert_eq!(t.ink(text, fill), sys.window_text, "{text:?} on {fill:?}");
             assert_eq!(t.stroke(fill, true), sys.window_text, "{fill:?}'s border");
         }
-        for border in [Tone::DangerBorder, Tone::WarnBorder, Tone::InfoBorder] {
+        for border in [
+            Tone::DangerBorder,
+            Tone::WarnBorder,
+            Tone::InfoBorder,
+            Tone::CalloutBorder,
+        ] {
             assert_eq!(t.color(border), sys.window_text, "{border:?}");
         }
         assert_eq!(t.color(Tone::InverseAccent), sys.highlight);
@@ -1004,6 +1033,8 @@ mod tests {
         ] {
             pairs.push((fg, vec![bg]));
         }
+        // The drawer's callout (A3.5 (6), slice 6d): its title and text on its tint.
+        pairs.push((Tone::CalloutText, vec![Tone::CalloutFill]));
         pairs
     }
 
@@ -1176,6 +1207,17 @@ mod tests {
         // The badge step: 12 px semibold.
         assert_eq!(tokens::font::BADGE.to_bits(), 12.0_f32.to_bits());
         assert_eq!(tokens::font::BADGE_WEIGHT, 600);
+    }
+
+    /// The drawer's callout (A3.5 (6), slice 6d): artboard 02's light values. Dark's are
+    /// computed, and the contrast tests check both.
+    #[test]
+    fn the_callouts_tokens_are_artboard_02s() {
+        let tones = [Tone::CalloutFill, Tone::CalloutBorder, Tone::CalloutText];
+        assert_eq!(
+            tones.map(|t| Theme::LIGHT.color(t)),
+            [0xFE_F4EE, 0xF6_CDB5, 0x7C_2D12].map(Color::hex)
+        );
     }
 
     /// ADR-0007: glass changes only the layers; everything opaque, and high contrast, stays.

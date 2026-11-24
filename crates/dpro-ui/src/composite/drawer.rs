@@ -413,16 +413,16 @@ const PANE: Look = Look {
     ink: Tone::Text,
 };
 
-/// The callout's colors (MEASURE: the Permanent badge's, until its own land).
+/// The callout: its tint in its border, rounded as a card (artboard 02).
 const CALLOUT: Look = Look {
-    fill: Some(Tone::PermanentFill),
-    border: Some(Tone::Border),
+    fill: Some(Tone::CalloutFill),
+    border: Some(Tone::CalloutBorder),
     radius: Radius::Card,
-    ink: Tone::PermanentText,
+    ink: Tone::CalloutText,
 };
 
 const CALLOUT_INK: Look = Look {
-    ink: Tone::PermanentText,
+    ink: Tone::CalloutText,
     ..Look::PLAIN
 };
 
