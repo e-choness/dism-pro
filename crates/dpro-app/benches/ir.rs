@@ -14,6 +14,10 @@
 //! thread, then installed on it: the checks, the current row and the Shift anchor carried over by
 //! key, the view kept in its order.
 //!
+//! `announce` (TD-0009 A4.7 U20, slice 7b): one coalesced progress event through the announcer,
+//! spoken (`crossing`), within its step (`suppressed`), and with all eight slots taken
+//! (`eight_jobs`).
+//!
 //! C1: `docker compose run --rm bench-gate` fails when a count is more than 5 % over
 //! `benches/baseline.json`; `bench-gate -- --update` rewrites that file from the run.
 
@@ -28,12 +32,14 @@ use std::hint::black_box;
 
 use apps::{Apps, NAME, ROWS, SEARCHED, SIZE};
 use dpro_app::{
+    announce::{Announcement, Announcer},
     palette::{PaletteEntry, Score, rank},
     table::{
         Cell, ColumnId, FilterIndex, Order, Pick, Query, RowKey, RowMap, RowSource, SortKeys,
         TableModel,
     },
 };
+use dpro_core::{id::JobId, progress::Progress, units::UnixMillis};
 use gungraun::{
     Callgrind, LibraryBenchmarkConfig, library_benchmark, library_benchmark_group, main,
 };
@@ -264,6 +270,65 @@ fn refresh_apply(r: Refresh) -> (TableModel, (Apps, Refreshed)) {
     (model, fixture)
 }
 
+// ---- announce (TD-0009 A4.7 U20, slice 7b) ---------------------------------------------------
+
+/// The announcer, a job, its progress event and the event's time, as the UI thread gets one
+/// coalesced progress message (A4.5): what U20's ≤ 10,000 Ir per event is measured on.
+type ProgressEvent = (Announcer, JobId, Progress, u64);
+
+fn job(n: u64) -> JobId {
+    JobId::from_parts(UnixMillis(1_800_000_000_000), u128::from(n))
+}
+
+/// `jobs` jobs started at 0 ms and each spoken at 30 % a second apart from 3 s, then the last
+/// one's `permille` at `now_ms`.
+fn event_after(jobs: u64, permille: u64, now_ms: u64) -> ProgressEvent {
+    let mut a = Announcer::new();
+    for n in 0..jobs {
+        a.started(job(n), 0);
+    }
+    let thirty = Progress {
+        done: 300,
+        total: 1000,
+    };
+    for n in 0..jobs {
+        let _ = black_box(a.progress(job(n), thirty, 3_000 + 1_000 * n));
+    }
+    let p = Progress {
+        done: permille,
+        total: 1000,
+    };
+    (a, job(jobs - 1), p, now_ms)
+}
+
+/// One job's progress crosses from 30 to 41 %, 6 s after its last notice: it's spoken.
+fn crossing() -> ProgressEvent {
+    event_after(1, 410, 9_000)
+}
+
+/// One job's progress moves within its step (30 to 38 %): nothing is said.
+fn suppressed() -> ProgressEvent {
+    event_after(1, 380, 9_000)
+}
+
+/// Eight jobs, every slot taken: the last one crosses a step and is spoken.
+fn eight_jobs() -> ProgressEvent {
+    event_after(8, 410, 20_000)
+}
+
+#[library_benchmark]
+#[bench::crossing(setup = crossing)]
+#[bench::suppressed(setup = suppressed)]
+#[bench::eight_jobs(setup = eight_jobs)]
+fn progress_event((mut a, job, p, now): ProgressEvent) -> (Announcer, Option<Announcement>) {
+    let said = a.progress(black_box(job), black_box(p), black_box(now));
+    (a, said)
+}
+
+library_benchmark_group!(name = announce, benchmarks = progress_event);
+
+// ---- end announce ------------------------------------------------------------------------------
+
 library_benchmark_group!(name = palette_1000, benchmarks = keystroke);
 library_benchmark_group!(
     name = table_100k,
@@ -281,5 +346,5 @@ library_benchmark_group!(
 main!(
     // Instruction counts only: the cache simulation would slow every run for metrics nothing gates.
     config = LibraryBenchmarkConfig::default().tool(Callgrind::with_args(["--cache-sim=no"]));
-    library_benchmark_groups = palette_1000, table_100k
+    library_benchmark_groups = palette_1000, table_100k, announce
 );

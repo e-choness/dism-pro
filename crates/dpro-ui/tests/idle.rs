@@ -413,3 +413,29 @@ fn an_ended_toast_costs_exactly_one_wake() {
     assert_eq!(run.wake(), None, "the dialog asks for nothing");
     assert!(!run.win.popup.wants_frame());
 }
+
+/// Notices (TD-0009 A4.7 U22, slice 7b): a progress step the announcer holds back sets no timer
+/// to say it later; the next report after the gap says it. Neither asks for a frame or a wake.
+#[test]
+fn a_progress_step_held_back_asks_for_no_frame_or_wake() {
+    let mut run = Run::accessible(Shell::new()).drawer_open();
+    let mut heard = 0;
+    // A second into the drawer's job, 41 % crosses a step, too soon to be said.
+    run.step(Step::Tick(1_000));
+    run.step(Step::Update(Msg::Progress(41)));
+    assert_idle(&mut run, "a step held back");
+    assert_eq!(
+        run.shell.job_wake(run.now()),
+        None,
+        "a timer waits to say it"
+    );
+    run.ui.take_notices(|_| heard += 1);
+    assert_eq!(heard, 0);
+    // The next report, 2 s into the job, says it.
+    run.step(Step::Tick(1_000));
+    run.step(Step::Update(Msg::Progress(42)));
+    assert_idle(&mut run, "the step said");
+    assert_eq!(run.shell.job_wake(run.now()), None);
+    run.ui.take_notices(|_| heard += 1);
+    assert_eq!(heard, 1);
+}

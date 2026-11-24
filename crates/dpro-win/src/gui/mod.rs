@@ -55,6 +55,7 @@ pub mod probe;
 pub mod text;
 mod window;
 
+pub use a11y::{Activity, Notice, NoticeKind};
 pub use accesskit;
 pub use accesskit_windows::{Realize, Realized};
 pub use compose::Compose;
@@ -311,6 +312,13 @@ pub trait Handler {
     fn a11y_realize(&mut self, request: &Realize, cx: &mut WindowCx<'_>) -> Realized {
         let _ = (request, cx);
         Realized::Unavailable
+    }
+
+    /// The notices waiting for a screen reader, oldest first, into `out` (TD-0009 A4.5). Asked
+    /// after every event, once a client has asked for the tree, and only for [`Surface::Main`]:
+    /// the window raises them on its root, after the tree update. Popups never raise one.
+    fn a11y_notices(&mut self, surface: Surface, out: &mut Vec<Notice>) {
+        let _ = (surface, out);
     }
 }
 

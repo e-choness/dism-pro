@@ -122,3 +122,25 @@ ui-toast-aborted = { $job } stopped: { $reason }
 ui-toast-view = View
 ui-toast-undo = Undo…
 ui-toast-dismiss = Dismiss
+
+## Notices (TD-0009 A4.4, slice 7b): spoken by a screen reader without a focus move, as UI
+## Automation notifications.
+
+# $job (String) - the job's title
+# $percent (Number) - 10 to 90, in steps of 10
+a11y-job-progress = { $job }: { $percent } percent
+a11y-copied = Copied.
+# $count (Number) - 1 or more; no results is the palette's visible status line
+a11y-results = { $count ->
+    [one] One result
+   *[other] { $count } results
+}
+# $shown (Number) - rows the filter shows
+# $total (Number) - rows in the table
+a11y-filter-count = { $shown } of { $total } shown
+# $count (Number) - items listed
+a11y-listed = { $count ->
+    [one] One item listed
+   *[other] { $count } items listed
+}
+a11y-hold-released = Released early. Nothing was changed.

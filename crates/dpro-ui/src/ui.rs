@@ -12,6 +12,7 @@ use crate::{
     field::{Caret, ClipboardRequest, Field},
     geom::{Point, Rect, RectPx, Size},
     layout::Shown,
+    notice::Notices,
     pool::{TextPool, capacity_for},
     scroll::{Drag, Scroll},
     table::{DRAG_DISTANCE, Divider, Press, TableState},
@@ -163,6 +164,8 @@ pub struct Ui<M> {
     /// The node [`focus_first`](Self::focus_first) lands on: a dialog frame's initial button
     /// (A3.5 (13)).
     pub(crate) initial: Option<NodeId>,
+    /// Notices for the platform to raise (TD-0009 A4.5, `notice.rs`).
+    pub(crate) notices: Notices,
 }
 
 /// Windows' message duration when the window hasn't said (`SPI_GETMESSAGEDURATION`'s default): 5
@@ -283,6 +286,7 @@ impl<M> Ui<M> {
             scrim: false,
             expiry: crate::composite::Expiry::new(),
             initial: None,
+            notices: Notices::default(),
         };
         ui.damage_all();
         ui

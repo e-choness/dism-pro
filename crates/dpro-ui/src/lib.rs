@@ -60,6 +60,7 @@ mod geom;
 mod input;
 mod layout;
 pub mod materials;
+mod notice;
 mod paint;
 #[cfg(windows)]
 pub mod platform;
@@ -87,6 +88,7 @@ pub use dpro_core::units::{Bytes, UnixMillis};
 pub use field::{Caret, ClipboardRequest, Cursor, FieldInfo, Insert, MAX_FIELD_LEN, TextEdit};
 pub use geom::{Insets, Point, Rect, RectPx, Size};
 pub use input::{Input, KeyCode, KeyEvent, Mods};
+pub use notice::{Activity, MAX_NOTICE_CHARS, Notice, NoticeKind};
 pub use popup::{Placement, Popup, PopupKind, place};
 pub use scroll::{Axes, ScrollBar, ScrollInfo};
 pub use style::{Align, Axis, Dim, Justify, Style};

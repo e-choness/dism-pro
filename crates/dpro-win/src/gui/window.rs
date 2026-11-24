@@ -1188,6 +1188,7 @@ impl State {
         };
         self.apply_popups(hwnd);
         self.a11y_sync();
+        self.a11y_notify();
         self.a11y_sync_popups();
         if self.close.take() {
             self.destroy_popups();
@@ -1304,6 +1305,46 @@ impl State {
         if let Some(events) = events {
             events.raise();
         }
+    }
+
+    /// Raises the handler's notices as UI Automation notifications on the main window's root
+    /// (TD-0009 A4.5), after [`a11y_sync`](Self::a11y_sync) has served the tree they speak of.
+    /// A popup raises none: it lacks the Window pattern. Until a client has asked for the tree,
+    /// nothing is asked of the handler. Returns how many notices reached the adapter, and how many
+    /// it queued: none where Windows has no `UiaRaiseNotificationEvent` (before 10 1709).
+    fn a11y_notify(&self) -> (usize, usize) {
+        if self.kind != Kind::Main || !self.a11y_served.get() {
+            return (0, 0);
+        }
+        let mut notices = Vec::new();
+        if let Ok(mut handler) = self.handler.try_borrow_mut() {
+            handler.a11y_notices(Surface::Main, &mut notices);
+        }
+        if notices.is_empty() {
+            return (0, 0);
+        }
+        let events: Vec<_> = {
+            let Ok(mut adapter) = self.a11y.try_borrow_mut() else {
+                return (0, 0);
+            };
+            let Some(adapter) = adapter.as_mut() else {
+                return (0, 0);
+            };
+            let mut activity = String::new();
+            notices
+                .iter()
+                .filter_map(|n| {
+                    n.activity_id(&mut activity);
+                    adapter.notify(n.uia_kind(), n.processing(), &n.text, &activity)
+                })
+                .collect()
+        };
+        let queued = events.len();
+        // With nothing borrowed, as in `a11y_sync`.
+        for events in events {
+            events.raise();
+        }
+        (notices.len(), queued)
     }
 
     /// Tells UI Automation whether the window has the keyboard focus.
@@ -1838,7 +1879,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
-    use crate::gui::{Compose, Realize, compose::on_wine};
+    use crate::gui::{Activity, Compose, Notice, NoticeKind, Realize, compose::on_wine};
 
     #[test]
     fn words_of_an_lparam() {
@@ -2185,6 +2226,8 @@ mod tests {
         clicks: u32,
         /// The updates served, which a client's thread can read.
         updates: Arc<AtomicUsize>,
+        /// Notices' texts waiting to be asked for (TD-0009 A4.5).
+        notices: Rc<RefCell<Vec<String>>>,
     }
 
     impl Accessible {
@@ -2193,6 +2236,7 @@ mod tests {
                 log: Rc::clone(log),
                 clicks: 0,
                 updates: Arc::new(AtomicUsize::new(0)),
+                notices: Rc::default(),
             }
         }
     }
@@ -2250,6 +2294,21 @@ mod tests {
                     self.log.borrow_mut().push(format!("find {name}"));
                     Realized::NotFound
                 }
+            }
+        }
+
+        fn a11y_notices(&mut self, surface: Surface, out: &mut Vec<Notice>) {
+            for text in self.notices.borrow_mut().drain(..) {
+                self.log
+                    .borrow_mut()
+                    .push(format!("notice {text} ({surface:?})"));
+                out.push(Notice {
+                    text,
+                    kind: NoticeKind::ActionCompleted,
+                    important: false,
+                    replace: true,
+                    activity: Activity::Copy,
+                });
             }
         }
     }
@@ -2400,6 +2459,58 @@ mod tests {
         drop(window);
         // SAFETY: as above; takes the WM_QUIT the destroyed window posted.
         while unsafe { PeekMessageW(&raw mut msg, null_mut(), 0, 0, PM_REMOVE) } != 0 {}
+    }
+
+    /// T2 (TD-0009 A4.5, slice 7b): the handler's notices are asked for only once a client has
+    /// asked for the tree, then after every event, after its update; each reaches the adapter,
+    /// which queues it where Windows has `UiaRaiseNotificationEvent`. Wine's
+    /// `uiautomationcore` takes one path or the other without a panic; the test prints which.
+    #[test]
+    fn notices_reach_the_adapter_after_the_update_once_a_client_listens() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let handler = Accessible::new(&log);
+        let notices = Rc::clone(&handler.notices);
+        notices.borrow_mut().push("Copied.".into());
+        let options = WindowOptions {
+            title: "dpro-win notice test",
+            size: (200, 100),
+            min_size: (100, 100),
+            compose: Compose::Never,
+        };
+        let window = Window::new(&options, Box::new(handler)).expect("a window");
+        // An event before any client asked: the handler isn't asked, and the notice waits.
+        // SAFETY: a message sent to this test's live window, on its thread.
+        unsafe { SendMessageW(window.hwnd, WM_SETFOCUS, 0, 0) };
+        assert!(log.borrow().is_empty(), "{:?}", log.borrow());
+        assert_eq!(notices.borrow().len(), 1);
+        // A client asks (UiaRootObjectId), then an event: the update, then the notice.
+        // SAFETY: as above.
+        unsafe { SendMessageW(window.hwnd, WM_GETOBJECT, 0, -25) };
+        // SAFETY: as above.
+        unsafe { SendMessageW(window.hwnd, WM_SETFOCUS, 0, 0) };
+        assert_eq!(
+            *log.borrow(),
+            ["tree", "update", "notice Copied. (Main)"],
+            "the notice comes after the update"
+        );
+        // One more, raised directly: it reaches the adapter, which queues it or, without the
+        // function, drops it.
+        notices.borrow_mut().push("Released early.".into());
+        // SAFETY: the window is live, on this thread.
+        let (handed, queued) =
+            unsafe { with_state(window.hwnd, State::a11y_notify) }.expect("a live window");
+        assert_eq!(handed, 1);
+        assert!(queued <= 1, "{queued}");
+        eprintln!(
+            "UiaRaiseNotificationEvent under this uiautomationcore: {}",
+            if queued == 1 {
+                "found, the notice raised"
+            } else {
+                "missing, the notice dropped"
+            }
+        );
+        drop(window);
+        pump_all();
     }
 
     #[test]

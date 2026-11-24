@@ -6,6 +6,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod announce;
 pub mod badges;
 mod fold;
 pub mod palette;

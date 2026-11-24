@@ -119,6 +119,12 @@ raw-API baseline, measured in this job, so it holds on whatever machine the runn
       first change; Esc closes it and focus goes back to "Review changes". Those are gates. A
       second run under --ui-probe idle counts the slide's frame timers: 12 with animations on
       (U16), none off; advisory, as the runner's timing is.
+  Accessibility depth, notifications (TD-0009 A4.5, A4.7 U23, slice 7b): the shell with
+      --job-ms 4000, whose drawer job runs 4 s from the drawer opening. A COM IUIAutomation5 client
+      (managed UIA can't hear notifications) subscribes to the window's notifications, and Invoke on
+      Review changes opens the drawer. Gates: exactly one progress notification over the job, at
+      2 s or later, saying "Apply 20 changes: N0 percent", kind Other, processing MostRecent,
+      activity DismPro.Progress.0. Its delivery after the step was due is advisory (U23: 100 ms).
 
 The probe target is dpro-ui's `shell` example until roadmap 3.2 gives dismpro.exe its shell.
 Results go to annotations and the job summary; the raw reports and screenshots go to -Out, which
@@ -2095,6 +2101,149 @@ try {
 foreach ($k in $checks.Keys) { $lines += '{0,-50} {1}' -f $k, (Format-Verdict $checks[$k]) }
 $ok = $checks.Count -gt 0 -and -not ($checks.Values -contains $false)
 Publish 'Composites' $lines $ok
+if (-not $ok) { $failed++ }
+
+# Accessibility depth: notifications (TD-0009 A4.5, A4.7 U23, slice 7b) ---------------------------
+# Managed UI Automation can't hear notifications, so a COM IUIAutomation5 client does. It's declared
+# flat below: IUIAutomation's 55 methods (ElementFromHandle the 4th), IUIAutomation2's 6, 3's 2 and
+# 4's 2, then 5's two. It subscribes on an MTA thread of its own, as UI Automation advises for event
+# handlers, and stamps each notification with the Stopwatch clock this script reads.
+Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Concurrent;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Threading;
+
+[ComImport, Guid("C7CB2637-E6C2-4D0C-85DE-4948C02175C7"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface INoticeGateHandler {
+    [PreserveSig] int HandleNotificationEvent(IntPtr sender, int kind, int processing,
+        [MarshalAs(UnmanagedType.BStr)] string text, [MarshalAs(UnmanagedType.BStr)] string activity);
+}
+
+[ComImport, Guid("25F700C8-D816-4057-A9DC-3CBDEE77E256"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface INoticeGateAutomation5 {
+    void M01(); void M02(); void M03();
+    [PreserveSig] int ElementFromHandle(IntPtr hwnd, out IntPtr element);
+    void M05(); void M06(); void M07(); void M08(); void M09(); void M10(); void M11(); void M12();
+    void M13(); void M14(); void M15(); void M16(); void M17(); void M18(); void M19(); void M20();
+    void M21(); void M22(); void M23(); void M24(); void M25(); void M26(); void M27(); void M28();
+    void M29(); void M30(); void M31(); void M32(); void M33(); void M34(); void M35(); void M36();
+    void M37(); void M38(); void M39(); void M40(); void M41(); void M42(); void M43(); void M44();
+    void M45(); void M46(); void M47(); void M48(); void M49(); void M50(); void M51(); void M52();
+    void M53(); void M54(); void M55(); void M56(); void M57(); void M58(); void M59(); void M60();
+    void M61(); void M62(); void M63(); void M64(); void M65();
+    [PreserveSig] int AddNotificationEventHandler(IntPtr element, int scope, IntPtr cacheRequest, INoticeGateHandler handler);
+    [PreserveSig] int RemoveNotificationEventHandler(IntPtr element, INoticeGateHandler handler);
+}
+
+[ComVisible(true), ClassInterface(ClassInterfaceType.None)]
+public sealed class NoticeGateSink : INoticeGateHandler {
+    public readonly ConcurrentQueue<string> Seen = new ConcurrentQueue<string>();
+    public int HandleNotificationEvent(IntPtr sender, int kind, int processing, string text, string activity) {
+        Seen.Enqueue(string.Format("{0}|{1}|{2}|{3}|{4}", Stopwatch.GetTimestamp(), kind, processing, activity, text));
+        return 0;
+    }
+}
+
+public static class NoticeGate {
+    public static NoticeGateSink Sink;
+    static Thread worker;
+    static ManualResetEventSlim stop;
+    static int hr;
+    // Subscribes to the window's notifications (TreeScope_Subtree) and returns the HRESULT, 0 once
+    // subscribed. Stop unsubscribes.
+    public static int Start(IntPtr hwnd) {
+        Sink = new NoticeGateSink();
+        stop = new ManualResetEventSlim(false);
+        var ready = new ManualResetEventSlim(false);
+        hr = unchecked((int) 0x80004005);
+        worker = new Thread(() => {
+            IntPtr element = IntPtr.Zero;
+            try {
+                object o = Activator.CreateInstance(Type.GetTypeFromCLSID(new Guid("E22AD333-B25F-460C-83D0-0581107395C9")));
+                var uia = (INoticeGateAutomation5) o;
+                hr = uia.ElementFromHandle(hwnd, out element);
+                if (hr == 0) { hr = uia.AddNotificationEventHandler(element, 7, IntPtr.Zero, Sink); }
+                ready.Set();
+                if (hr == 0) {
+                    stop.Wait();
+                    uia.RemoveNotificationEventHandler(element, Sink);
+                }
+            } catch (Exception e) {
+                hr = e.HResult;
+            } finally {
+                ready.Set();
+                if (element != IntPtr.Zero) { Marshal.Release(element); }
+            }
+        });
+        worker.SetApartmentState(ApartmentState.MTA);
+        worker.IsBackground = true;
+        worker.Start();
+        if (!ready.Wait(10000)) { return unchecked((int) 0x80004005); }
+        return hr;
+    }
+    public static void Stop() {
+        if (stop != null) { stop.Set(); }
+        if (worker != null) { worker.Join(5000); worker = null; }
+    }
+}
+'@
+
+# The shell's drawer job runs 4 s from the drawer opening (--job-ms 4000), and Invoke on "Review
+# changes" opens it. A job's progress is said on a new 10 % step, at least 2 s after its start and
+# after its last notice: so once, at 2 s (50 %). At 4 s it's at 100 %, which is never said (A4.4).
+# Gates: one progress notification, saying the step, of kind Other with MostRecent processing and
+# the job's activity, not before 2 s. U23 (advisory): delivered <= 100 ms after its step was due.
+$lines = @("Accessibility depth, notifications: the shell at $Size with --job-ms 4000, through a COM IUIAutomation5 client (the checks are gates; the time is advisory, U23: 100 ms)")
+$checks = [ordered]@{}
+$hwnd = [IntPtr]::Zero
+$p = Start-Process -FilePath $exe.shell -ArgumentList @('--size', $Size, '--job-ms', '4000') -PassThru
+$null = $p.Handle
+try {
+    $shown = Wait-Until {
+        $script:hwnd = [UiaGateWin32]::FindWindowW('dismpro.window', 'DISM Pro shell probe')
+        $script:hwnd -ne [IntPtr]::Zero -and [UiaGateWin32]::IsWindowVisible($script:hwnd)
+    } 30000
+    if (-not $shown) { throw "the shell showed no window in 30 s ($(if ($p.HasExited) { "exited with code $($p.ExitCode)" } else { 'still running' }))" }
+    $root = $ae::FromHandle($hwnd)
+    $review = $null
+    $found = Wait-Until { $script:review = Find-First $root $types::Button 'Review changes'; $null -ne $script:review } 10000
+    if (-not $found) { throw 'no button "Review changes" in 10 s' }
+    $hr = [NoticeGate]::Start($hwnd)
+    $checks['the client subscribes to notifications'] = $hr -eq 0
+    if ($hr -ne 0) { throw ('AddNotificationEventHandler failed: 0x{0:X8}' -f $hr) }
+    $t0 = [Diagnostics.Stopwatch]::GetTimestamp()
+    (Get-Pattern $review ([Windows.Automation.InvokePattern]::Pattern)).Invoke()
+    Start-Sleep -Milliseconds 5500
+    [NoticeGate]::Stop()
+    $seen = @([NoticeGate]::Sink.Seen.ToArray() | ForEach-Object {
+        $f = $_ -split '\|', 5
+        [pscustomobject]@{ Ms = ([long] $f[0] - $t0) * 1000.0 / [Diagnostics.Stopwatch]::Frequency; Kind = [int] $f[1]; Processing = [int] $f[2]; Activity = $f[3]; Text = $f[4] }
+    })
+    foreach ($n in $seen) { $lines += '  {0,8:N1} ms after Invoke: kind {1}, processing {2}, {3}: "{4}"' -f $n.Ms, $n.Kind, $n.Processing, $n.Activity, $n.Text }
+    $progress = @($seen | Where-Object { $_.Activity -like 'DismPro.Progress.*' })
+    $checks['one progress notification over the job'] = $progress.Count -eq 1
+    if ($progress.Count -ge 1) {
+        $n = $progress[0]
+        $checks['it says the step: "Apply 20 changes: N0 percent"'] = $n.Text -match '^Apply 20 changes: [1-9]0 percent$'
+        $checks['kind Other, MostRecent, DismPro.Progress.0'] = $n.Kind -eq 4 -and $n.Processing -eq 3 -and $n.Activity -eq 'DismPro.Progress.0'
+        $checks['not before 2 s into the job'] = $n.Ms -ge 2000
+        $lines += 'U23: delivered {0} after its step was due (2 s after Invoke)' -f (Format-Ms ($n.Ms - 2000))
+    }
+} catch {
+    $lines += "notifications FAILED: $($_.Exception.Message)"
+    $checks['client'] = $false
+} finally {
+    [NoticeGate]::Stop()
+    if (-not $p.HasExited) {
+        if ($hwnd -ne [IntPtr]::Zero) { [void][UiaGateWin32]::PostMessageW($hwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) } # WM_CLOSE
+        if (-not $p.WaitForExit(5000)) { $p.Kill(); $lines += 'the shell did not close on WM_CLOSE'; $checks['closes'] = $false }
+    }
+}
+foreach ($k in $checks.Keys) { $lines += '{0,-50} {1}' -f $k, (Format-Verdict $checks[$k]) }
+$ok = $checks.Count -gt 0 -and -not ($checks.Values -contains $false)
+Publish 'Accessibility depth: notifications' $lines $ok
 if (-not $ok) { $failed++ }
 
 exit $failed

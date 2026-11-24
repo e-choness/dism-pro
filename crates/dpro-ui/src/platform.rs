@@ -40,6 +40,7 @@ use dpro_win::gui::{
     Surface, Window, WindowCx, WindowOptions, text,
 };
 
+use crate::{Activity, Notice, NoticeKind};
 use crate::{
     Bytes, Canvas, Caret, CaretStop, ClipboardRequest, Color, Cursor, Cx, Formats, GlyphSink, Icon,
     Input, Key, KeyCode, KeyEvent, MAX_FIELD_LEN, Mods, Motion, NodeId, Point, Popup, PopupKind,
@@ -180,6 +181,20 @@ pub trait Model {
     fn accelerator(&self, _key: KeyEvent) -> Option<Self::Msg> {
         None
     }
+
+    // Slice 7b (TD-0009 A4.5).
+
+    /// The model's clock (TD-0009 A4.5): after every event, before the view is built, at
+    /// `now_ms` on the window's monotonic clock. Work that follows time runs here, such as a
+    /// simulated job's progress. Returns how long until it wants the clock again; by default,
+    /// never, so a settled window wakes for nothing (U6).
+    fn wake(&mut self, _now_ms: u64) -> Option<u64> {
+        None
+    }
+
+    /// Hands the model's waiting notices to `f` (TD-0009 A4.4's announcements, their text
+    /// resolved from the catalog), after every event; the host queues them with [`Ui::notify`].
+    fn notices(&mut self, _f: impl FnMut(Notice<'_>)) {}
 }
 
 /// The user's formats (TD-0009 A2.5): Windows' days, moments and decimal separator, with the
@@ -415,6 +430,9 @@ impl<P: Model> Host<P> {
     /// Rebuilds and lays out the view and the popups, and hands each surface's damage to its
     /// window.
     fn frame(&mut self, cx: &mut WindowCx<'_>) {
+        // The model's clock, before the view: a job's progress may move (TD-0009 A4.5).
+        let clock = self.now_ms();
+        let model_wake = self.model.wake(clock);
         // A context request asks the model for that node's menu.
         if let Some(key) = self
             .ui
@@ -436,6 +454,7 @@ impl<P: Model> Host<P> {
             self.model.update(popup.on_close);
             self.build();
         }
+        self.queue_notices();
         self.sync_popup(cx);
         self.sync_toast(cx);
         // Before the damage goes out: a blink damages the caret.
@@ -446,6 +465,7 @@ impl<P: Model> Host<P> {
             self.layers[0].ui.tooltip_timer(now),
             self.layers[1].ui.tooltip_timer(now),
             self.popup_timers(now),
+            model_wake.map(|ms| ms.saturating_sub(now.saturating_sub(clock))),
         ]
         .into_iter()
         .flatten()
@@ -488,6 +508,13 @@ impl<P: Model> Host<P> {
 
     fn now_ms(&self) -> u64 {
         u64::try_from(self.start.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+
+    /// The model's notices, queued for the window to raise once it has served the tree
+    /// (TD-0009 A4.5). Without a client they're dropped at once.
+    fn queue_notices(&mut self) {
+        let ui = &mut self.ui;
+        self.model.notices(|n| ui.notify(n));
     }
 }
 
@@ -635,6 +662,13 @@ impl<P: Model> Handler for Host<P> {
 
     fn a11y_update(&mut self, surface: Surface) -> Option<accesskit::TreeUpdate> {
         self.ui_of(surface).a11y_update()
+    }
+
+    /// The main view's notices (TD-0009 A4.5); popups have none.
+    fn a11y_notices(&mut self, surface: Surface, out: &mut Vec<gui::Notice>) {
+        if surface == Surface::Main {
+            self.ui.take_notices(|n| out.push(gui_notice(n)));
+        }
     }
 
     /// Runs like a click (or a focus move), then the frame shows it and the window serves it.
@@ -841,6 +875,28 @@ const fn mods_of(m: gui::Mods) -> Mods {
     }
 }
 
+/// A notice as the window carries it (TD-0009 A4.5).
+fn gui_notice(n: Notice<'_>) -> gui::Notice {
+    gui::Notice {
+        text: n.text.to_owned(),
+        kind: match n.kind {
+            NoticeKind::ItemAdded => gui::NoticeKind::ItemAdded,
+            NoticeKind::ItemRemoved => gui::NoticeKind::ItemRemoved,
+            NoticeKind::ActionCompleted => gui::NoticeKind::ActionCompleted,
+            NoticeKind::ActionAborted => gui::NoticeKind::ActionAborted,
+            NoticeKind::Other => gui::NoticeKind::Other,
+        },
+        important: n.important,
+        replace: n.replace,
+        activity: match n.activity {
+            Activity::Progress(slot) => gui::Activity::Progress(slot),
+            Activity::Copy => gui::Activity::Copy,
+            Activity::Count => gui::Activity::Count,
+            Activity::Hold => gui::Activity::Hold,
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1009,6 +1065,62 @@ mod tests {
             };
             assert!(button.contains(p), "ink at {p:?} outside {button:?}");
         }
+    }
+
+    /// A model that says "Copied." once (TD-0009 A4.5, slice 7b).
+    #[derive(Default)]
+    struct Copier {
+        said: bool,
+    }
+
+    impl Model for Copier {
+        type Msg = Msg;
+
+        fn view(&self, cx: &mut Cx<'_, Msg>) {
+            cx.add(Element::button(Key::name("b"), "b", Msg::Pressed));
+        }
+
+        fn update(&mut self, _: Msg) {}
+
+        fn notices(&mut self, mut f: impl FnMut(Notice<'_>)) {
+            if !std::mem::replace(&mut self.said, true) {
+                f(Notice::of(
+                    &dpro_app::announce::Announcement::Copied,
+                    "Copied.",
+                ));
+            }
+        }
+    }
+
+    /// The model's notices reach the window as its own, for the main surface only, and only
+    /// while a client listens.
+    #[test]
+    fn a_model_s_notice_reaches_the_window_while_a_client_listens() {
+        let mut quiet = Host::new(Copier::default(), Box::new(FakeText), GlassPref::Auto);
+        quiet.queue_notices();
+        let mut out = Vec::new();
+        quiet.a11y_notices(Surface::Main, &mut out);
+        assert!(out.is_empty(), "no client, no notice");
+
+        let mut host = Host::new(Copier::default(), Box::new(FakeText), GlassPref::Auto);
+        drop(host.ui.a11y_tree());
+        host.queue_notices();
+        host.a11y_notices(Surface::Popup(gui::PopupKind::Menu), &mut out);
+        assert!(out.is_empty(), "a popup has none");
+        host.a11y_notices(Surface::Main, &mut out);
+        assert_eq!(
+            out,
+            [gui::Notice {
+                text: "Copied.".into(),
+                kind: gui::NoticeKind::ActionCompleted,
+                important: false,
+                replace: true,
+                activity: gui::Activity::Copy,
+            }]
+        );
+        out.clear();
+        host.a11y_notices(Surface::Main, &mut out);
+        assert!(out.is_empty(), "taken once");
     }
 
     #[test]

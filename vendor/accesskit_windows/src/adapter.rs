@@ -24,6 +24,12 @@ use crate::{
 };
 // dpro: a table's rows realized on request (PATCHES.md, 6).
 use crate::realize::{Realizer, RealizingHandler};
+// dpro: notifications (PATCHES.md, 7).
+use std::sync::OnceLock;
+use windows::{
+    Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress},
+    core::{BSTR, HRESULT, Interface, s, w},
+};
 
 fn focus_event(context: &Arc<Context>, node_id: FullNodeId) -> QueuedEvent {
     let platform_node = context.get_or_create_platform_node(node_id);
@@ -538,6 +544,60 @@ impl Adapter {
         }
     }
 
+    // dpro: notifications (PATCHES.md, 7; TD-0009 A4.5).
+    /// A UI Automation notification on the tree's root: `text`, spoken without a focus move, of
+    /// `kind`, and superseding earlier ones of `activity` as `processing` says.
+    ///
+    /// Returns `None` while no client has asked for the tree, and where Windows has no
+    /// `UiaRaiseNotificationEvent` (before Windows 10 1709). The function is looked up once in
+    /// the loaded `uiautomationcore.dll`, never imported, so the exe still starts there.
+    ///
+    /// If a [`QueuedEvents`] instance is returned, the caller must call
+    /// [`QueuedEvents::raise`] on it.
+    pub fn notify(
+        &mut self,
+        kind: NotificationKind,
+        processing: NotificationProcessing,
+        text: &str,
+        activity: &str,
+    ) -> Option<QueuedEvents> {
+        self.notify_if(
+            raise_notification_fn().is_some(),
+            kind,
+            processing,
+            text,
+            activity,
+        )
+    }
+
+    // dpro: `notify`, told whether the function exists, so a test can take the path where it
+    // doesn't (PATCHES.md, 7).
+    pub(crate) fn notify_if(
+        &mut self,
+        available: bool,
+        kind: NotificationKind,
+        processing: NotificationProcessing,
+        text: &str,
+        activity: &str,
+    ) -> Option<QueuedEvents> {
+        let State::Active(context) = &self.state else {
+            return None;
+        };
+        if !available {
+            return None;
+        }
+        let root = context.read_tree().state().root_id();
+        let element: IRawElementProviderSimple =
+            context.get_or_create_platform_node(root).into_interface();
+        Some(QueuedEvents(vec![QueuedEvent::Notification {
+            element,
+            kind,
+            processing,
+            text: BSTR::from(text),
+            activity: BSTR::from(activity),
+        }]))
+    }
+
     /// Handle the `WM_GETOBJECT` window message. The accessibility tree
     /// is lazily initialized if necessary using the provided
     /// [`ActivationHandler`] implementation.
@@ -705,11 +765,70 @@ impl QueuedEvents {
                     old_value,
                     new_value,
                 } => changed(&element, property_id, &old_value, &new_value),
+                // dpro: notifications (PATCHES.md, 7).
+                QueuedEvent::Notification {
+                    element,
+                    kind,
+                    processing,
+                    text,
+                    activity,
+                } => raise_notification(&element, kind, processing, text, activity),
             };
             failed += usize::from(raised.is_err());
         }
         failed
     }
+}
+
+// dpro: notifications (PATCHES.md, 7; TD-0009 A4.5).
+/// `UiaRaiseNotificationEvent`'s signature (uiautomationcoreapi.h, Windows 10 1709): the
+/// provider, the kind, the processing, and the display string and activity id as BSTRs.
+pub(crate) type RaiseNotification = unsafe extern "system" fn(
+    *mut core::ffi::c_void,
+    NotificationKind,
+    NotificationProcessing,
+    *const u16,
+    *const u16,
+) -> HRESULT;
+
+/// `UiaRaiseNotificationEvent`, looked up once in the loaded `uiautomationcore.dll`; `None` on a
+/// Windows that hasn't it, such as a WinPE older than 1709. Never a static import, which would
+/// stop the exe from starting there.
+pub(crate) fn raise_notification_fn() -> Option<RaiseNotification> {
+    static RAISE: OnceLock<Option<RaiseNotification>> = OnceLock::new();
+    *RAISE.get_or_init(|| {
+        // SAFETY: a lookup by a static, NUL-terminated name. The adapter's own imports from the
+        // DLL keep it loaded for the life of the process, so the handle stays valid.
+        let module = unsafe { GetModuleHandleW(w!("uiautomationcore.dll")) }.ok()?;
+        // SAFETY: `module` is the handle just returned; the name is static and NUL-terminated.
+        let raise = unsafe { GetProcAddress(module, s!("UiaRaiseNotificationEvent")) }?;
+        // SAFETY: the export has the documented signature that `RaiseNotification` spells out,
+        // and both are `extern "system"` function pointers, of one size.
+        Some(unsafe {
+            std::mem::transmute::<unsafe extern "system" fn() -> isize, RaiseNotification>(raise)
+        })
+    })
+}
+
+/// Raises one notification. The BSTRs are freed after the call.
+fn raise_notification(
+    element: &IRawElementProviderSimple,
+    kind: NotificationKind,
+    processing: NotificationProcessing,
+    text: BSTR,
+    activity: BSTR,
+) -> windows::core::Result<()> {
+    let Some(raise) = raise_notification_fn() else {
+        return Err(E_NOTIMPL.into());
+    };
+    let (text, activity) = (text.into_raw(), activity.into_raw());
+    // SAFETY: the function is `UiaRaiseNotificationEvent` (above). The provider is live for the
+    // call, which takes its own reference if it keeps it, and the two BSTRs are valid (or null,
+    // an empty string) and owned here until they're freed below.
+    let raised = unsafe { raise(element.as_raw(), kind, processing, text, activity) };
+    // SAFETY: each pointer came from `BSTR::into_raw` above and is freed once.
+    drop(unsafe { (BSTR::from_raw(text), BSTR::from_raw(activity)) });
+    raised.ok()
 }
 
 // dpro: the raise count's tests build a queue of their own (PATCHES.md, 11).

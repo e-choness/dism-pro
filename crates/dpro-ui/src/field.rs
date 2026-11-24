@@ -333,17 +333,22 @@ fn allowed(c: char) -> bool {
     !c.is_control() && !matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
 }
 
+/// `text`'s characters as a single-line field takes them: line breaks dropped, tabs as spaces,
+/// other characters a field can't hold dropped. A notice's text is sanitized the same way
+/// (TD-0009 A4.5).
+pub(crate) fn single_line_chars(text: &str) -> impl Iterator<Item = char> + '_ {
+    text.chars().filter_map(|c| match c {
+        '\r' | '\n' | '\u{85}' | '\u{2028}' | '\u{2029}' => None,
+        '\t' => Some(' '),
+        c => allowed(c).then_some(c),
+    })
+}
+
 /// `text` as a single-line field takes it, at most `room` bytes: line breaks dropped, tabs as
 /// spaces, other characters a field can't hold dropped, cut at a character boundary.
 fn single_line(text: &str, room: usize) -> String {
     let mut out = String::with_capacity(text.len().min(room));
-    for c in text.chars() {
-        let c = match c {
-            '\r' | '\n' | '\u{85}' | '\u{2028}' | '\u{2029}' => continue,
-            '\t' => ' ',
-            c if allowed(c) => c,
-            _ => continue,
-        };
+    for c in single_line_chars(text) {
         if out.len() + c.len_utf8() > room {
             break;
         }

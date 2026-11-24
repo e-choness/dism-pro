@@ -29,6 +29,7 @@ const USAGE: &str = "usage: cargo xtask <task>
   size --target <triple>...    exact binary-size budgets (doc 04 §2)
   pe-compat --target <triple>...  WinPE DLL import allowlist (doc 04 §4)
   pe-compat --winpe-files <dir>   allowlist vs DLLs in base WinPE (CI evidence)
+  pe-compat --exe <path>...       no static import of a run-time-only function (TD-0009 A4.9)
   ffi-check                    dpro-sys layouts/prototypes vs SDK/ADK headers (S-03)
   bench-gate <summaries.jsonl> [--update]
                                instruction counts vs benches/baseline.json (doc 04 §3)";

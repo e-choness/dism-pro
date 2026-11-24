@@ -137,6 +137,8 @@ case "${task}" in
     cargo xwin build --locked --release -p dpro-ui --example shell --target "${t}" "$@"
     # G1's Drawer probe: slice 6d's drawer page in a real window (TD-0009 A3.9).
     cargo xwin build --locked --release -p dpro-ui --example drawer --target "${t}" "$@"
+    # The probe statically imports no function its adapter looks up at run time (TD-0009 A4.9).
+    cargo xtask pe-compat --exe "target/${t}/release/examples/shell.exe"
     # The unit-test binary of package $1: cargo prints "Executable unittests src/lib.rs (<path>)".
     test_exe() {
       cargo xwin test --color never --locked --no-run -p "$1" --target "${t}" "${@:2}" 2>&1 \
