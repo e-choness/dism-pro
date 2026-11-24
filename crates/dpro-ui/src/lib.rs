@@ -103,3 +103,7 @@ pub use ui::{MAX_TEXT_SCALE, MESSAGE_MS, Motion, Ui};
 pub use values::{Formats, InvariantFormats, SizeUnits, format_size};
 
 pub use slide::Edge;
+
+// Slice 7c: focus restoration (TD-0009 A4.5).
+mod focus;
+pub use focus::FocusMemo;
