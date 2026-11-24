@@ -206,6 +206,13 @@ impl<M: Clone> Ui<M> {
                 // or else dismisses the toast shown here (A3.5 (7)).
                 let esc = k.down && k.key == KeyCode::Escape && !tip_shown;
                 let used = used || (esc && (self.scope_escape(out) || self.escape_toast(out)));
+                // Alt+Up, and Backspace in a table, that nothing used press the enclosing scope's
+                // Up (the in-app picker's, A3.5 (12)).
+                let used = used
+                    || self.scope_up_key(k).is_some_and(|up| {
+                        self.activate(up, out);
+                        true
+                    });
                 // Focus the keyboard moved shows its tip at once.
                 if self.focus != before && self.focus_visible {
                     self.tip_focus(self.focus);

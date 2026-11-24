@@ -2,14 +2,12 @@
 //! counted exactly.
 //!
 //! The picker opens on a folder of 10,000 subfolders and lists it: that allocates, in the model
-//! (the entries) as it must. Then the steady frames (the current row moved, a page down, the end
-//! and back, a wheel notch, the pointer over the rows and gone) run twice to warm up, painted. A
-//! third run must neither allocate nor reallocate, for the page's model as well as the Ui.
+//! (the entries) as it must. Then the steady frames (a click on a row, which takes the keys from
+//! the path field, a move down, a page down, the end and back, a wheel notch, the pointer over the
+//! rows and gone) run twice to warm up, painted. A third run must neither allocate nor reallocate,
+//! for the page's model as well as the Ui.
 //!
 //! One test only: the counting allocator is global, and `cargo test` runs tests on threads.
-//!
-//! On slice 6e's MEASURE stub the wheel notch after End and Home allocates 9 blocks of 16 bytes
-//! (freed by a later step), every run: the test is ignored until the picker's code lands.
 
 #![allow(missing_docs)]
 
@@ -26,7 +24,6 @@ use stats_alloc::{INSTRUMENTED_SYSTEM, Region, StatsAlloc};
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
 #[test]
-#[ignore = "slice 6e: lands with the code"]
 fn a_warm_listed_picker_allocates_nothing_per_frame() {
     let mut run = Run::painted(Model::new(), Theme::LIGHT);
     run.step(Step::Update(Msg::Open));
