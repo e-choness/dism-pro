@@ -398,6 +398,9 @@ public static class ThemeGateWin32 {
     [DllImport("gdi32.dll")] public static extern uint GetPixel(IntPtr hdc, int x, int y);
     [DllImport("gdi32.dll")] public static extern bool BitBlt(IntPtr dst, int x, int y, int w, int h, IntPtr src, int sx, int sy, uint rop);
     [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hwnd, out RECT r);
+    [DllImport("user32.dll")] public static extern bool IsHungAppWindow(IntPtr hwnd);
+    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     public static extern IntPtr SendMessageTimeoutW(IntPtr hwnd, uint msg, IntPtr wp, string lp, uint flags, uint ms, out IntPtr result);
 
@@ -405,10 +408,29 @@ public static class ThemeGateWin32 {
     // for example under another window).
     public static int Unreadable;
 
+    // Each grid point's brightness from the last Luminance call, column by column; -1 if unread.
+    static readonly double[] Cells = new double[160];
+
+    // The last Luminance call's grid, 10 rows of 16, top row first: each point's brightness as a
+    // digit, 0 black to 9 white, or '?' if unread.
+    public static string[] Map() {
+        var rows = new string[10];
+        for (int j = 0; j < 10; j++) {
+            var row = new char[16];
+            for (int i = 0; i < 16; i++) {
+                double l = Cells[i * 10 + j];
+                row[i] = l < 0 ? '?' : (char)('0' + (int)Math.Round(l * 9));
+            }
+            rows[j] = new string(row);
+        }
+        return rows;
+    }
+
     // The mean brightness (0..1, Rec. 709 weights over sRGB) of the readable points of a 16 x 10
     // grid over the client area; -1 if none is readable.
     public static double Luminance(IntPtr hwnd) {
         Unreadable = 0;
+        for (int k = 0; k < Cells.Length; k++) Cells[k] = -1;
         RECT r;
         if (!GetClientRect(hwnd, out r) || r.Right < 16 || r.Bottom < 10) return -1;
         IntPtr dc = GetDC(hwnd);
@@ -420,7 +442,9 @@ public static class ThemeGateWin32 {
                 for (int j = 0; j < 10; j++) {
                     uint c = GetPixel(dc, (2 * i + 1) * r.Right / 32, (2 * j + 1) * r.Bottom / 20);
                     if (c == 0xFFFFFFFF) { Unreadable++; continue; }
-                    sum += 0.2126 * ((c & 0xFF) / 255.0) + 0.7152 * (((c >> 8) & 0xFF) / 255.0) + 0.0722 * (((c >> 16) & 0xFF) / 255.0);
+                    double l = 0.2126 * ((c & 0xFF) / 255.0) + 0.7152 * (((c >> 8) & 0xFF) / 255.0) + 0.0722 * (((c >> 16) & 0xFF) / 255.0);
+                    Cells[i * 10 + j] = l;
+                    sum += l;
                     n++;
                 }
             }
@@ -429,6 +453,39 @@ public static class ThemeGateWin32 {
     }
 }
 '@
+# The screen around `$Rect` (left, top, right, bottom), DWM's shadow and corners included, saved
+# to -Out as `$Name` for A1.3's check by hand. Returns a report line; a failure is reported, not
+# gated.
+function Save-Screen([int[]] $Rect, [string] $Name, [int] $Margin = 16) {
+    $bmp = $null
+    $g = $null
+    try {
+        Add-Type -AssemblyName System.Drawing
+        $x = $Rect[0] - $Margin
+        $y = $Rect[1] - $Margin
+        $w = $Rect[2] - $Rect[0] + 2 * $Margin
+        $h = $Rect[3] - $Rect[1] + 2 * $Margin
+        $bmp = [Drawing.Bitmap]::new($w, $h)
+        $g = [Drawing.Graphics]::FromImage($bmp)
+        # BitBlt itself: CopyFromScreen rejects SRCCOPY | CAPTUREBLT as an undefined enum value.
+        $dst = $g.GetHdc()
+        $screen = [ThemeGateWin32]::GetDC([IntPtr]::Zero)
+        try {
+            if (-not [ThemeGateWin32]::BitBlt($dst, 0, 0, $w, $h, $screen, $x, $y, 0x40CC0020)) { throw 'BitBlt failed' } # SRCCOPY | CAPTUREBLT
+        } finally {
+            [void][ThemeGateWin32]::ReleaseDC([IntPtr]::Zero, $screen)
+            $g.ReleaseHdc($dst)
+        }
+        $bmp.Save((Join-Path $Out $Name), [Drawing.Imaging.ImageFormat]::Png)
+        "  screenshot $Name ($($Rect[2] - $Rect[0])x$($Rect[3] - $Rect[1]) at $($Rect[0]),$($Rect[1]), $Margin px around)"
+    } catch {
+        "  screenshot $Name failed: $($_.Exception.Message)"
+    } finally {
+        if ($g) { $g.Dispose() }
+        if ($bmp) { $bmp.Dispose() }
+    }
+}
+
 # The window follows Windows' app mode live: the runner's `AppsUseLightTheme` is set to dark and
 # `WM_SETTINGCHANGE "ImmersiveColorSet"` sent to the shell's window (as Settings broadcasts it), then
 # back to light. Gate: the client area turns dark, then light again, within 2 s each; the time is
@@ -440,8 +497,9 @@ function Set-AppMode([int] $Light, [IntPtr] $Hwnd) {
     if (-not (Test-Path $personalize)) { $null = New-Item -Path $personalize -Force }
     Set-ItemProperty -Path $personalize -Name AppsUseLightTheme -Value $Light -Type DWord
     $result = [IntPtr]::Zero
-    # SMTO_ABORTIFHUNG; our window only, so the runner's other windows aren't involved.
-    [void][ThemeGateWin32]::SendMessageTimeoutW($Hwnd, 0x001A, [IntPtr]::Zero, 'ImmersiveColorSet', 2, 2000, [ref] $result)
+    # SMTO_ABORTIFHUNG; our window only, so the runner's other windows aren't involved. Zero: the
+    # window was hung, or didn't answer in 2 s.
+    [ThemeGateWin32]::SendMessageTimeoutW($Hwnd, 0x001A, [IntPtr]::Zero, 'ImmersiveColorSet', 2, 2000, [ref] $result) -ne [IntPtr]::Zero
 }
 $lines = @("live theme switch on the shell at $Size, by mean brightness (gates: dark, then light again, each within 2 s; advisory: <= 100 ms)")
 $checks = [ordered]@{}
@@ -463,15 +521,26 @@ try {
     $script:startLum = -1
     $checks['starts light'] = Wait-Until { $script:startLum = [ThemeGateWin32]::Luminance($hwnd); $script:startLum -gt 0.5 } 5000
     $lines += '{0,-12} {1,7:N1} ms  luminance {2:N2}{3}' -f 'light', $sw.Elapsed.TotalMilliseconds, $script:startLum, $(if ([ThemeGateWin32]::Unreadable -gt 0) { " ($([ThemeGateWin32]::Unreadable) of 160 points unreadable)" } else { '' })
+    if (-not $checks['starts light']) {
+        # What the window was doing (an intermittent failure, TD-0009 §13, run 45134227331: 0.29
+        # for 5 s, then the switches passed). Read before anything changes it.
+        $cr = New-Object ThemeGateWin32+RECT
+        [void][ThemeGateWin32]::GetClientRect($hwnd, [ref] $cr)
+        $lines += "  client $($cr.Right)x$($cr.Bottom); hung: $([ThemeGateWin32]::IsHungAppWindow($hwnd)); foreground: $([ThemeGateWin32]::GetForegroundWindow() -eq $hwnd); process responding: $(-not $p.HasExited -and $p.Responding)"
+        $lines += '  the grid, top row first (0 black to 9 white, ? unread):'
+        $lines += [ThemeGateWin32]::Map() | ForEach-Object { "    $_" }
+        $wr = New-Object ThemeGateWin32+RECT
+        if ([ThemeGateWin32]::GetWindowRect($hwnd, [ref] $wr)) { $lines += Save-Screen @($wr.Left, $wr.Top, $wr.Right, $wr.Bottom) 'theme-start.png' }
+    }
     foreach ($step in @(@{ Name = 'dark'; Light = 0 }, @{ Name = 'light again'; Light = 1 })) {
         $sw = [Diagnostics.Stopwatch]::StartNew()
-        Set-AppMode $step.Light $hwnd
+        $delivered = Set-AppMode $step.Light $hwnd
         $switched = Wait-Until {
             $l = [ThemeGateWin32]::Luminance($hwnd)
             $l -ge 0 -and (($step.Light -eq 0 -and $l -lt 0.5) -or ($step.Light -eq 1 -and $l -gt 0.5))
         } 2000
         $ms = $sw.Elapsed.TotalMilliseconds
-        $lines += '{0,-12} {1}  luminance {2:N2}{3}' -f $step.Name, $(if ($switched) { '{0,7:N1} ms' -f $ms } else { 'NOT in 2 s' }), [ThemeGateWin32]::Luminance($hwnd), $(if ($switched -and $ms -gt 100) { ' (advisory: over 100 ms)' } else { '' })
+        $lines += '{0,-12} {1}  luminance {2:N2}{3}{4}' -f $step.Name, $(if ($switched) { '{0,7:N1} ms' -f $ms } else { 'NOT in 2 s' }), [ThemeGateWin32]::Luminance($hwnd), $(if ($switched -and $ms -gt 100) { ' (advisory: over 100 ms)' } else { '' }), $(if (-not $delivered) { ' (WM_SETTINGCHANGE not answered: hung or over 2 s)' } else { '' })
         $checks["turns $($step.Name)"] = $switched
     }
 } catch {
@@ -1125,39 +1194,6 @@ function Test-Focused($Type, [string] $Name) {
 function Format-Ms([double] $Ms, [double] $Advisory = 100) {
     '{0:N1} ms{1}' -f $Ms, $(if ($Ms -gt $Advisory) { " (advisory: over $Advisory ms)" } else { '' })
 }
-# The screen around `$Rect` (left, top, right, bottom), DWM's shadow and corners included, saved
-# to -Out as `$Name` for A1.3's check by hand. Returns a report line; a failure is reported, not
-# gated.
-function Save-Screen([int[]] $Rect, [string] $Name, [int] $Margin = 16) {
-    $bmp = $null
-    $g = $null
-    try {
-        Add-Type -AssemblyName System.Drawing
-        $x = $Rect[0] - $Margin
-        $y = $Rect[1] - $Margin
-        $w = $Rect[2] - $Rect[0] + 2 * $Margin
-        $h = $Rect[3] - $Rect[1] + 2 * $Margin
-        $bmp = [Drawing.Bitmap]::new($w, $h)
-        $g = [Drawing.Graphics]::FromImage($bmp)
-        # BitBlt itself: CopyFromScreen rejects SRCCOPY | CAPTUREBLT as an undefined enum value.
-        $dst = $g.GetHdc()
-        $screen = [ThemeGateWin32]::GetDC([IntPtr]::Zero)
-        try {
-            if (-not [ThemeGateWin32]::BitBlt($dst, 0, 0, $w, $h, $screen, $x, $y, 0x40CC0020)) { throw 'BitBlt failed' } # SRCCOPY | CAPTUREBLT
-        } finally {
-            [void][ThemeGateWin32]::ReleaseDC([IntPtr]::Zero, $screen)
-            $g.ReleaseHdc($dst)
-        }
-        $bmp.Save((Join-Path $Out $Name), [Drawing.Imaging.ImageFormat]::Png)
-        "  screenshot $Name ($($Rect[2] - $Rect[0])x$($Rect[3] - $Rect[1]) at $($Rect[0]),$($Rect[1]), $Margin px around)"
-    } catch {
-        "  screenshot $Name failed: $($_.Exception.Message)"
-    } finally {
-        if ($g) { $g.Dispose() }
-        if ($bmp) { $bmp.Dispose() }
-    }
-}
-
 $lines = @("Popups on the shell at $Size (the checks are gates, each read back through UIA within 2 s; opening is advisory: <= 100 ms from the key or click to UIA seeing it, U3)")
 $checks = [ordered]@{}
 $hwnd = [IntPtr]::Zero
