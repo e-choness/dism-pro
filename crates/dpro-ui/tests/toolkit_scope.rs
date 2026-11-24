@@ -1,7 +1,9 @@
 //! Scopes (TD-0009 A3.5 addition 10): the Esc the focused control doesn't use goes to the nearest
 //! enclosing scope that has an escape, or, with focus outside every scope, to the window's open
-//! scope; when a scope goes, focus goes back to the node focused when it appeared, or, if that's
-//! gone, to the scope's parent's first control. Focus the user moved out of the scope stays.
+//! scope; when a scope goes, focus goes back to the node focused when it appeared, found by its
+//! keys (slice 7c's `FocusMemo`, TD-0009 A4.5), or, if that's gone, to its nearest surviving
+//! ancestor's first control, which in these views is the scope's parent's. Focus the user moved
+//! out of the scope stays.
 
 #![allow(missing_docs)]
 #![expect(

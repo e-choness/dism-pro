@@ -1,7 +1,9 @@
 //! TD-0009 A3.7's U16 and A3.9's G1 Drawer check: slice 6d's drawer page (`fixtures/drawer.rs`) in
 //! a real window, with dpro-win's window, GDI presenter and DirectWrite text. "Review changes"
-//! opens the drawer, which slides in; Esc closes it and focus goes back to the opener. It exits
-//! with 1 if DirectWrite is unavailable rather than measure a different program.
+//! opens the drawer, which slides in; Esc closes it and focus goes back to the opener. Delete
+//! drops the first change still listed, as a refresh would: focus goes to its successor (A4.9's
+//! G1 focus checks, slice 7c). It exits with 1 if DirectWrite is unavailable rather than measure
+//! a different program.
 //!
 //! `drawer [--size WxH] [--materials auto|solid|glass] [--ui-probe first-frame|idle --probe-out
 //! <file>]`: dpro-win's probe arguments, as the shell probe takes them. `.github/scripts/
@@ -31,7 +33,7 @@ mod win {
     use std::process::ExitCode;
 
     use dpro_ui::{
-        Cx,
+        Cx, KeyCode, KeyEvent, Mods,
         materials::GlassPref,
         platform::{self, DirectWrite, Host, Model},
     };
@@ -55,6 +57,11 @@ mod win {
 
         fn update(&mut self, msg: Msg) {
             self.0.update(msg);
+        }
+
+        /// Delete drops the first change still listed (TD-0009 A4.9, slice 7c).
+        fn accelerator(&self, key: KeyEvent) -> Option<Msg> {
+            (key.key == KeyCode::Delete && key.mods == Mods::default()).then_some(Msg::Drop)
         }
     }
 

@@ -243,6 +243,9 @@ pub struct Host<P: Model> {
     /// Whose tip the tooltip window shows, and its text.
     tip_for: Option<(Surface, NodeId)>,
     tip_text: String,
+    /// The main window's focus as F6 left it for the toast, given back when the main window has
+    /// the keyboard again (TD-0009 A4.4, slice 7c).
+    toast_return: Option<crate::FocusMemo>,
 }
 
 /// What new settings or a new presenter changed in how the window looks.
@@ -287,6 +290,7 @@ impl<P: Model> Host<P> {
             open: None,
             tip_for: None,
             tip_text: String::new(),
+            toast_return: None,
         }
     }
 
@@ -519,6 +523,16 @@ impl<P: Model> Host<P> {
 }
 
 impl<P: Model> Host<P> {
+    /// The main window got the keyboard (`true`) or lost it. Back from the toast F6 entered
+    /// (F6, Esc, a dismiss), focus goes where it was: to its node found by its keys, or where the
+    /// successor rule moved it if that went (A4.4).
+    fn focused(&mut self, active: bool) {
+        self.ui.set_active(active);
+        if active && let Some(memo) = self.toast_return.take() {
+            self.ui.return_focus(&memo);
+        }
+    }
+
     /// An event for the main window. Returns whether it was used, or `None` once the window is
     /// closing (no frame follows).
     fn main_event(&mut self, event: Event, cx: &mut WindowCx<'_>) -> Option<bool> {
@@ -585,7 +599,7 @@ impl<P: Model> Host<P> {
                 true
             }
             Event::Focus(active) => {
-                self.ui.set_active(active);
+                self.focused(active);
                 false
             }
             Event::Wake => {
@@ -1121,6 +1135,79 @@ mod tests {
         out.clear();
         host.a11y_notices(Surface::Main, &mut out);
         assert!(out.is_empty(), "taken once");
+    }
+
+    /// A page with "b" (while it isn't gone) and "c", and a toast with one button.
+    #[derive(Default)]
+    struct Toaster {
+        gone: bool,
+    }
+
+    impl Model for Toaster {
+        type Msg = Msg;
+
+        fn view(&self, cx: &mut Cx<'_, Msg>) {
+            if !self.gone {
+                cx.add(Element::button(Key::name("b"), "b", Msg::Pressed));
+            }
+            cx.add(Element::button(Key::name("c"), "c", Msg::Pressed));
+        }
+
+        fn update(&mut self, _: Msg) {}
+
+        fn toast(&self) -> bool {
+            true
+        }
+
+        fn toast_view(&self, cx: &mut Cx<'_, Msg>) {
+            cx.add(Element::button(
+                Key::name("dismiss"),
+                "dismiss",
+                Msg::Pressed,
+            ));
+        }
+    }
+
+    /// Slice 7c (TD-0009 A4.4): back from the toast F6 entered, the main window's focus goes to
+    /// its node, found by its keys though the page made it anew; or, if it went, stays where the
+    /// successor rule put it.
+    #[test]
+    fn the_main_window_s_focus_comes_back_from_the_toast() {
+        let mut host = Host::new(Toaster::default(), Box::new(FakeText), GlassPref::Auto);
+        let rebuild = |host: &mut Host<Toaster>, gone: bool| {
+            host.model.gone = gone;
+            let model = &host.model;
+            host.ui.build(|c| model.view(c));
+            host.ui.layout(host.text.as_mut());
+        };
+        host.ui.set_viewport(Size { w: 200.0, h: 100.0 });
+        rebuild(&mut host, false);
+        let b = host.ui.find(&[Key::name("b")]);
+        host.ui.set_focus(b);
+        let layer = &mut host.layers[popups::slot(gui::PopupKind::Toast)];
+        layer.ui.set_viewport(Size { w: 200.0, h: 100.0 });
+        let model = &host.model;
+        layer.ui.build(|c| model.toast_view(c));
+        layer.ui.layout(host.text.as_mut());
+
+        host.enter_toast();
+        host.focused(false);
+        let toast = &host.layers[popups::slot(gui::PopupKind::Toast)].ui;
+        assert!(toast.focus().is_some(), "the toast's Dismiss has focus");
+        rebuild(&mut host, true);
+        rebuild(&mut host, false);
+        let again = host.ui.find(&[Key::name("b")]);
+        assert_ne!(again, b, "made anew");
+        host.focused(true);
+        assert_eq!(host.ui.focus(), again, "found by its keys");
+
+        host.enter_toast();
+        host.focused(false);
+        rebuild(&mut host, true);
+        let c = host.ui.find(&[Key::name("c")]);
+        assert_eq!(host.ui.focus(), c, "the successor");
+        host.focused(true);
+        assert_eq!(host.ui.focus(), c, "it stays");
     }
 
     #[test]

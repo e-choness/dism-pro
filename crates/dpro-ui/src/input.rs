@@ -324,6 +324,11 @@ impl<M: Clone> Ui<M> {
         if let Some(used) = self.table_key(k, out) {
             return used;
         }
+        // A parked focus takes no activation, nor a hold. The keys are used, so nothing behind
+        // the page (an accelerator, a default button) takes them either (A4.4, slice 7c).
+        if k.down && matches!(k.key, KeyCode::Enter | KeyCode::Space) && self.parked() {
+            return true;
+        }
         // What nothing else used may scroll the viewport holding the focus (A2.4).
         self.control_key(k, out) || self.scroll_key(k)
     }
@@ -332,6 +337,11 @@ impl<M: Clone> Ui<M> {
     /// tab stop inside, A2.4), which has nothing to press.
     fn focus_presses(&self) -> bool {
         self.focus != NIL && self.nodes[self.focus as usize].scroll == NIL
+    }
+
+    /// The focus is parked: on a node disabled while it had focus (TD-0009 A4.4, slice 7c).
+    fn parked(&self) -> bool {
+        self.focus != NIL && !self.nodes[self.focus as usize].enabled
     }
 
     fn control_key(&mut self, k: KeyEvent, out: &mut Vec<M>) -> bool {
@@ -1099,18 +1109,22 @@ mod tests {
         assert_eq!(out, [] as [u8; 0]);
     }
 
+    /// Slice 7c: the focus a disabled node had stays parked on it (TD-0009 A4.4), where it
+    /// went before; it takes no input, and nothing can focus it anew.
     #[test]
-    fn disabled_nodes_take_no_input_and_lose_what_they_had() {
+    fn disabled_nodes_take_no_input_and_keep_a_parked_focus() {
         let mut ui = ui(Motion::default(), true);
         let mut out = Vec::new();
         ui.dispatch(Input::PointerMove(at(30.0)), &mut out);
         ui.set_focus(ui.find(&[Key(2)]));
         assert_eq!(focused(&ui), Some(2));
         build(&mut ui, false);
-        assert_eq!((ui.hover(), ui.focus()), (None, None));
+        assert_eq!((ui.hover(), focused(&ui)), (None, Some(2)));
         ui.dispatch(Input::PointerDown(at(30.0)), &mut out);
         ui.dispatch(Input::PointerUp(at(30.0)), &mut out);
+        assert!(ui.dispatch(key(KeyCode::Enter, true, false), &mut out));
         assert_eq!(out, [] as [u8; 0]);
+        ui.set_focus(None);
         ui.set_focus(ui.find(&[Key(2)]));
         assert_eq!(ui.focus(), None);
     }
@@ -1236,8 +1250,10 @@ mod tests {
         assert_eq!(ui.hover(), None);
     }
 
+    /// Slice 7c: the focus a removed node had goes to its successor (TD-0009 A4.4), where it
+    /// went before.
     #[test]
-    fn removed_nodes_drop_focus_hover_and_animations() {
+    fn removed_nodes_drop_hover_and_animations_and_pass_focus_on() {
         let mut ui = ui(Motion { hover_ms: 120 }, true);
         let mut out = Vec::new();
         ui.dispatch(Input::PointerMove(at(10.0)), &mut out);
@@ -1246,7 +1262,7 @@ mod tests {
         ui.build(|cx| {
             cx.add(Element::button(Key(3), "c", 3));
         });
-        assert_eq!((ui.hover(), ui.focus()), (None, None));
+        assert_eq!((ui.hover(), focused(&ui)), (None, Some(3)));
         assert!(!ui.wants_frame());
     }
 

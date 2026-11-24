@@ -2282,4 +2282,120 @@ $ok = $checks.Count -gt 0 -and -not ($checks.Values -contains $false)
 Publish 'Accessibility depth: notifications' $lines $ok
 if (-not $ok) { $failed++ }
 
+# Accessibility depth: focus (TD-0009 A4.4, A4.7 U23, A4.9, slice 7c) ----------------------------
+# Focus restoration on the drawer probe. Esc closes the drawer, and focus goes back to "Review
+# changes", its opener (its scope's FocusMemo). Delete drops the focused first change, as a refresh
+# would, and focus goes to the next, "Windows Update cache" (the successor rule). Both are gates,
+# read back through UIA's FocusedElement within 2 s. U23 (advisory): the FocusChanged event to the
+# opener arrives <= 100 ms after Esc. Managed UI Automation's focus handler hears it, registered on
+# an MTA thread of its own as UI Automation advises for event handlers, and stamps each event with
+# the Stopwatch clock this script reads. The class reaches UI Automation by reflection, through the
+# types this script loaded: Add-Type can't reference its assemblies along with its default ones.
+Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Concurrent;
+using System.Diagnostics;
+using System.Reflection;
+using System.Threading;
+
+public static class FocusGate {
+    public static ConcurrentQueue<string> Seen = new ConcurrentQueue<string>();
+    static Thread worker;
+    static ManualResetEventSlim stop;
+    static string error;
+    // Starts hearing FocusChanged anywhere on the desktop, through `automation` (managed UI
+    // Automation's Automation class) and its handler type; returns null once registered, else why
+    // not. Stop unregisters.
+    public static string Start(Type automation, Type handlerType) {
+        Seen = new ConcurrentQueue<string>();
+        stop = new ManualResetEventSlim(false);
+        var ready = new ManualResetEventSlim(false);
+        error = "not registered in 10 s";
+        worker = new Thread(() => {
+            try {
+                MethodInfo on = typeof(FocusGate).GetMethod("OnFocus", BindingFlags.Static | BindingFlags.NonPublic);
+                Delegate handler = Delegate.CreateDelegate(handlerType, on);
+                automation.GetMethod("AddAutomationFocusChangedEventHandler").Invoke(null, new object[] { handler });
+                error = null;
+                ready.Set();
+                stop.Wait();
+                automation.GetMethod("RemoveAutomationFocusChangedEventHandler").Invoke(null, new object[] { handler });
+            } catch (Exception e) {
+                if (error != null) { error = (e.InnerException ?? e).Message; }
+            } finally {
+                ready.Set();
+            }
+        });
+        worker.SetApartmentState(ApartmentState.MTA);
+        worker.IsBackground = true;
+        worker.Start();
+        ready.Wait(10000);
+        return error;
+    }
+    public static void Stop() {
+        if (stop != null) { stop.Set(); }
+        if (worker != null) { worker.Join(5000); worker = null; }
+    }
+    // The handler: (object, AutomationFocusChangedEventArgs) binds to (object, EventArgs).
+    static void OnFocus(object sender, EventArgs e) {
+        long t = Stopwatch.GetTimestamp();
+        string name = "";
+        try {
+            object current = sender.GetType().GetProperty("Current").GetValue(sender);
+            name = (string) current.GetType().GetProperty("Name").GetValue(current);
+        } catch (Exception) {
+        }
+        Seen.Enqueue(t + "|" + name);
+    }
+}
+'@
+
+$lines = @("Accessibility depth, focus: the drawer probe at $Size (the checks are gates, read back through UIA within 2 s; the time is advisory, U23: 100 ms)")
+$checks = [ordered]@{}
+$p = $null
+$window = $null
+try {
+    if (-not (Test-Path $drawerExe)) { throw "missing $drawerExe (docker compose run --rm t3-tools builds it)" }
+    $p = Start-Process -FilePath $drawerExe -ArgumentList @('--size', $Size) -PassThru
+    $null = $p.Handle
+    $window = Wait-DrawerWindow $p
+    $null = Focus-Opener $window
+    $why = [FocusGate]::Start([Windows.Automation.Automation], [Windows.Automation.AutomationFocusChangedEventHandler])
+    $checks['the client hears FocusChanged'] = $null -eq $why
+    if ($null -ne $why) { throw "AddAutomationFocusChangedEventHandler failed: $why" }
+    Send-Key 0x0D # Enter
+    if (-not (Wait-Until { Test-Focused $types::CheckBox 'Temporary files' } 2000)) { throw 'Enter on Review changes put no focus on the drawer''s first change in 2 s' }
+    $t0 = [Diagnostics.Stopwatch]::GetTimestamp()
+    Send-Key 0x1B # Esc
+    $checks['Esc: focus goes back to "Review changes"'] = Wait-Until { Test-Focused $types::Button 'Review changes' } 2000
+    $back = @([FocusGate]::Seen.ToArray() | ForEach-Object {
+        $f = $_ -split '\|', 2
+        [pscustomobject]@{ Ms = ([long] $f[0] - $t0) * 1000.0 / [Diagnostics.Stopwatch]::Frequency; Name = $f[1] }
+    } | Where-Object { $_.Ms -ge 0 -and $_.Name -eq 'Review changes' } | Select-Object -First 1)
+    if ($back.Count -eq 1) {
+        $lines += 'U23: FocusChanged to "Review changes" {0} after Esc' -f (Format-Ms $back[0].Ms)
+    } else {
+        $lines += 'U23: no FocusChanged to "Review changes" heard after Esc (advisory)'
+    }
+    Send-Key 0x0D # Enter
+    if (-not (Wait-Until { Test-Focused $types::CheckBox 'Temporary files' } 2000)) { throw 'the drawer opened again put no focus on its first change in 2 s' }
+    Send-Key 0x2E # Delete: the probe drops the first change still listed
+    $checks['Delete: focus goes to the next change, "Windows Update cache"'] = Wait-Until {
+        (Test-Focused $types::CheckBox 'Windows Update cache') -and (Find-Elements $window.Root $types::CheckBox 'Temporary files').Count -eq 0
+    } 2000
+} catch {
+    $lines += "focus FAILED: $($_.Exception.Message)"
+    $checks['client'] = $false
+} finally {
+    [FocusGate]::Stop()
+    if ($null -ne $p -and -not $p.HasExited) {
+        if ($null -ne $window) { [void][UiaGateWin32]::PostMessageW($window.Hwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) } # WM_CLOSE
+        if (-not $p.WaitForExit(5000)) { $p.Kill(); $lines += 'the drawer probe did not close on WM_CLOSE'; $checks['closes'] = $false }
+    }
+}
+foreach ($k in $checks.Keys) { $lines += '{0,-62} {1}' -f $k, (Format-Verdict $checks[$k]) }
+$ok = $checks.Count -gt 0 -and -not ($checks.Values -contains $false)
+Publish 'Accessibility depth: focus' $lines $ok
+if (-not $ok) { $failed++ }
+
 exit $failed

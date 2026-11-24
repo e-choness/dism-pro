@@ -423,10 +423,7 @@ impl<P: Model> Host<P> {
             && !mods.alt
             && self.layers[slot(gui::PopupKind::Toast)].shown
         {
-            // Its first control takes focus, with the ring, so a screen reader reads where it is.
-            self.layers[slot(gui::PopupKind::Toast)]
-                .ui
-                .focus_first(true);
+            self.enter_toast();
             cx.activate(Surface::Popup(gui::PopupKind::Toast));
             return true;
         }
@@ -445,6 +442,16 @@ impl<P: Model> Host<P> {
             }
             None => false,
         }
+    }
+
+    /// F6 takes the keyboard into the toast: the main window's focus is remembered, to come back
+    /// when the main window has the keyboard again (TD-0009 A4.4, slice 7c), and the toast's
+    /// first control takes focus, with the ring, so a screen reader reads where it is.
+    pub(super) fn enter_toast(&mut self) {
+        self.toast_return = self.ui.focus_memo();
+        self.layers[slot(gui::PopupKind::Toast)]
+            .ui
+            .focus_first(true);
     }
 
     /// Whether the scrim shows over the page: while the palette or a dialog is open (A3.5
@@ -508,6 +515,10 @@ impl<P: Model> Host<P> {
             cx.hide_popup(open);
             self.layers[slot(open)].hidden();
             self.open = None;
+            // A dialog gives the main window's focus back to what opened it (A4.4).
+            if open == gui::PopupKind::Dialog {
+                self.ui.pop_focus_return();
+            }
         }
         let Some(kind) = kind else {
             return;
@@ -527,6 +538,9 @@ impl<P: Model> Host<P> {
         let place = if overlay { !cx.minimized() } else { opening };
         if opening && !place {
             return;
+        }
+        if opening && kind == gui::PopupKind::Dialog {
+            self.ui.push_focus_return();
         }
         let backdrop = self.popup_backdrop();
         let main_scale = self.ui.scale();

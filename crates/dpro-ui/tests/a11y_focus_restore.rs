@@ -94,7 +94,6 @@ fn buttons(cx: &mut Cx<'_, u8>, n: u8, skip: Option<u8>) {
 // ---- the successor rule ----------------------------------------------------------------------
 
 #[test]
-#[ignore = "slice 7c: lands with the code"]
 fn a_removed_focus_goes_to_the_next_control() {
     let mut ui = ui();
     build(&mut ui, |cx| buttons(cx, 4, None));
@@ -104,7 +103,6 @@ fn a_removed_focus_goes_to_the_next_control() {
 }
 
 #[test]
-#[ignore = "slice 7c: lands with the code"]
 fn with_nothing_after_it_the_previous_control() {
     let mut ui = ui();
     let view = |cx: &mut Cx<'_, u8>, last: bool| {
@@ -125,7 +123,6 @@ fn with_nothing_after_it_the_previous_control() {
 }
 
 #[test]
-#[ignore = "slice 7c: lands with the code"]
 fn with_no_sibling_left_the_search_goes_up_a_level() {
     // Three groups: the first holds button 0, the second the focused button 1, the third a line
     // and, deeper, button 2. The second's button goes: the next group's subtree has the
@@ -164,7 +161,6 @@ fn with_no_sibling_left_the_search_goes_up_a_level() {
 }
 
 #[test]
-#[ignore = "slice 7c: lands with the code"]
 fn the_search_stops_at_the_landmark_whose_first_control_is_the_last_resort() {
     // The Main landmark is a scroll viewport: once its only button goes, it's a stop itself (a
     // viewport with none inside, A2.4), and it takes focus rather than the rail's button before
@@ -199,7 +195,6 @@ fn the_search_stops_at_the_landmark_whose_first_control_is_the_last_resort() {
 }
 
 #[test]
-#[ignore = "slice 7c: lands with the code"]
 fn past_a_landmark_with_nothing_to_focus_the_search_goes_on() {
     // A region with no control left: focus doesn't fall to the window (A4.1), it goes on to the
     // next control after the region (decision #41).
@@ -226,7 +221,6 @@ fn past_a_landmark_with_nothing_to_focus_the_search_goes_on() {
 }
 
 #[test]
-#[ignore = "slice 7c: lands with the code"]
 fn the_successor_keeps_the_ring_as_it_was() {
     for keyboard in [true, false] {
         let mut ui = ui();
@@ -245,7 +239,6 @@ fn the_successor_keeps_the_ring_as_it_was() {
 }
 
 #[test]
-#[ignore = "slice 7c: lands with the code"]
 fn a_removed_card_gives_focus_to_the_next_cards_review() {
     // The shell's summary page, as `interact::event.remove_focused` measures it.
     let mut run = shell::Run::with(shell::Shell::new()).card_focused(3);
@@ -264,7 +257,6 @@ fn parking(cx: &mut Cx<'_, u8>, middle: bool, hold: bool) {
 }
 
 #[test]
-#[ignore = "slice 7c: lands with the code"]
 fn a_disabled_focus_stays_parked_and_takes_no_activation() {
     let mut ui = ui();
     build(&mut ui, |cx| parking(cx, true, true));
@@ -289,7 +281,6 @@ fn a_disabled_focus_stays_parked_and_takes_no_activation() {
 }
 
 #[test]
-#[ignore = "slice 7c: lands with the code"]
 fn tab_and_shift_tab_leave_a_parked_focus() {
     for (shift, want) in [(false, 2), (true, 0)] {
         let mut ui = ui();
@@ -302,7 +293,6 @@ fn tab_and_shift_tab_leave_a_parked_focus() {
 }
 
 #[test]
-#[ignore = "slice 7c: lands with the code"]
 fn a_client_reads_a_parked_focus_as_unavailable() {
     let mut ui = ui();
     build(&mut ui, |cx| parking(cx, true, true));
@@ -332,7 +322,6 @@ fn paneled(cx: &mut Cx<'_, u8>, inside: &[u8]) {
 }
 
 #[test]
-#[ignore = "slice 7c: lands with the code"]
 fn a_memo_finds_its_node_again_by_its_keys() {
     let mut ui = ui();
     build(&mut ui, |cx| paneled(cx, &[0, 1]));
@@ -350,7 +339,6 @@ fn a_memo_finds_its_node_again_by_its_keys() {
 }
 
 #[test]
-#[ignore = "slice 7c: lands with the code"]
 fn a_memo_whose_node_went_falls_back_to_its_nearest_ancestors_first_control() {
     let mut ui = ui();
     build(&mut ui, |cx| paneled(cx, &[1]));
@@ -366,7 +354,6 @@ fn a_memo_whose_node_went_falls_back_to_its_nearest_ancestors_first_control() {
 }
 
 #[test]
-#[ignore = "slice 7c: lands with the code"]
 fn with_nothing_of_its_path_left_the_main_landmarks_first_control() {
     let mut ui = ui();
     build(&mut ui, |cx| paneled(cx, &[1]));
@@ -393,7 +380,6 @@ fn with_nothing_of_its_path_left_the_main_landmarks_first_control() {
 }
 
 #[test]
-#[ignore = "slice 7c: lands with the code"]
 fn a_memo_whose_node_is_disabled_parks_focus_on_it() {
     let mut ui = ui();
     build(&mut ui, |cx| parking(cx, true, true));
@@ -405,7 +391,6 @@ fn a_memo_whose_node_is_disabled_parks_focus_on_it() {
 }
 
 #[test]
-#[ignore = "slice 7c: lands with the code"]
 fn a_node_deeper_than_sixteen_has_no_memo() {
     fn nest(cx: &mut Cx<'_, u8>, depth: u8) {
         if depth == 1 {
@@ -430,7 +415,6 @@ fn a_node_deeper_than_sixteen_has_no_memo() {
 // ---- the return stack ------------------------------------------------------------------------
 
 #[test]
-#[ignore = "slice 7c: lands with the code"]
 fn the_return_stack_keeps_four_and_drops_the_oldest() {
     let mut ui = ui();
     build(&mut ui, |cx| buttons(cx, 6, None));
@@ -448,7 +432,6 @@ fn the_return_stack_keeps_four_and_drops_the_oldest() {
 }
 
 #[test]
-#[ignore = "slice 7c: lands with the code"]
 fn a_dialog_whose_opener_was_rebuilt_gives_focus_back_to_it() {
     // A dialog keeps the main window's focus where it was (A1); the page rebuilt its opener
     // meanwhile, so the pop finds it by keys.
@@ -464,7 +447,6 @@ fn a_dialog_whose_opener_was_rebuilt_gives_focus_back_to_it() {
 // ---- popups ----------------------------------------------------------------------------------
 
 #[test]
-#[ignore = "slice 7c: lands with the code"]
 fn a_popup_whose_anchor_went_leaves_focus_on_the_successor() {
     fn view(cx: &mut Cx<'_, u8>, anchor: bool) {
         cx.add(button(0));
@@ -502,7 +484,6 @@ fn navigation_from_the_rail_keeps_focus_on_its_item() {
 }
 
 #[test]
-#[ignore = "slice 7c: lands with the code"]
 fn navigation_from_elsewhere_focuses_the_main_landmarks_first_control() {
     let mut run = shell::Run::with(shell::Shell::new());
     for s in run.focus_filter() {
@@ -517,7 +498,6 @@ fn navigation_from_elsewhere_focuses_the_main_landmarks_first_control() {
 }
 
 #[test]
-#[ignore = "slice 7c: lands with the code"]
 fn focus_first_in_a_container_takes_its_first_control() {
     let mut ui = ui();
     build(&mut ui, |cx| paneled(cx, &[3, 4]));
@@ -545,7 +525,6 @@ fn the_shells_drawer_gives_focus_back_to_review_changes() {
 }
 
 #[test]
-#[ignore = "slice 7c: lands with the code"]
 fn a_sheet_whose_opener_was_rebuilt_finds_it_by_its_keys() {
     // The sheet takes the page out of the tree, and closing it builds the page anew. Opened with
     // "Scan again" focused (an accelerator's open), focus goes back to it, not to the page's first
@@ -572,7 +551,6 @@ fn change(run: &drawer::Run, i: u64) -> Option<NodeId> {
 }
 
 #[test]
-#[ignore = "slice 7c: lands with the code"]
 fn a_dropped_change_gives_focus_to_the_next() {
     // G1's "Accessibility depth: focus" on the drawer probe: Delete drops the first change, which
     // has focus as the drawer opens.
