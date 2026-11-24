@@ -38,7 +38,6 @@ fn round(run: &mut Run, at: u64) -> usize {
 }
 
 #[test]
-#[ignore = "slice 7b: lands with the code"]
 fn queuing_a_notice_allocates_nothing_once_warm() {
     let mut run = Run::accessible(Shell::new());
     for s in run.session() {

@@ -388,7 +388,6 @@ fn the_composites_settle_after_each_change_and_stay_idle() {
 /// Notices (TD-0009 A4.7 U22, slice 7b): a progress step the announcer holds back sets no timer
 /// to say it later; the next report after the gap says it. Neither asks for a frame or a wake.
 #[test]
-#[ignore = "slice 7b: lands with the code"]
 fn a_progress_step_held_back_asks_for_no_frame_or_wake() {
     let mut run = Run::accessible(Shell::new()).drawer_open();
     let mut heard = 0;

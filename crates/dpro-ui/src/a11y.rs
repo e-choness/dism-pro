@@ -111,6 +111,11 @@ pub(crate) struct A11y {
 }
 
 impl A11y {
+    /// Whether a client listens (TD-0009 A4.5: notices are dropped otherwise).
+    pub(crate) const fn active(&self) -> bool {
+        self.active
+    }
+
     pub(crate) fn new() -> Self {
         Self {
             active: false,
@@ -310,6 +315,7 @@ impl<M> Ui<M> {
     pub fn a11y_deactivate(&mut self) {
         self.forget_changes();
         self.a11y.active = false;
+        self.notices.clear();
     }
 
     /// The node behind an AccessKit id, if it's still live.

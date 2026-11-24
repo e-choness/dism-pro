@@ -117,6 +117,11 @@ fn drain(ui: &mut Ui<u8>) -> Vec<(String, Activity)> {
     out
 }
 
+/// An empty queue, drained.
+const fn nothing() -> Vec<(String, Activity)> {
+    Vec::new()
+}
+
 /// A window with a client listening.
 fn listened() -> Ui<u8> {
     let mut ui = ui();
@@ -126,23 +131,21 @@ fn listened() -> Ui<u8> {
 }
 
 #[test]
-#[ignore = "slice 7b: lands with the code"]
 fn without_a_client_a_notice_is_dropped_at_once() {
     let mut ui = ui();
     build(&mut ui, "Ready", Live::Off);
     ui.notify(notice("Copied.", Activity::Copy));
-    assert!(drain(&mut ui).is_empty());
+    assert_eq!(drain(&mut ui), nothing());
     // Nor is one kept for a client that comes later.
     drop(ui.a11y_tree());
-    assert!(drain(&mut ui).is_empty());
+    assert_eq!(drain(&mut ui), nothing());
     // A client that leaves takes the queue with it.
     ui.notify(notice("Copied.", Activity::Copy));
     ui.a11y_deactivate();
-    assert!(drain(&mut ui).is_empty());
+    assert_eq!(drain(&mut ui), nothing());
 }
 
 #[test]
-#[ignore = "slice 7b: lands with the code"]
 fn notices_are_queued_in_order_replaced_by_activity_and_drained() {
     let mut ui = listened();
     ui.notify(notice("Apply: 10 percent", Activity::Progress(0)));
@@ -166,11 +169,22 @@ fn notices_are_queued_in_order_replaced_by_activity_and_drained() {
             ("Apply: 20 percent".to_owned(), Activity::Progress(0)),
         ]
     );
-    assert!(drain(&mut ui).is_empty(), "drained once");
+    assert_eq!(drain(&mut ui), nothing(), "drained once");
+    // A replacing notice drops every queued one of its activity, replacing or not.
+    for _ in 0..2 {
+        ui.notify(Notice {
+            replace: false,
+            ..notice("Copied.", Activity::Copy)
+        });
+    }
+    ui.notify(notice("Copied again.", Activity::Copy));
+    assert_eq!(
+        drain(&mut ui),
+        [("Copied again.".to_owned(), Activity::Copy)]
+    );
 }
 
 #[test]
-#[ignore = "slice 7b: lands with the code"]
 fn the_queue_holds_eight_and_drops_the_oldest() {
     let mut ui = listened();
     let texts: Vec<String> = (0..10).map(|n| format!("{n} items listed")).collect();
@@ -185,7 +199,6 @@ fn the_queue_holds_eight_and_drops_the_oldest() {
 }
 
 #[test]
-#[ignore = "slice 7b: lands with the code"]
 fn text_is_sanitized_as_a_field_takes_it_and_capped_at_256_characters() {
     let mut ui = listened();
     // Line breaks dropped, a tab as a space, control characters and bidi overrides dropped.
@@ -201,11 +214,10 @@ fn text_is_sanitized_as_a_field_takes_it_and_capped_at_256_characters() {
     assert!(got[1].0.chars().all(|c| c == 'é'));
     // Nothing is left of a notice whose text is all control characters.
     ui.notify(notice("\u{1}\u{2}\r\n", Activity::Copy));
-    assert!(drain(&mut ui).is_empty());
+    assert_eq!(drain(&mut ui), nothing());
 }
 
 #[test]
-#[ignore = "slice 7b: lands with the code"]
 fn announcements_are_delivered_as_a4_4_s_table_says() {
     let job = JobId::from_parts(UnixMillis(1_800_000_000_000), 1);
     let cases = [
