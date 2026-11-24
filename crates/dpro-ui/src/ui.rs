@@ -12,6 +12,7 @@ use crate::{
     field::{Caret, ClipboardRequest, Field},
     geom::{Point, Rect, RectPx, Size},
     layout::Shown,
+    notice::Notices,
     pool::TextPool,
     scroll::{Drag, Scroll},
     table::{DRAG_DISTANCE, Divider, Press, TableState},
@@ -150,6 +151,8 @@ pub struct Ui<M> {
     pub(crate) drag_distance: f32,
     /// Messages layout made (a column's fit), for the host to take ([`Ui::take_messages`]).
     pub(crate) queued: Vec<M>,
+    /// Notices for the platform to raise (TD-0009 A4.5, `notice.rs`).
+    pub(crate) notices: Notices,
 }
 
 /// A node's tooltip, a dropdown's accessible name and step, and a field's step: in a side table,
@@ -260,6 +263,7 @@ impl<M> Ui<M> {
             divider: None,
             drag_distance: DRAG_DISTANCE,
             queued: Vec::new(),
+            notices: Notices::default(),
         };
         ui.damage_all();
         ui

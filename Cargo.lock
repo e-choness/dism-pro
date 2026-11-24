@@ -432,6 +432,7 @@ dependencies = [
  "criterion",
  "dpro-core",
  "gungraun",
+ "proptest",
 ]
 
 [[package]]

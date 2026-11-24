@@ -30,6 +30,10 @@
 //!   the summary cards wrap two to a line (`cards_wrap_resize`). `a11y` adds the page's whole
 //!   tree (`a11y_tree.composites`). A3.7 names them `composite::batch_count` and so on; the bench
 //!   ids after the dot say which case.
+//! - `notice` (TD-0009 A4.7, slice 7b), in a group of its own: a progress report that queues a
+//!   notice, with a client listening (`notice_event.progress_step`, A4.7's `interact::event.notice`),
+//!   and the update after a job toast's live line turns to an assertive failure
+//!   (`live_toast.failed`, A4.7's `a11y_update.live_toast`).
 //!
 //! C1: `docker compose run --rm bench-gate`.
 
@@ -48,6 +52,7 @@ use dpro_ui::{
     Canvas, ColumnId, FakeText, Input, KeyCode, Mods, Motion, Point, Size, TableEvent, Theme, Ui,
     accesskit::TreeUpdate, tokens,
 };
+use dpro_ui::{Cx, Element, Key, Live};
 use fling_table::Fling;
 use gungraun::{
     Callgrind, LibraryBenchmarkConfig, library_benchmark, library_benchmark_group, main,
@@ -512,8 +517,72 @@ library_benchmark_group!(
     benchmarks = [batch_count, scan_size, cards_wrap_resize]
 );
 
+// ---- notice (TD-0009 A4.7 U21, U22; slice 7b) --------------------------------------------------
+
+/// [`warm_accessible`], the drawer open and its job started 2 s ago, then a progress report that
+/// crosses a step: the announcer speaks, the shell writes the notice's text, the Ui queues it, and
+/// the frame runs. A4.7's `interact::event.notice`.
+fn noticed() -> (Box<Run>, Step) {
+    let mut run = warm_accessible().drawer_open();
+    run.step(Step::Tick(dpro_app::announce::JOB_GAP_MS));
+    (Box::new(run), Step::Update(Msg::Progress(41)))
+}
+
+#[library_benchmark]
+#[bench::progress_step(setup = noticed)]
+fn notice_event((mut run, step): (Box<Run>, Step)) -> Box<Run> {
+    run.step(black_box(step));
+    run
+}
+
+/// The job toast's own window's `Ui`, as A3's toast lays it out (slice 6c builds the real one):
+/// a group named by its region, the job's line (a live region), its bar and Dismiss.
+fn toast_view(cx: &mut Cx<'_, u8>, failed: bool) {
+    let (line, live) = if failed {
+        (
+            "Apply 20 changes failed. 3 of 20 changes were applied.",
+            Live::Assertive,
+        )
+    } else {
+        ("Apply 20 changes: 41 %", Live::Polite)
+    };
+    cx.add_with(
+        Element::stack(Key::name("toast")).name("Job status"),
+        |cx| {
+            cx.add(Element::text(Key::name("line"), line).live(live));
+            if !failed {
+                cx.add(Element::progress(Key::name("bar"), 0.41));
+            }
+            cx.add(Element::button(Key::name("dismiss"), "Dismiss", 1));
+        },
+    );
+}
+
+/// A running job's toast, a client listening, then the job fails: the line's text changes and
+/// turns assertive, and the bar goes. Its update is A4.7's `a11y_update.live_toast` (U21:
+/// ≤ 5,000 Ir).
+fn toast_failed() -> Box<Ui<u8>> {
+    let mut ui = Ui::new(Size { w: 360.0, h: 96.0 }, 1.0, Motion::STANDARD);
+    ui.build(|cx| toast_view(cx, false));
+    ui.layout(&mut FakeText);
+    drop(ui.a11y_tree());
+    ui.build(|cx| toast_view(cx, true));
+    ui.layout(&mut FakeText);
+    Box::new(ui)
+}
+
+#[library_benchmark]
+#[bench::failed(setup = toast_failed)]
+fn live_toast(mut ui: Box<Ui<u8>>) -> (Option<TreeUpdate>, Box<Ui<u8>>) {
+    (ui.a11y_update(), ui)
+}
+
+library_benchmark_group!(name = notice, benchmarks = [notice_event, live_toast]);
+
+// ---- end notice --------------------------------------------------------------------------------
+
 main!(
     // Instruction counts only: the cache simulation would slow every run for metrics nothing gates.
     config = LibraryBenchmarkConfig::default().tool(Callgrind::with_args(["--cache-sim=no"]));
-    library_benchmark_groups = interact, paint, popup, table, a11y, composite
+    library_benchmark_groups = interact, paint, popup, table, a11y, composite, notice
 );
