@@ -4,7 +4,10 @@
 //! in the table go up; Enter on a folder opens it; Enter in the path field goes there or reports
 //! that it doesn't exist, isn't a folder, or isn't a full path; a listing that never answers
 //! leaves the picker answering keys, Up and Cancel; the first batch paints the first screen; and a
-//! picker at rest asks for nothing.
+//! picker at rest asks for nothing. Browse… asks for the system dialog first, once its event is
+//! done: a path it picks is chosen, a cancel changes nothing, and where there's no dialog or it
+//! failed the in-app picker opens (A3.8's failure table; `platform_picker.rs` runs the same path
+//! through a real window under T2).
 
 #![allow(missing_docs)]
 #![expect(
@@ -25,8 +28,9 @@ use dpro_ui::{
     },
 };
 use picker::{
-    CANCEL, CLOSE, DRIVES_LABEL, ENTRIES, LOADING, Model, Msg, PATH_LABEL, REGION, Run, SELECT,
-    Step, TITLE, UP_LABEL, entry_name, key, root, start,
+    Answer, CANCEL, CHOSEN, CLOSE, DRIVES_LABEL, ENTRIES, LOADING, Model, Msg, NOTHING_CHOSEN,
+    PAGE, PATH_LABEL, REGION, ROW, Run, SELECT, Step, TITLE, UP_LABEL, entry_name, key, root,
+    start,
 };
 
 const NONE: Mods = Mods {
@@ -391,6 +395,86 @@ fn the_first_batch_paints_the_first_screen_of_rows() {
     assert_eq!(run.model.folder.len(), u32::try_from(BATCH).unwrap_or(0));
     let rows = built_rows(&run);
     assert!(rows > 0 && rows < BATCH / 4, "{rows} rows built");
+}
+
+/// The page's line under Browse…: what it says was chosen.
+fn chosen_line(run: &Run) -> String {
+    run.find(&[ROW, PAGE, CHOSEN])
+        .and_then(|id| run.ui.info(id))
+        .map(|n| n.text.to_owned())
+        .unwrap_or_default()
+}
+
+/// Enter on Browse….
+fn browse(run: &mut Run) {
+    let opener = run.opener().expect("Browse…");
+    run.ui.set_focus(Some(opener));
+    run.step(key(KeyCode::Enter, NONE));
+}
+
+/// A3.5 (12): Browse… asks for the system dialog, once its event is done, and the path it picks
+/// is chosen; the in-app picker never opens.
+#[test]
+fn browse_asks_for_the_system_dialog_and_its_path_is_chosen() {
+    let mut run = Run::with(Model::new());
+    let picked = root().join("Images").join("Picked");
+    run.dialog = Answer::Path(picked.clone());
+    browse(&mut run);
+    assert_eq!(run.asked, 1, "one pick asked");
+    assert!(run.picker().is_none(), "the in-app picker didn't open");
+    assert!(run.model.lister.started.is_empty(), "nothing listed");
+    assert_eq!(run.model.chosen.as_deref(), Some(picked.as_path()));
+    assert_eq!(chosen_line(&run), picked.to_string_lossy());
+    assert_eq!(run.ui.focus(), run.opener(), "focus stays on Browse…");
+}
+
+#[test]
+fn a_cancelled_dialog_changes_nothing() {
+    let mut run = Run::with(Model::new());
+    run.dialog = Answer::Cancelled;
+    browse(&mut run);
+    assert_eq!(run.asked, 1);
+    assert!(run.picker().is_none());
+    assert_eq!(run.model.chosen, None);
+    assert_eq!(chosen_line(&run), NOTHING_CHOSEN);
+    assert_eq!(run.ui.focus(), run.opener());
+}
+
+/// A3.8's failure table: where there's no system dialog (the window answers `Unavailable` at
+/// once, every time, for the rest of the session), or it failed, the in-app picker opens on the
+/// start folder, focus in its path field; every Browse… asks again.
+#[test]
+fn an_unavailable_or_failed_dialog_opens_the_in_app_picker() {
+    for answer in [Answer::Unavailable, Answer::Failed] {
+        let mut run = Run::with(Model::new());
+        run.dialog = answer.clone();
+        open(&mut run);
+        assert_eq!(run.asked, 1, "{answer:?}");
+        assert_eq!(run.ui.focus(), run.part(PICKER_PATH), "{answer:?}");
+        assert_eq!(
+            run.model.lister.started.last().map(|r| r.path.clone()),
+            Some(start()),
+            "{answer:?}"
+        );
+        run.step(key(KeyCode::Escape, NONE));
+        assert_eq!(run.ui.focus(), run.opener(), "{answer:?}");
+        open(&mut run);
+        assert_eq!(run.asked, 2, "{answer:?}: asked again");
+    }
+}
+
+/// A3.8: a chosen path is untrusted text, so a name that would disguise its extension shows its
+/// override as an escape; the model keeps the real path.
+#[test]
+fn a_chosen_path_shows_as_untrusted_text() {
+    let mut run = Run::with(Model::new());
+    let picked = root().join("photo\u{202E}gpj.exe");
+    run.dialog = Answer::Path(picked.clone());
+    browse(&mut run);
+    assert_eq!(run.model.chosen.as_deref(), Some(picked.as_path()));
+    let line = chosen_line(&run);
+    assert!(line.ends_with("photo<U+202E>gpj.exe"), "{line}");
+    assert!(!line.contains('\u{202E}'));
 }
 
 #[test]

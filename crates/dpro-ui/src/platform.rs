@@ -273,6 +273,9 @@ pub struct Host<P: Model> {
     tip_text: String,
     /// The model has the window's [`Waker`] (slice 6e).
     attached: bool,
+    /// The window answers every pick Unavailable, so the model's in-app picker opens
+    /// ([`Host::without_file_dialog`]).
+    no_file_dialog: bool,
     /// What the answer to the pick the window will show, or shows, becomes (slice 6e).
     pick_on: Option<fn(file_dialog::Picked) -> P::Msg>,
 }
@@ -320,8 +323,20 @@ impl<P: Model> Host<P> {
             tip_for: None,
             tip_text: String::new(),
             attached: false,
+            no_file_dialog: false,
             pick_on: None,
         }
+    }
+
+    /// The window shows no system file dialog: from its first event it answers every pick
+    /// [`file_dialog::PickError::Unavailable`] at once, as a `WinPE` without the dialog does, and
+    /// the model opens its in-app picker ([`WindowCx::without_file_dialog`]). For the picker
+    /// probe's `--in-app` and the fallback's tests, which take the path `WinPE` takes on a Windows
+    /// that has the dialog.
+    #[must_use]
+    pub fn without_file_dialog(mut self) -> Self {
+        self.no_file_dialog = true;
+        self
     }
 
     /// The hosted model.
@@ -666,6 +681,9 @@ impl<P: Model> Handler for Host<P> {
     fn event(&mut self, event: Event, cx: &mut WindowCx<'_>) -> bool {
         if !self.attached {
             self.attached = true;
+            if self.no_file_dialog {
+                cx.without_file_dialog();
+            }
             self.model.attach(cx.waker());
         }
         let used = match cx.surface() {

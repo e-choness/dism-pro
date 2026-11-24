@@ -569,6 +569,17 @@ impl WindowCx<'_> {
         self.state.picks.request(pick)
     }
 
+    /// From now on this window answers every pick
+    /// [`Unavailable`](super::file_dialog::PickError::Unavailable) at once, without COM, as a
+    /// `WinPE` without the dialog does: the model opens the in-app picker. For a host whose model
+    /// wants the in-app picker on a Windows that has the dialog (the picker probe, the fallback's
+    /// tests; A3.10 item 9's switch, if one comes). The answer's code is
+    /// `HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED)` from `WindowCx::without_file_dialog`, unless the
+    /// dialog was found unavailable already.
+    pub fn without_file_dialog(&mut self) {
+        self.state.picks.refuse();
+    }
+
     /// A [`Waker`] for this window: another thread wakes it with one, and the handler hears
     /// [`Event::Wake`] (TD-0009 §5.3).
     #[must_use]
@@ -2744,9 +2755,12 @@ mod tests {
         fn event(&mut self, event: Event, cx: &mut WindowCx<'_>) -> bool {
             self.handling = true;
             match event {
-                Event::Char(c @ ('p' | 'w')) => {
+                Event::Char(c @ ('p' | 'w' | 'n')) => {
                     if c == 'w' {
                         cx.wake_after(Some(10));
+                    }
+                    if c == 'n' {
+                        cx.without_file_dialog();
                     }
                     let asked = cx.pick(&Pick {
                         mode: crate::gui::file_dialog::PickMode::Folder,
@@ -2867,6 +2881,35 @@ mod tests {
                 ["asked true", "again false", "picked unavailable after"]
             );
         }
+        drop(window);
+        pump_until(|| true);
+    }
+
+    /// A window told it has no dialog answers its pick Unavailable after the event, as where
+    /// Windows has none, and every later one too: no dialog shows, so the helper finds none.
+    #[test]
+    fn a_window_without_the_dialog_answers_unavailable_after_the_event() {
+        let (window, log) = open_picker();
+        let closer = crate::gui::file_dialog::tests::close_with_esc(PICK_TITLE);
+        // SAFETY: messages sent to this test's live window, on its thread.
+        unsafe {
+            SendMessageW(window.hwnd, WM_CHAR, usize::from(b'n'), 0);
+            SendMessageW(window.hwnd, WM_CHAR, usize::from(b'p'), 0);
+        }
+        let found = closer.finish();
+        let log = log.borrow().clone();
+        assert!(!found, "no dialog showed: {log:?}");
+        assert_eq!(
+            log,
+            [
+                "asked true",
+                "again false",
+                "picked unavailable after",
+                "asked true",
+                "again false",
+                "picked unavailable after"
+            ]
+        );
         drop(window);
         pump_until(|| true);
     }

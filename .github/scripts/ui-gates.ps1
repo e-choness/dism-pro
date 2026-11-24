@@ -127,12 +127,14 @@ raw-API baseline, measured in this job, so it holds on whatever machine the runn
       the window is enabled and its tree answers again. Those are gates; Cancel to the answer is
       advisory (100 ms).
   Composites: picker U19 (TD-0009 A3.5 (12), A3.7 U19, slice 6e): the picker probe
-      (examples/picker.rs) over a folder under %TEMP% holding one folder of 10,000 folders. Enter
-      on "Browse..." opens the Group "Choose a folder" (a region landmark), focus in its Edit
-      "Path", whose Value is the folder; its DataGrid lists the one folder; Enter on that row lists
-      all 10,000 (GridPattern's RowCount, within 10 s); Esc closes it and focus goes back to
-      "Browse...". Those are gates. Enter to the first screen of rows and to all 10,000 are
-      advisory (U19: the first screen <= 50 ms, U3), as the runner's NTFS is.
+      (examples/picker.rs) over a folder under %TEMP% holding one folder of 10,000 folders. As the
+      app is, Enter on "Browse..." shows the system dialog "Choose a folder", owned by the probe's
+      window, and Cancel in it leaves the page as it was, Browse... focused. With --in-app (no
+      system dialog, as in WinPE), Enter on "Browse..." opens the Group "Choose a folder" (a region
+      landmark), focus in its Edit "Path", whose Value is the folder; its DataGrid lists the one
+      folder; Enter on that row lists all 10,000 (GridPattern's RowCount, within 10 s); Esc closes
+      it and focus goes back to "Browse...". Those are gates. Enter to the first screen of rows and
+      to all 10,000 are advisory (U19: the first screen <= 50 ms, U3), as the runner's NTFS is.
   Accessibility depth, notifications (TD-0009 A4.5, A4.7 U23, slice 7b): the shell with
       --job-ms 4000, whose drawer job runs 4 s from the drawer opening. A COM IUIAutomation5 client
       (managed UIA can't hear notifications) subscribes to the window's notifications, and Invoke on
@@ -2134,41 +2136,94 @@ Publish 'Composites: picker dialog' $lines $ok
 if (-not $ok) { $failed++ }
 
 # Composites: picker (TD-0009 A3.5 (12), A3.7 U19, A3.9, slice 6e) ---------------------------------
-# G1's in-app picker check and U19's wall clock, on the picker probe (crates/dpro-ui/examples/picker.rs,
-# fixtures/picker.rs) over a real folder: %TEMP% gets a folder holding one folder of 10,000 empty
-# folders, listed by dpro_app::picker::FsLister's threads. Enter on "Browse..." opens the Group
-# "Choose a folder" (a region landmark) with focus in its Edit "Path", whose Value is the folder;
-# the DataGrid lists the one folder; Enter on its row opens it, and GridPattern's RowCount comes to
-# all 10,000; Esc closes the sheet, and focus goes back to "Browse...". Those are gates. Enter to the
-# first screen of rows (RowCount past the one row it had) and to all 10,000 are advisory (U19: the
-# first screen <= 50 ms, U3), as the runner's NTFS is.
+# G1's picker check through the app's path and U19's wall clock, on the picker probe
+# (crates/dpro-ui/examples/picker.rs, fixtures/picker.rs) over a real folder: %TEMP% gets a folder
+# holding one folder of 10,000 empty folders. First the probe as the app is: Enter on "Browse..."
+# asks for the system dialog through platform::Host, which the window shows once the event is done:
+# a Window "Choose a folder" owned by the probe's window; Invoke on its Cancel (AutomationId 2, else
+# the Button "Cancel") leaves the page as it was ("No folder chosen", no sheet) with Browse...
+# focused. Then the probe with --in-app, whose window answers every pick Unavailable as a WinPE
+# without the dialog does: Enter on "Browse..." opens the in-app picker, the Group "Choose a folder"
+# (a region landmark), with focus in its Edit "Path", whose Value is the folder; the DataGrid lists
+# the one folder, listed by dpro_app::picker::FsLister's threads; Enter on its row opens it, and
+# GridPattern's RowCount comes to all 10,000; Esc closes the sheet, and focus goes back to
+# "Browse...". Those are gates. Enter to the first screen of rows (RowCount past the one row it
+# had) and to all 10,000 are advisory (U19: the first screen <= 50 ms, U3), as the runner's NTFS is.
+# A screenshot of the system dialog goes to -Out.
 $pickerExe = Join-Path $Bin 'picker.exe'
 $browseName = "Browse$([char]0x2026)"
 $bigName = 'Ten thousand'
 $pickerTree = Join-Path ([IO.Path]::GetTempPath()) "dpro-u19-$PID"
-$lines = @("Picker on the picker probe at $Size over 10,000 folders under %TEMP% (the checks are gates; the times are advisory: U19, Enter to the first screen of rows in UIA <= 50 ms)")
+$lines = @("Picker on the picker probe at $Size over 10,000 folders under %TEMP%, with the system dialog and then --in-app (the checks are gates; the times are advisory: U19, Enter to the first screen of rows in UIA <= 50 ms)")
 $checks = [ordered]@{}
 $p = $null
 $pickerHwnd = [IntPtr]::Zero
+# Starts the picker probe ($script:p) with $Extra after its folder and size, and waits for its
+# window ($script:pickerHwnd, $script:root) and its Button "Browse..." ($script:browse), focused.
+function Start-PickerProbe([string[]] $Extra) {
+    $script:pickerHwnd = [IntPtr]::Zero
+    $script:p = Start-Process -FilePath $pickerExe -ArgumentList (@('--start', ('"{0}"' -f $pickerTree), '--size', $Size) + $Extra) -PassThru
+    $null = $script:p.Handle
+    $shown = Wait-Until {
+        $script:pickerHwnd = [UiaGateWin32]::FindWindowW('dismpro.window', 'DISM Pro picker probe')
+        $script:pickerHwnd -ne [IntPtr]::Zero -and [UiaGateWin32]::IsWindowVisible($script:pickerHwnd)
+    } 30000
+    if (-not $shown) { throw "the picker probe showed no window in 30 s ($(if ($script:p.HasExited) { "exited with code $($script:p.ExitCode)" } else { 'still running' }))" }
+    $script:root = $ae::FromHandle($script:pickerHwnd)
+    $script:browse = $null
+    if (-not (Wait-Until { $script:browse = Find-First $script:root $types::Button $browseName; $null -ne $script:browse } 10000)) { throw "no Button `"$browseName`" in 10 s" }
+    [void][GlassGateWin32]::Activate($script:pickerHwnd)
+    $script:browse.SetFocus()
+    if (-not (Wait-Until { $script:browse.Current.HasKeyboardFocus } 2000)) { throw "`"$browseName`" took no focus in 2 s" }
+}
+# Closes the picker probe ($script:p): WM_CLOSE, then Kill after 5 s.
+function Stop-PickerProbe {
+    if ($null -ne $script:p -and -not $script:p.HasExited) {
+        if ($script:pickerHwnd -ne [IntPtr]::Zero) { [void][UiaGateWin32]::PostMessageW($script:pickerHwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) } # WM_CLOSE
+        if (-not $script:p.WaitForExit(5000)) { $script:p.Kill(); $script:lines += 'the picker probe did not close on WM_CLOSE'; $script:checks['closes'] = $false }
+    }
+    $script:p = $null
+}
 try {
     if (-not (Test-Path $pickerExe)) { throw "missing $pickerExe (docker compose run --rm t3-tools builds it)" }
     $big = Join-Path $pickerTree $bigName
     $sw = [Diagnostics.Stopwatch]::StartNew()
     foreach ($n in 0..9999) { $null = [IO.Directory]::CreateDirectory((Join-Path $big ('Folder {0:D5}' -f $n))) }
     $lines += 'made 10,000 folders in {0:N1} s' -f $sw.Elapsed.TotalSeconds
-    $p = Start-Process -FilePath $pickerExe -ArgumentList @('--start', ('"{0}"' -f $pickerTree), '--size', $Size) -PassThru
-    $null = $p.Handle
-    $shown = Wait-Until {
-        $script:pickerHwnd = [UiaGateWin32]::FindWindowW('dismpro.window', 'DISM Pro picker probe')
-        $script:pickerHwnd -ne [IntPtr]::Zero -and [UiaGateWin32]::IsWindowVisible($script:pickerHwnd)
-    } 30000
-    if (-not $shown) { throw "the picker probe showed no window in 30 s ($(if ($p.HasExited) { "exited with code $($p.ExitCode)" } else { 'still running' }))" }
-    $root = $ae::FromHandle($pickerHwnd)
-    $browse = $null
-    if (-not (Wait-Until { $script:browse = Find-First $root $types::Button $browseName; $null -ne $script:browse } 10000)) { throw "no Button `"$browseName`" in 10 s" }
-    [void][GlassGateWin32]::Activate($pickerHwnd)
-    $browse.SetFocus()
-    if (-not (Wait-Until { $browse.Current.HasKeyboardFocus } 2000)) { throw "`"$browseName`" took no focus in 2 s" }
+    # The app's path: the system dialog, asked for by the page and shown once the event is done.
+    Start-PickerProbe @()
+    Send-Key 0x0D
+    $dialogNamed = [Windows.Automation.AndCondition]::new(
+        [Windows.Automation.PropertyCondition]::new($ae::ControlTypeProperty, $types::Window),
+        [Windows.Automation.PropertyCondition]::new($ae::NameProperty, 'Choose a folder'))
+    $pickerDialog = $null
+    $dialogFound = Wait-Until {
+        $script:pickerDialog = $root.FindFirst([Windows.Automation.TreeScope]::Children, $dialogNamed)
+        if ($null -eq $script:pickerDialog) { $script:pickerDialog = $ae::RootElement.FindFirst([Windows.Automation.TreeScope]::Children, $dialogNamed) }
+        $null -ne $script:pickerDialog
+    } 15000
+    $dialogHwnd = if ($dialogFound) { [IntPtr] $pickerDialog.Current.NativeWindowHandle } else { [IntPtr]::Zero }
+    $checks['Enter on Browse shows the system dialog, owned by the probe'] = $dialogFound -and [FileDialogGateWin32]::GetWindow($dialogHwnd, 4) -eq $pickerHwnd # GW_OWNER
+    if ($dialogFound) {
+        $lines += Save-Screen ([PopupGateWin32]::Rect($dialogHwnd)) 'picker-dialog.png'
+        $pickerCancelId = [Windows.Automation.AndCondition]::new(
+            [Windows.Automation.PropertyCondition]::new($ae::ControlTypeProperty, $types::Button),
+            [Windows.Automation.PropertyCondition]::new($ae::AutomationIdProperty, '2'))
+        $pickerCancel = $null
+        $hasCancel = Wait-Until {
+            $script:pickerCancel = $pickerDialog.FindFirst([Windows.Automation.TreeScope]::Descendants, $pickerCancelId)
+            if ($null -eq $script:pickerCancel) { $script:pickerCancel = Find-First $pickerDialog $types::Button 'Cancel' }
+            $null -ne $script:pickerCancel
+        } 5000
+        if ($hasCancel) { (Get-Pattern $pickerCancel ([Windows.Automation.InvokePattern]::Pattern)).Invoke() }
+        $checks['Cancel in it leaves the page as it was'] = $hasCancel -and (Wait-Until {
+            $back = Find-First $root $types::Button $browseName
+            (Find-Elements $root $types::Group 'Choose a folder').Count -eq 0 -and $null -ne (Find-First $root $types::Text 'No folder chosen') -and $null -ne $back -and $back.Current.HasKeyboardFocus
+        } 5000)
+    }
+    Stop-PickerProbe
+    # --in-app: no system dialog, so the page opens the in-app picker (A3.8's fallback).
+    Start-PickerProbe @('--in-app')
     Send-Key 0x0D
     $sheet = $null
     $checks['Enter on Browse opens the Group "Choose a folder"'] = Wait-Until { $script:sheet = Find-First $root $types::Group 'Choose a folder'; $null -ne $script:sheet } 2000
@@ -2208,10 +2263,7 @@ try {
     $lines += "picker FAILED: $($_.Exception.Message)"
     $checks['client'] = $false
 } finally {
-    if ($null -ne $p -and -not $p.HasExited) {
-        if ($pickerHwnd -ne [IntPtr]::Zero) { [void][UiaGateWin32]::PostMessageW($pickerHwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) } # WM_CLOSE
-        if (-not $p.WaitForExit(5000)) { $p.Kill(); $lines += 'the picker probe did not close on WM_CLOSE'; $checks['closes'] = $false }
-    }
+    Stop-PickerProbe
     try { if (Test-Path $pickerTree) { [IO.Directory]::Delete($pickerTree, $true) } } catch { $lines += "cleanup of $pickerTree failed: $($_.Exception.Message)" }
 }
 foreach ($k in $checks.Keys) { $lines += '{0,-50} {1}' -f $k, (Format-Verdict $checks[$k]) }

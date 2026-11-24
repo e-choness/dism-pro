@@ -25,7 +25,9 @@
 //!   [`PickError::Unavailable`]: the window remembers it for the session, answering every later
 //!   request with it at once, and the model opens the in-app picker instead (A3.10 item 9: no
 //!   setting). [`PickError::Failed`] is a dialog that ran and gave no path, or a request it can't
-//!   take (a NUL in the title or a type).
+//!   take (a NUL in the title or a type). A window can be told so from the start
+//!   ([`WindowCx::without_file_dialog`](super::WindowCx::without_file_dialog)): the picker probe
+//!   and the fallback's tests take that same path on a Windows that has the dialog.
 //! - **Never inside an event.** `Show` runs a modal loop, and a handler must not pump messages.
 //!   So the handler asks with [`WindowCx::pick`](super::WindowCx::pick), the window runs the
 //!   dialog once the handler has returned and nothing of it is borrowed, and the answer comes
@@ -49,7 +51,9 @@ use std::{
 use dpro_core::OsError;
 use windows_sys::{
     Win32::{
-        Foundation::{E_UNEXPECTED, ERROR_CANCELLED, ERROR_INVALID_PARAMETER, HWND},
+        Foundation::{
+            E_UNEXPECTED, ERROR_CANCELLED, ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED, HWND,
+        },
         Storage::FileSystem::GetLogicalDriveStringsW,
         System::Com::{CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE},
         UI::Shell::{
@@ -624,6 +628,18 @@ impl Pending {
         true
     }
 
+    /// From now on every request is answered [`PickError::Unavailable`] at once, without COM, as
+    /// where Windows has no dialog ([`WindowCx::without_file_dialog`](super::WindowCx::without_file_dialog)).
+    /// A dialog already found unavailable keeps its own code.
+    pub(crate) fn refuse(&self) {
+        if self.unavailable.get().is_none() {
+            self.unavailable.set(Some(OsError::from_win32(
+                ERROR_NOT_SUPPORTED,
+                "WindowCx::without_file_dialog",
+            )));
+        }
+    }
+
     /// Once the handler has returned: runs the kept pick, modal to `owner`, and returns its
     /// answer; `None` if none was kept. Where the dialog was unavailable before, the answer is
     /// that, at once, without COM. Nothing is borrowed while the dialog's modal loop dispatches
@@ -894,6 +910,32 @@ pub(crate) mod tests {
         );
         assert!(pending.run(std::ptr::null_mut()).is_none(), "taken once");
         assert!(pending.request(&pick));
+    }
+
+    /// A window told it has no dialog answers every pick Unavailable at once, with its own code,
+    /// and no COM; one that found the dialog unavailable keeps that code.
+    #[test]
+    fn a_window_without_the_dialog_answers_unavailable_at_once() {
+        let pending = Pending::default();
+        pending.refuse();
+        let pick = Pick {
+            mode: PickMode::Folder,
+            title: "t",
+            start: None,
+        };
+        let refused = OsError::from_win32(ERROR_NOT_SUPPORTED, "WindowCx::without_file_dialog");
+        for _ in 0..2 {
+            assert!(pending.request(&pick));
+            assert_eq!(
+                pending.run(std::ptr::null_mut()),
+                Some(Err(PickError::Unavailable(refused)))
+            );
+        }
+        let found = OsError::from_win32(ERROR_CANCELLED, "test");
+        let pending = Pending::default();
+        pending.unavailable.set(Some(found));
+        pending.refuse();
+        assert_eq!(pending.unavailable.get(), Some(found));
     }
 
     #[test]

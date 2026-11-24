@@ -1,14 +1,17 @@
-//! TD-0009 A3.7's U19 and A3.9's G1 Picker check: slice 6e's in-app picker (`fixtures/picker.rs`)
+//! TD-0009 A3.7's U19 and A3.9's G1 Picker check: slice 6e's path picker (`fixtures/picker.rs`)
 //! in a real window, over a real folder, with dpro-win's window, GDI presenter and DirectWrite
-//! text. "Browse…" opens the picker on `--start`, listed by `dpro_app::picker::FsLister` on its
-//! own threads, each batch waking the window through its `Waker`; Enter on a folder's row opens
-//! it. It exits with 1 if DirectWrite is unavailable rather than measure a different program.
+//! text. "Browse…" asks for the system's file dialog on `--start`, as the app does; where there's
+//! none (or with `--in-app`, which makes the window answer as a `WinPE` without the dialog does)
+//! the in-app picker opens there instead, listed by `dpro_app::picker::FsLister` on its own
+//! threads, each batch waking the window through its `Waker`; Enter on a folder's row opens it.
+//! It exits with 1 if DirectWrite is unavailable rather than measure a different program.
 //!
-//! `picker [--start <folder>] [--size WxH] [--materials auto|solid|glass] [--ui-probe
+//! `picker [--start <folder>] [--in-app] [--size WxH] [--materials auto|solid|glass] [--ui-probe
 //! first-frame|idle --probe-out <file>]`: the folder Browse… opens (the temporary folder by
-//! default), then dpro-win's probe arguments, as the drawer probe takes them.
-//! `.github/scripts/ui-gates.ps1` drives it through UI Automation and the keyboard over a folder
-//! of 10,000 subfolders, and times Enter on it to the grid's row count (U19).
+//! default), whether the window has no system dialog, then dpro-win's probe arguments, as the
+//! drawer probe takes them. `.github/scripts/ui-gates.ps1` drives it through UI Automation and the
+//! keyboard: Browse… showing the system dialog, then, with `--in-app`, the in-app picker over a
+//! folder of 10,000 subfolders, timing Enter on it to the grid's row count (U19).
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
@@ -41,7 +44,7 @@ mod win {
     use dpro_ui::{
         Cx,
         materials::GlassPref,
-        platform::{self, DirectWrite, Host, Model, Waker},
+        platform::{self, DirectWrite, Host, Model, Waker, file_dialog},
     };
     use dpro_win::gui::{
         Compose, WindowOptions,
@@ -79,6 +82,11 @@ mod win {
             self.model.update(Msg::Listed);
             None
         }
+
+        /// Browse…'s request for the system dialog; its answer comes back as `Msg::Picked`.
+        fn picks(&mut self, f: impl FnMut(&file_dialog::Pick<'_>, fn(file_dialog::Picked) -> Msg)) {
+            self.model.picks(f);
+        }
     }
 
     /// `--start <folder>`, taken out of `args`; the rest are the probe's.
@@ -92,6 +100,12 @@ mod win {
         })
     }
 
+    /// `--in-app`, taken out of `args`.
+    fn in_app(args: &mut Vec<OsString>) -> bool {
+        let at = args.iter().position(|a| a == "--in-app");
+        at.map(|at| args.remove(at)).is_some()
+    }
+
     pub(crate) fn main() -> ExitCode {
         let mut args: Vec<OsString> = std::env::args_os().skip(1).collect();
         let start = match start(&mut args) {
@@ -99,6 +113,7 @@ mod win {
             Some(Err(())) => return ExitCode::from(2),
             None => std::env::temp_dir(),
         };
+        let in_app = in_app(&mut args);
         let Ok(args) = Args::parse(args) else {
             return ExitCode::from(2);
         };
@@ -129,7 +144,10 @@ mod win {
             model: picker::Model::with_lister(lister, start),
             waker,
         };
-        let host = Host::new(page, Box::new(text), glass);
+        let mut host = Host::new(page, Box::new(text), glass);
+        if in_app {
+            host = host.without_file_dialog();
+        }
         match platform::run(&options, host) {
             Ok(()) => ExitCode::SUCCESS,
             Err(_) => ExitCode::FAILURE,

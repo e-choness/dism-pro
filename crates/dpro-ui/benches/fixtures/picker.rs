@@ -1,16 +1,22 @@
-//! A synthetic page with slice 6e's in-app path picker (TD-0009 A3.5 (12), A3.7 U19, A3.9), for
-//! its benches, tests and G1's probe.
+//! A synthetic page with slice 6e's path picker (TD-0009 A3.5 (12), A3.7 U19, A3.9), for its
+//! benches, tests and G1's probe.
 //!
-//! The page: a level-1 heading, "Browse…" (which opens the picker) and the path chosen. The picker
-//! is a sheet over the page, which leaves the window while it's open, listing [`start`]: a folder
-//! of [`ENTRIES`] subfolders, through a scripted [`Lister`] whose batches come one per wake
-//! ([`Msg::Listed`]), as the platform's waker brings them. A folder ending in `missing` isn't
-//! there, one ending in `notes.txt` isn't a folder, and a lister set to hang never answers. The
-//! picker probe (`examples/picker.rs`) hosts the same page over the real lister and a real folder
-//! ([`Model::with_lister`]).
+//! The page: a level-1 heading, "Browse…" and the path chosen. Browse… asks for the system's file
+//! dialog ([`Msg::Browse`]; the platform's host takes the request through [`Model::picks`] and the
+//! window shows the dialog once the event is done). Its answer ([`Msg::Picked`]) chooses a path,
+//! or changes nothing if the user cancelled; where there's no dialog (`Unavailable`, which the
+//! window remembers for the session) or it failed, the in-app picker opens ([`Msg::Open`]).
 //!
-//! [`Run`] hosts it as the platform does: a `Ui`, a `FakeText`, the clock, and, when asked,
-//! painting at a scale and an assistive technology listening.
+//! The in-app picker is a sheet over the page, which leaves the window while it's open, listing
+//! [`start`]: a folder of [`ENTRIES`] subfolders, through a scripted [`Lister`] whose batches come
+//! one per wake ([`Msg::Listed`]), as the platform's waker brings them. A folder ending in
+//! `missing` isn't there, one ending in `notes.txt` isn't a folder, and a lister set to hang never
+//! answers. The picker probe (`examples/picker.rs`) hosts the same page over the real lister and a
+//! real folder ([`Model::with_lister`]).
+//!
+//! [`Run`] hosts it as the platform does: a `Ui`, a `FakeText`, the clock, the system dialog's
+//! answer ([`Run::dialog`], `Unavailable` unless a test says otherwise, as in `WinPE`), and, when
+//! asked, painting at a scale and an assistive technology listening.
 
 #![allow(
     dead_code,
@@ -22,9 +28,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use dpro_app::picker::{
-    Activated, BATCH, Entry, FolderModel, FsLister, ListBatch, ListError, ListRequest, Lister,
-    Listing, Mode, Refused,
+use dpro_app::{
+    display::push_display,
+    picker::{
+        Activated, BATCH, Entry, FolderModel, FsLister, ListBatch, ListError, ListRequest, Lister,
+        Listing, Mode, Refused,
+    },
 };
 use dpro_ui::{
     Align, Canvas, Cells, Column, ColumnId, Cx, Element, FakeText, Input, Insets, Key, KeyCode,
@@ -123,7 +132,11 @@ pub(crate) fn entry_name(i: usize) -> String {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Msg {
-    /// Browse…: the picker opens on the model's start folder ([`start`] for the scripted one).
+    /// Browse…: ask for the system's file dialog, on the model's start folder.
+    Browse,
+    /// The system dialog's answer.
+    Picked(Answer),
+    /// The in-app picker opens on the model's start folder ([`start`] for the scripted one).
     Open,
     /// Close, Cancel and Esc.
     Close,
@@ -139,6 +152,42 @@ pub(crate) enum Msg {
     Select,
     Details,
     Copy,
+}
+
+/// Where Browse…'s request for the system dialog is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Ask {
+    /// Nothing asked, or the host took it.
+    Idle,
+    /// Browse… asked; the host takes it after the event (`Model::picks`).
+    Asked,
+}
+
+/// The system file dialog's answer, as the page hears it: the platform's `file_dialog::Picked`
+/// on any platform, so T1 and the benches run the page too.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Answer {
+    Path(PathBuf),
+    /// The user closed the dialog without a pick.
+    Cancelled,
+    /// There's no dialog here (`WinPE`), or this window has none: the window answers so at once
+    /// from now on.
+    Unavailable,
+    /// The dialog ran and gave no path.
+    Failed,
+}
+
+/// The platform's answer as the page's message: what the host turns the window's
+/// `Handler::picked` into.
+#[cfg(windows)]
+pub(crate) fn answer(picked: dpro_ui::platform::file_dialog::Picked) -> Msg {
+    use dpro_ui::platform::file_dialog::PickError;
+    Msg::Picked(match picked {
+        Ok(Some(path)) => Answer::Path(path),
+        Ok(None) => Answer::Cancelled,
+        Err(PickError::Unavailable(_)) => Answer::Unavailable,
+        Err(PickError::Failed(_)) => Answer::Failed,
+    })
 }
 
 /// A lister the page runs: what a wake tells it before the page polls.
@@ -254,6 +303,8 @@ pub(crate) struct Model<L = Scripted> {
     pub(crate) lister: L,
     /// The folder Browse… opens.
     start: PathBuf,
+    /// Browse…'s request for the system dialog, until the host takes it.
+    ask: Ask,
     pub(crate) chosen: Option<PathBuf>,
     /// The chosen path's text, for the page.
     chosen_text: String,
@@ -285,6 +336,7 @@ impl<L: Source> Model<L> {
             folder: FolderModel::new(Mode::Folder),
             lister,
             start,
+            ask: Ask::Idle,
             chosen: None,
             chosen_text: String::new(),
             drives_open: false,
@@ -297,13 +349,15 @@ impl<L: Source> Model<L> {
 
     pub(crate) fn update(&mut self, msg: Msg) {
         match &msg {
-            Msg::Open => {
-                self.open = true;
-                self.refused = None;
-                if let Ok(request) = self.folder.open(&self.start) {
-                    self.lister.start(request);
-                }
-            }
+            Msg::Browse => self.ask = Ask::Asked,
+            Msg::Picked(answer) => match answer {
+                Answer::Path(path) => self.choose(path.clone()),
+                Answer::Cancelled => {}
+                // The in-app picker is always there (A3.8): where there's no dialog, and where
+                // it failed (not remembered, so the next Browse… tries it again).
+                Answer::Unavailable | Answer::Failed => self.open_in_app(),
+            },
+            Msg::Open => self.open_in_app(),
             Msg::Close => {
                 self.open = false;
                 self.drives_open = false;
@@ -365,10 +419,47 @@ impl<L: Source> Model<L> {
         self.last = Some(msg);
     }
 
+    /// The in-app picker, open on the start folder.
+    fn open_in_app(&mut self) {
+        self.open = true;
+        self.refused = None;
+        if let Ok(request) = self.folder.open(&self.start) {
+            self.lister.start(request);
+        }
+    }
+
     fn choose(&mut self, path: PathBuf) {
-        self.chosen_text = path.to_string_lossy().into_owned();
+        // Shown as untrusted text is (A3.8): a name can't disguise itself.
+        self.chosen_text.clear();
+        push_display(&path.to_string_lossy(), &mut self.chosen_text);
         self.chosen = Some(path);
         self.open = false;
+    }
+
+    /// Whether Browse… asked for the system dialog since the last call: the host's to show.
+    pub(crate) fn take_ask(&mut self) -> bool {
+        std::mem::replace(&mut self.ask, Ask::Idle) == Ask::Asked
+    }
+
+    /// The pick Browse… asked for, if any, handed to `f` with the message its answer comes back
+    /// as: the platform's `Model::picks`.
+    #[cfg(windows)]
+    pub(crate) fn picks(
+        &mut self,
+        mut f: impl FnMut(
+            &dpro_ui::platform::file_dialog::Pick<'_>,
+            fn(dpro_ui::platform::file_dialog::Picked) -> Msg,
+        ),
+    ) {
+        use dpro_ui::platform::file_dialog::{Pick, PickMode};
+        if self.take_ask() {
+            let pick = Pick {
+                mode: PickMode::Folder,
+                title: TITLE,
+                start: Some(&self.start),
+            };
+            f(&pick, answer);
+        }
     }
 }
 
@@ -418,7 +509,7 @@ fn page<L>(m: &Model<L>, cx: &mut Cx<'_, Msg>) {
                     .heading(1),
             );
             cx.add(
-                Element::button(OPEN, BROWSE, Msg::Open)
+                Element::button(OPEN, BROWSE, Msg::Browse)
                     .style(Style {
                         min: Size { w: 0.0, h: 32.0 },
                         padding: Insets::xy(SPACE[3], 0.0),
@@ -578,6 +669,11 @@ pub(crate) struct Run {
     pub(crate) take_a11y: bool,
     /// Frames run since the run started.
     pub(crate) frames: u64,
+    /// What the system dialog answers each pick the page asks for: `Unavailable` unless a test
+    /// says otherwise, as where Windows has none (the window answers that at once, every time).
+    pub(crate) dialog: Answer,
+    /// The picks the page asked for.
+    pub(crate) asked: u32,
 }
 
 impl Run {
@@ -611,6 +707,8 @@ impl Run {
             now: 0,
             take_a11y: false,
             frames: 0,
+            dialog: Answer::Unavailable,
+            asked: 0,
         };
         run.ui.set_active(true);
         run.frame();
@@ -618,8 +716,19 @@ impl Run {
     }
 
     /// One event through the whole pipeline: dispatch, update, view, reconcile, layout (again if
-    /// the table asks, as the platform does), damage, and raster when painted.
+    /// the table asks, as the platform does), damage, and raster when painted. Then, as the
+    /// platform's window does once the event is done, the pick the page asked for: its answer
+    /// ([`Run::dialog`]) as a message, and a frame.
     pub(crate) fn step(&mut self, step: Step) {
+        self.event(step);
+        if self.model.take_ask() {
+            self.asked += 1;
+            self.model.update(Msg::Picked(self.dialog.clone()));
+            self.frame();
+        }
+    }
+
+    fn event(&mut self, step: Step) {
         match step {
             Step::Input(input) => {
                 self.ui.dispatch(input, &mut self.msgs);
