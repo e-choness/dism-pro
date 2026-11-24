@@ -166,11 +166,18 @@ pub enum Tone {
     /// [`Surface`](Self::Surface) in light and dark, `Highlight` in high contrast, so the pick
     /// shows by more than its weight.
     Segment,
+    // Slice 6d: the drawer's callout (A3.5 (6), artboard 02).
+    /// A callout's tint: the permanent note in the Preview drawer.
+    CalloutFill,
+    /// Its border.
+    CalloutBorder,
+    /// Its title and text, on [`CalloutFill`](Self::CalloutFill).
+    CalloutText,
 }
 
 impl Tone {
     /// Every tone, in declaration order (the theme's table order).
-    pub const ALL: [Self; 39] = [
+    pub const ALL: [Self; 42] = [
         Self::App,
         Self::Surface,
         Self::Subtle,
@@ -210,6 +217,9 @@ impl Tone {
         Self::TextDisabled,
         Self::TransientBorder,
         Self::Segment,
+        Self::CalloutFill,
+        Self::CalloutBorder,
+        Self::CalloutText,
     ];
 
     /// A fill high contrast shows as `Highlight`: accent, danger, the selection, the batch bar's
@@ -321,6 +331,10 @@ impl Theme {
                 Color::hex(0x5A_6270),
                 Color::hex(0xDD_E1E8),
                 surface,
+                // The callout's fill, border and ink (A3.5 (6), from artboard 02).
+                Color::hex(0xFE_F4EE),
+                Color::hex(0xF6_CDB5),
+                Color::hex(0x7C_2D12),
             ],
             sys: None,
         }
@@ -381,6 +395,11 @@ impl Theme {
                 Color::hex(0x9A_A3B2),
                 Color::hex(0x2A_2F3A),
                 surface,
+                // The callout's, computed as the badges' are (decision #45): light orange text
+                // on a dark orange tint, in a darker orange border.
+                Color::hex(0x2A_1D17),
+                Color::hex(0x6B_3A22),
+                Color::hex(0xFD_BA8C),
             ],
             sys: None,
         }
@@ -446,6 +465,10 @@ impl Theme {
                 sys.gray_text,
                 sys.window_text,
                 sys.highlight,
+                // The callout: no fill, window text and border.
+                sys.window,
+                sys.window_text,
+                sys.window_text,
             ],
             sys: Some(sys),
         }
@@ -815,6 +838,46 @@ pub mod tokens {
         /// A window narrower than this puts every row's control under its text.
         pub const NARROW: f32 = 600.0;
     }
+
+    // Slice 6d: the drawer frame and slides (TD-0009 A3.5 (6), addition 11).
+
+    /// The Preview drawer (A3.5 (6)).
+    pub mod drawer {
+        /// Its width as a pane beside the page.
+        pub const WIDTH: f32 = 460.0;
+        /// A sheet's narrowest: it covers the page, and never gets narrower than this.
+        pub const MIN_W: f32 = 300.0;
+        /// The page's narrowest beside a pane (artboard 02's content basis): where it would be
+        /// narrower, the drawer is a sheet over it.
+        pub const PAGE_MIN: f32 = 480.0;
+        /// The header's padding: 24 above, 24 at the sides, 16 below. The body and footer share
+        /// the sides.
+        pub const PAD_X: f32 = 24.0;
+        pub const HEADER_TOP: f32 = 24.0;
+        pub const HEADER_BOTTOM: f32 = 16.0;
+        /// The footer's padding above and below: 16 × 24.
+        pub const FOOTER_PAD_Y: f32 = 16.0;
+        /// The footer's buttons' least height; taller when the text size needs it.
+        pub const BUTTON_H: f32 = 40.0;
+        /// Close's square, in the header's top corner.
+        pub const CLOSE: f32 = 32.0;
+        /// Between the body's sections, and under the last.
+        pub const GAP: f32 = 16.0;
+        /// Inside a callout's edge.
+        pub const CALLOUT_PAD: f32 = 14.0;
+        /// Inside a code block's edge, beside its text.
+        pub const CODE_PAD: f32 = 12.0;
+        /// The code block's Copy button's least height.
+        pub const COPY_H: f32 = 32.0;
+    }
+
+    /// Slides (A3.5 addition 11).
+    pub mod slide {
+        /// The platform's frame period (dpro-win's frame timer): a slide's clock starts one
+        /// frame before its first tick, when the frame that showed it was painted, so a slide of
+        /// `drawer_ms` takes ⌈`drawer_ms` / `FRAME_MS`⌉ frames (U16).
+        pub const FRAME_MS: u16 = 16;
+    }
 }
 
 #[cfg(test)]
@@ -937,12 +1000,18 @@ mod tests {
             (Text, Tone::InfoFill),
             (Tone::Danger, Tone::ErrorFill),
             (Tone::InverseText, Tone::InverseFill),
+            (Tone::CalloutText, Tone::CalloutFill),
         ] {
             assert_eq!(t.color(fill), sys.window, "{fill:?}");
             assert_eq!(t.ink(text, fill), sys.window_text, "{text:?} on {fill:?}");
             assert_eq!(t.stroke(fill, true), sys.window_text, "{fill:?}'s border");
         }
-        for border in [Tone::DangerBorder, Tone::WarnBorder, Tone::InfoBorder] {
+        for border in [
+            Tone::DangerBorder,
+            Tone::WarnBorder,
+            Tone::InfoBorder,
+            Tone::CalloutBorder,
+        ] {
             assert_eq!(t.color(border), sys.window_text, "{border:?}");
         }
         assert_eq!(t.color(Tone::InverseAccent), sys.highlight);
@@ -1183,6 +1252,8 @@ mod tests {
         ] {
             pairs.push((fg, vec![bg]));
         }
+        // The drawer's callout (A3.5 (6), slice 6d): its title and text on its tint.
+        pairs.push((Tone::CalloutText, vec![Tone::CalloutFill]));
         pairs
     }
 
@@ -1355,6 +1426,17 @@ mod tests {
         // The badge step: 12 px semibold.
         assert_eq!(tokens::font::BADGE.to_bits(), 12.0_f32.to_bits());
         assert_eq!(tokens::font::BADGE_WEIGHT, 600);
+    }
+
+    /// The drawer's callout (A3.5 (6), slice 6d): artboard 02's light values. Dark's are
+    /// computed, and the contrast tests check both.
+    #[test]
+    fn the_callouts_tokens_are_artboard_02s() {
+        let tones = [Tone::CalloutFill, Tone::CalloutBorder, Tone::CalloutText];
+        assert_eq!(
+            tones.map(|t| Theme::LIGHT.color(t)),
+            [0xFE_F4EE, 0xF6_CDB5, 0x7C_2D12].map(Color::hex)
+        );
     }
 
     /// ADR-0007: glass changes only the layers; everything opaque, and high contrast, stays.

@@ -40,6 +40,13 @@ use crate::{
 };
 
 impl<M> Ui<M> {
+    /// Whether the next [`layout`](Self::layout) has work to do: something changed in a way
+    /// layout sees since the last one. An animation frame (a hover fade, a slide) has none.
+    #[must_use]
+    pub fn needs_layout(&self) -> bool {
+        self.nodes[ROOT as usize].dirty
+    }
+
     /// Lays out what changed since the last layout, damaging what moved.
     pub fn layout(&mut self, text: &mut dyn TextSystem) {
         let window = Rect::new(0.0, 0.0, self.viewport.w, self.viewport.h);

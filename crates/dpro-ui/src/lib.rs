@@ -75,6 +75,10 @@ mod tree;
 mod ui;
 mod values;
 
+// Slice 6d: scopes and slides (TD-0009 A3.5 additions 10, 11).
+mod scope;
+mod slide;
+
 pub use accesskit;
 pub use build::Cx;
 pub use canvas::Canvas;
@@ -95,3 +99,5 @@ pub use theme::{Color, Scheme, SysColors, Theme, Tone, tokens};
 pub use tree::{Element, Group, Key, Landmark, Live, Look, NodeId, NodeInfo, Radius, Role};
 pub use ui::{MAX_TEXT_SCALE, Motion, Ui};
 pub use values::{Formats, InvariantFormats, SizeUnits, format_size};
+
+pub use slide::Edge;

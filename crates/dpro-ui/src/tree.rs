@@ -388,6 +388,10 @@ pub(crate) enum Extra<'s, M> {
     /// A two-line table cell's first line's length in its text (TD-0009 A3.5 (10), slice 6b): its
     /// node's value ([`lines_value`](crate::table::lines_value)).
     Lines(u32),
+    /// A [scope](Element::scope) and what Esc sends to it (A3.5 addition 10, slice 6d).
+    Scope {
+        on_escape: Option<fn() -> M>,
+    },
 }
 
 /// A check item's value ([`Element::menu_check`]): its node's `value`, as a column header's sort

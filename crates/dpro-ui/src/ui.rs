@@ -150,6 +150,11 @@ pub struct Ui<M> {
     pub(crate) drag_distance: f32,
     /// Messages layout made (a column's fit), for the host to take ([`Ui::take_messages`]).
     pub(crate) queued: Vec<M>,
+    // Slice 6d: the slides running (`slide.rs`, A3.5 addition 11), the scopes open, and what a
+    // scope that closed gives focus back to (`scope.rs`, addition 10).
+    pub(crate) slides: Vec<crate::slide::Slide>,
+    pub(crate) scopes: Vec<crate::scope::ScopeSlot<M>>,
+    pub(crate) scope_closed: crate::scope::Closed,
 }
 
 /// A node's tooltip, a dropdown's accessible name and step, and a field's step: in a side table,
@@ -260,6 +265,9 @@ impl<M> Ui<M> {
             divider: None,
             drag_distance: DRAG_DISTANCE,
             queued: Vec::new(),
+            slides: Vec::new(),
+            scopes: Vec::new(),
+            scope_closed: crate::scope::Closed::default(),
         };
         ui.damage_all();
         ui
@@ -516,9 +524,14 @@ impl<M> Ui<M> {
         // The stops it takes with it may have been its viewport's only ones.
         self.stop_changed(child);
         let parent = self.nodes[child as usize].parent;
+        let focus = self.focus;
         self.unlink(child);
         self.free_subtree(child);
         self.forget_freed();
+        // A scope that went with it gives focus back, if focus went too (A3.5 addition 10).
+        if self.scope_closed.freed {
+            self.scope_removed(parent, focus);
+        }
         self.mark_dirty(parent);
         self.a11y_touch(parent);
     }
@@ -545,6 +558,7 @@ impl<M> Ui<M> {
             self.anchor_node = NIL;
         }
         self.tip_forget_freed();
+        self.forget_freed_slides();
     }
 
     fn free_subtree(&mut self, i: u32) {
@@ -588,6 +602,9 @@ impl<M> Ui<M> {
             if scroll != NIL {
                 self.release_scroll(scroll);
             }
+        }
+        if !self.scopes.is_empty() {
+            self.forget_scope(i);
         }
         let n = &mut self.nodes[i as usize];
         n.live = false;

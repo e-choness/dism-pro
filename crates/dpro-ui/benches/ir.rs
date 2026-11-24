@@ -36,10 +36,16 @@
 //!   row, which passes its next group's header and scrolls (`event.row_down`), and a far row
 //!   realized for a client by its grid row, headers counted, with its update made
 //!   (`event.realize`).
+//! - `composite_drawer` (TD-0009 A3.7's U16, slice 6d): the drawer page of `fixtures/drawer.rs`,
+//!   warmed by its session. "Review changes" opening the drawer as a pane (`drawer_open`), and
+//!   the 6th frame of its slide (`drawer_frame`), each at layout and damage and painted.
 //!
 //! C1: `docker compose run --rm bench-gate`.
 
 #![allow(missing_docs)]
+
+#[path = "fixtures/drawer.rs"]
+mod drawer_page;
 
 #[path = "fixtures/composites.rs"]
 mod composites;
@@ -613,8 +619,67 @@ mod grouped_rows {
 
 use grouped_rows::grouped;
 
+// Slice 6d: the drawer frame (TD-0009 A3.5 (6), A3.7's U16). `fixtures/drawer.rs`'s page, warmed
+// by its session. A3.7 names these `composite::drawer_open` and `composite::drawer_frame`; they're
+// a group of their own, so the slices that add composites alongside never edit the same lines.
+
+/// The drawer page after its session, settled and closed, framed at layout and damage (painted
+/// too, if `painted`); and the step that opens the drawer.
+fn drawer_closed(painted: bool) -> (Box<drawer_page::Run>, drawer_page::Step) {
+    let model = drawer_page::Model::new();
+    let run = if painted {
+        drawer_page::Run::painted(model, Theme::LIGHT)
+    } else {
+        drawer_page::Run::with(model)
+    };
+    (
+        Box::new(run.warmed()),
+        drawer_page::Step::Update(drawer_page::Msg::Open),
+    )
+}
+
+/// The drawer just opened, 5 frames into its slide; and the 6th frame.
+fn drawer_sliding(painted: bool) -> (Box<drawer_page::Run>, drawer_page::Step) {
+    let (mut run, open) = drawer_closed(painted);
+    run.step(open);
+    for _ in 0..5 {
+        run.step(drawer_page::Step::Tick(drawer_page::FRAME_MS));
+    }
+    (run, drawer_page::Step::Tick(drawer_page::FRAME_MS))
+}
+
+// "Review changes" opens the drawer as a pane: the page takes its new width, and the drawer is
+// built and laid out once, at its place.
+#[library_benchmark]
+#[bench::pane(args = (false), setup = drawer_closed)]
+#[bench::painted(args = (true), setup = drawer_closed)]
+fn drawer_open(
+    (mut run, step): (Box<drawer_page::Run>, drawer_page::Step),
+) -> Box<drawer_page::Run> {
+    run.step(black_box(step));
+    run
+}
+
+// A frame of the slide: the paint moves and nothing is laid out. The frame damages where the
+// drawer was and where it is (U16).
+#[library_benchmark]
+#[bench::mid_slide(args = (false), setup = drawer_sliding)]
+#[bench::painted(args = (true), setup = drawer_sliding)]
+fn drawer_frame(
+    (mut run, step): (Box<drawer_page::Run>, drawer_page::Step),
+) -> Box<drawer_page::Run> {
+    run.step(black_box(step));
+    run
+}
+
+library_benchmark_group!(
+    name = composite_drawer,
+    benchmarks = [drawer_open, drawer_frame]
+);
+
 main!(
     // Instruction counts only: the cache simulation would slow every run for metrics nothing gates.
     config = LibraryBenchmarkConfig::default().tool(Callgrind::with_args(["--cache-sim=no"]));
-    library_benchmark_groups = interact, paint, popup, table, a11y, composite, grouped
+    library_benchmark_groups = interact, paint, popup, table, a11y, composite, grouped,
+        composite_drawer
 );

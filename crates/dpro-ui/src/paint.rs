@@ -106,11 +106,30 @@ impl<M> Ui<M> {
         };
         let mut c = self.nodes[ROOT as usize].first;
         while c != NIL {
-            self.paint_node(c, region, Tone::App, &mut p);
+            self.paint_child(c, region, Tone::App, &mut p);
             c = self.nodes[c as usize].next;
         }
         let all = p.canvas.bounds();
         p.canvas.set_clip(all);
+    }
+
+    /// Paints child `c` and its subtree within `clip`: moved by its slide while it slides in
+    /// (`slide.rs`, TD-0009 A3.5 addition 11, slice 6d).
+    fn paint_child(&self, c: u32, clip: RectPx, under: Tone, p: &mut Painter<'_, '_>) {
+        let dx = if self.slides.is_empty() {
+            0
+        } else {
+            self.slide_offset(c)
+        };
+        if dx == 0 {
+            self.paint_node(c, clip, under, p);
+        } else {
+            let origin = p.canvas.origin();
+            p.canvas
+                .set_origin([origin[0].saturating_add(dx), origin[1]]);
+            self.paint_node(c, clip, under, p);
+            p.canvas.set_origin(origin);
+        }
     }
 
     /// Paints node `i` and its subtree within `clip`, over the fill `under` (its nearest
@@ -275,7 +294,7 @@ impl<M> Ui<M> {
         }
         let mut child = node.first;
         while child != NIL {
-            self.paint_node(child, visible, under, p);
+            self.paint_child(child, visible, under, p);
             child = self.nodes[child as usize].next;
         }
         if node.scroll != NIL {

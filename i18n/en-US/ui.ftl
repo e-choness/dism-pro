@@ -79,3 +79,9 @@ ui-batch-hidden = { $hidden ->
 }
 ui-batch-clear = Clear selection
 ui-batch-region = Selection actions
+
+## The Preview drawer's frame (A3.5 (6)), slice 6d.
+
+ui-drawer-close = Close
+ui-drawer-cancel = Cancel
+ui-code-copy = Copy command

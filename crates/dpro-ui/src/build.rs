@@ -39,6 +39,8 @@ impl<M> Ui<M> {
         };
         view(&mut cx);
         cx.finish();
+        // Focus a scope took with it comes back (A3.5 addition 10, slice 6d).
+        self.give_focus_back();
     }
 }
 
@@ -145,6 +147,16 @@ impl<M> Cx<'_, M> {
             self.ui.remove(c);
             c = next;
         }
+    }
+}
+
+/// Slice 6d: the window's size for views (TD-0009 A3.5 addition 14).
+impl<M> Cx<'_, M> {
+    /// The window's logical size from the last [`Ui::set_viewport`], so a view can choose its
+    /// layout by width: the rail's, a drawer's pane or sheet, a settings row's line.
+    #[must_use]
+    pub fn viewport(&self) -> crate::Size {
+        self.ui.viewport()
     }
 }
 
@@ -328,10 +340,16 @@ impl<M> Ui<M> {
             Extra::None | Extra::Field { .. } | Extra::Combo { .. } | Extra::Live(_) => {
                 (None, 0.0, None)
             }
+            // A scope's escape (addition 10) is read below.
+            Extra::Scope { .. } => (None, 0.0, None),
         };
         let politeness = match extra {
             Extra::Live(live) => live,
             _ => Live::Off,
+        };
+        let (scope, on_escape) = match extra {
+            Extra::Scope { on_escape } => (true, on_escape),
+            _ => (false, None),
         };
         let n = &mut self.nodes[i as usize];
         // The group sets a client's role (a tab list, a radio group, a list).
@@ -345,6 +363,7 @@ impl<M> Ui<M> {
         n.politeness = politeness;
         n.special = group.is_some() || invoke.is_some() || value.to_bits() != 0;
         n.special |= politeness != Live::Off;
+        n.special |= scope;
         // A menu item became or stopped being a check item: every label in its menu moves past
         // the checks' gutter or back, so the menu is laid out again. A two-line cell whose lines
         // split elsewhere (slice 6b) repaints, as its text would.
@@ -353,6 +372,9 @@ impl<M> Ui<M> {
         let represented = revalued && n.role == Role::Container;
         if n.hold || invoke.is_some() {
             self.update_hold(i, invoke);
+        }
+        if scope || !self.scopes.is_empty() {
+            self.update_scope(i, scope, on_escape);
         }
         if rechecked {
             self.mark_dirty(i);
