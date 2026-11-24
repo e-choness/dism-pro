@@ -680,6 +680,9 @@ struct State {
     life: Rc<Cell<Life>>,
     /// The pick the handler asked for, run once it returns (`file_dialog.rs`, slice 6e).
     picks: Pending,
+    /// Dispatches past their handler's return that haven't finished: a dispatch nested in one
+    /// (a message its popups or UI Automation sent) leaves the pick to the outermost.
+    finishing: Cell<u32>,
     /// What this window's [`Waker`]s share (`wake.rs`, slice 6e).
     wakes: Arc<Wakes>,
 }
@@ -812,6 +815,7 @@ impl State {
             depth: Cell::new(0),
             life,
             picks: Pending::default(),
+            finishing: Cell::new(0),
             wakes: Arc::new(Wakes::default()),
         }
     }
@@ -1235,6 +1239,9 @@ impl State {
             };
             f(&mut **handler, &mut cx)
         };
+        // Showing a popup activates it, and that reaches the handler in a dispatch nested here,
+        // which mustn't start the dialog's modal loop in the middle of this one's work.
+        self.finishing.set(self.finishing.get() + 1);
         self.apply_popups(hwnd);
         self.a11y_sync();
         self.a11y_notify();
@@ -1244,17 +1251,19 @@ impl State {
             // SAFETY: hwnd is live. The state outlives this call (with_state's depth count).
             unsafe { DestroyWindow(hwnd) };
         }
+        self.finishing.set(self.finishing.get() - 1);
         self.run_pick(hwnd);
         Some(r)
     }
 
     /// The pick the handler asked for, now that it has returned and nothing of it is borrowed
     /// (TD-0009 A3.5 (12)): the dialog's modal loop dispatches this window's messages meanwhile,
-    /// and its answer goes to [`Handler::picked`]. Nothing once the window is going, and no
-    /// answer if it went while the dialog was up (a close that the modal loop dispatched, which
-    /// takes the dialog with it as an owned window).
+    /// and its answer goes to [`Handler::picked`]. Only from the outermost dispatch, once its
+    /// popups and UI Automation are served. Nothing once the window is going, and no answer if it
+    /// went while the dialog was up (a close that the modal loop dispatched, which takes the
+    /// dialog with it as an owned window).
     fn run_pick(&self, hwnd: HWND) {
-        if self.kind != Kind::Main || self.life.get() != Life::Alive {
+        if self.kind != Kind::Main || self.life.get() != Life::Alive || self.finishing.get() != 0 {
             return;
         }
         if let Some(picked) = self.picks.run(hwnd)
@@ -2753,14 +2762,27 @@ mod tests {
 
     impl Handler for Picker {
         fn event(&mut self, event: Event, cx: &mut WindowCx<'_>) -> bool {
+            if cx.surface() != Surface::Main {
+                self.log.borrow_mut().push("popup".into());
+                return true;
+            }
             self.handling = true;
             match event {
-                Event::Char(c @ ('p' | 'w' | 'n')) => {
+                Event::Char(c @ ('p' | 'w' | 'n' | 'm')) => {
                     if c == 'w' {
                         cx.wake_after(Some(10));
                     }
-                    if c == 'n' {
+                    if matches!(c, 'n' | 'm') {
                         cx.without_file_dialog();
+                    }
+                    if c == 'm' {
+                        let at = RectPx {
+                            x0: 100,
+                            y0: 100,
+                            x1: 300,
+                            y1: 260,
+                        };
+                        cx.show_popup(PopupKind::Menu, at, Backdrop::None);
                     }
                     let asked = cx.pick(&Pick {
                         mode: crate::gui::file_dialog::PickMode::Folder,
@@ -2910,6 +2932,34 @@ mod tests {
                 "picked unavailable after"
             ]
         );
+        drop(window);
+        pump_until(|| true);
+    }
+
+    /// A popup shown by the event that asked for a pick is made, sized and activated as the
+    /// window serves the event, which reaches the handler in dispatches nested in its own: the
+    /// pick waits for the outermost to finish, so its modal loop never starts in the middle of
+    /// that, and the answer comes after every one of them.
+    #[test]
+    fn a_pick_waits_for_the_popups_its_event_showed() {
+        let (window, log) = open_picker();
+        // SAFETY: a message sent to this test's live window, on its thread.
+        unsafe { SendMessageW(window.hwnd, WM_CHAR, usize::from(b'm'), 0) };
+        let log = log.borrow().clone();
+        assert!(
+            log.iter().filter(|e| *e == "popup").count() >= 2,
+            "the menu heard its presenter and its size: {log:?}"
+        );
+        assert!(
+            log.starts_with(&["asked true".to_owned(), "again false".to_owned()]),
+            "{log:?}"
+        );
+        assert_eq!(
+            log.last().map(String::as_str),
+            Some("picked unavailable after"),
+            "{log:?}"
+        );
+        assert_eq!(log.iter().filter(|e| e.starts_with("picked")).count(), 1);
         drop(window);
         pump_until(|| true);
     }
