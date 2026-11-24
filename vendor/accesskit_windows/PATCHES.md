@@ -199,8 +199,51 @@ amendment).
       it are raised; an empty queue counts nothing; and the real raise of event id 0, an unknown
       event, doesn't panic. The T2 image's Wine accepts that raise (measured: 0 refused), so the
       count's test refuses through `raise_with`. Whether Windows refuses it is to verify in T3.
-      Items 12–13's tests join the file.
+      Items 12 and 13's tests join the file.
     - **`src/tests/mod.rs`:** the `mod landmarks;` and `mod menu_events;` lines.
 
-**Planned** (TD-0009 A4.5): 12, MenuOpened and MenuClosed, and 13, ToolTipOpened and
-ToolTipClosed (slice 7c).
+12. **MenuOpened and MenuClosed** (TD-0009 A4.5, slice 7c). UI Automation's Menu control type
+    must raise them, and upstream raises neither (#20). Narrator says a context menu opened and
+    closed from them.
+    - **`src/adapter.rs`:**
+      - `open_close_events` gives a node's pair: MenuOpened and MenuClosed for `Role::Menu`, the
+        only role that maps to the Menu control type. It gives none for a node the filter leaves
+        out, or for any other role.
+      - **Opened:** in `node_added`, on the node's platform node. Also in `node_updated`, for a
+        menu a client starts seeing (shown again, or its role changed), as upstream does for
+        dialogs.
+      - **Closed:** in `node_removed`, on the platform node a client may hold, taken before
+        `remove_platform_node`. Also in `node_updated`, for a menu a client stops seeing
+        (hidden), on its platform node, so every opened has its closed.
+      - `queue_closed` puts each closed event ahead of the update's other events. The tree
+        reports additions first, so without it a popup replaced in one update would open before
+        the old one closes.
+      - **The placeholder's whole tree** (`update_if_active`, a client asked while the app was
+        busy): every menu in it a client sees is opened, in tree order, before the focus event.
+        A tree that activates the adapter from inactive raises nothing, as upstream raises no
+        focus there: it's the answer to the client's own first ask (`WM_GETOBJECT`), which reads
+        the menu anyway.
+    - **Limit:** like upstream's dialogs, the filter is asked of the node alone. A menu under a
+      hidden node would raise the pair as it's added and removed. DISM Pro's menus are their
+      popup window's only child, never under a hidden node.
+    - **The toolkit's side:** dpro-ui keeps a popup's window for its next open (TD-0009 A1.5),
+      but builds a hidden popup's tree empty, so each open is new nodes: a removal and an
+      addition here, and so the pair at every open.
+    - **`src/tests/menu_events.rs`:** the tests of 12 and 13 join 11's.
+      - A menu or a tooltip added opens, before the focus moves into it. Renamed, it raises
+        neither. Removed, it closes on the same platform node, which then answers
+        `UIA_E_ELEMENTNOTAVAILABLE`.
+      - A popup rebuilt for each open raises the pair each time. Replaced in one update, it closes
+        before the new one opens. Hidden and shown again, it closes, then opens.
+      - A placeholder's whole tree opens the menus and tooltips it holds, but not hidden ones.
+      - A refused MenuOpened is counted, and the focus event after it is still raised.
+      - The real raise of the pair doesn't panic. Measured in T2: the image's Wine refuses none.
+      - The tests activate the adapter through `handle_wm_getobject` without handing its answer
+        on, as 7's do, and set the hidden window's focus state, since the adapter raises focus
+        events only for a focused window. Whether a client hears the pair is G1's to check
+        ("Accessibility depth: menus").
+13. **ToolTipOpened and ToolTipClosed** (TD-0009 A4.5, slice 7c), the same as 12 for
+    `Role::Tooltip`, the only role that maps to the ToolTip control type. The code and tests are
+    12's.
+    - dpro-ui's tooltip window shows a new node for a tip of another node. Changed text for the
+      same node is a name change, with no pair.

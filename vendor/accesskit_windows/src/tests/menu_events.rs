@@ -291,7 +291,6 @@ fn added_then_removed(role: Role, opened: UIA_EVENT_ID, closed: UIA_EVENT_ID, la
 }
 
 #[test]
-#[ignore = "slice 7c: lands with the code"]
 fn a_menu_added_opens_and_removed_closes_on_its_platform_node() {
     added_then_removed(
         Role::Menu,
@@ -302,7 +301,6 @@ fn a_menu_added_opens_and_removed_closes_on_its_platform_node() {
 }
 
 #[test]
-#[ignore = "slice 7c: lands with the code"]
 fn a_tooltip_added_opens_and_removed_closes_on_its_platform_node() {
     added_then_removed(
         Role::Tooltip,
@@ -313,7 +311,6 @@ fn a_tooltip_added_opens_and_removed_closes_on_its_platform_node() {
 }
 
 #[test]
-#[ignore = "slice 7c: lands with the code"]
 fn a_popup_kept_for_its_next_open_raises_the_pair_at_every_open() {
     // The toolkit keeps a popup's window, and builds its content anew at each open (TD-0009
     // A1.5), so each open is a remove and an add.
@@ -331,7 +328,6 @@ fn a_popup_kept_for_its_next_open_raises_the_pair_at_every_open() {
 }
 
 #[test]
-#[ignore = "slice 7c: lands with the code"]
 fn a_popup_replaced_in_one_update_closes_before_the_new_one_opens() {
     // A tip moving straight to another node: the toolkit builds it as a new node in the same
     // update, which the tree reports as an addition before the removal.
@@ -363,7 +359,6 @@ fn a_popup_replaced_in_one_update_closes_before_the_new_one_opens() {
 }
 
 #[test]
-#[ignore = "slice 7c: lands with the code"]
 fn a_menu_hidden_closes_and_shown_again_opens() {
     with_adapter(Some(window(Some((Role::Menu, POPUP)), false)), |adapter| {
         let menu = Some((Role::Menu, POPUP));
@@ -376,7 +371,6 @@ fn a_menu_hidden_closes_and_shown_again_opens() {
 }
 
 #[test]
-#[ignore = "slice 7c: lands with the code"]
 fn the_whole_tree_after_a_placeholder_opens_the_popups_it_holds() {
     // The first ask found the handler busy: a placeholder, then the whole tree as an update.
     with_adapter(None, |adapter| {
@@ -402,7 +396,6 @@ fn the_whole_tree_after_a_placeholder_opens_the_popups_it_holds() {
 }
 
 #[test]
-#[ignore = "slice 7c: lands with the code"]
 fn a_refused_menu_opened_is_counted_and_the_focus_after_it_still_raised() {
     with_adapter(Some(window(None, false)), |adapter| {
         let events = adapter

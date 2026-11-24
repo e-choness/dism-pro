@@ -40,11 +40,45 @@ fn focus_event(context: &Arc<Context>, node_id: FullNodeId) -> QueuedEvent {
     }
 }
 
+// dpro: MenuOpened and MenuClosed (PATCHES.md, 12), ToolTipOpened and ToolTipClosed (13;
+// TD-0009 A4.5). UI Automation's Menu and ToolTip control types "must raise" them, and upstream
+// raises neither (#20).
+/// The events `node` raises as a client starts and stops seeing it, if it raises any: a menu's
+/// MenuOpened and MenuClosed, a tooltip's ToolTipOpened and ToolTipClosed. `None` for a node the
+/// client doesn't see (the filter leaves it out) and for every other role.
+fn open_close_events(node: &NodeRef) -> Option<(UIA_EVENT_ID, UIA_EVENT_ID)> {
+    let events = match node.role() {
+        Role::Menu => (UIA_MenuOpenedEventId, UIA_MenuClosedEventId),
+        Role::Tooltip => (UIA_ToolTipOpenedEventId, UIA_ToolTipClosedEventId),
+        _ => return None,
+    };
+    (filter(node) == FilterResult::Include).then_some(events)
+}
+
+// dpro: the menus and tooltips a whole tree arrives with, open (PATCHES.md, 12 and 13).
+/// Queues the opened event of every menu and tooltip under `node` that a client sees, in tree
+/// order, `node` itself included.
+fn queue_opened(context: &Arc<Context>, node: &NodeRef, queue: &mut Vec<QueuedEvent>) {
+    if let Some((opened, _)) = open_close_events(node) {
+        queue.push(QueuedEvent::Simple {
+            element: context
+                .get_or_create_platform_node(node.id())
+                .into_interface(),
+            event_id: opened,
+        });
+    }
+    for child in node.filtered_children(filter) {
+        queue_opened(context, &child, queue);
+    }
+}
+
 struct AdapterChangeHandler<'a> {
     context: &'a Arc<Context>,
     queue: Vec<QueuedEvent>,
     text_changed: HashSet<FullNodeId>,
     selection_changed: HashMap<FullNodeId, SelectionChanges>,
+    // dpro: how many closed events lead the queue (PATCHES.md, 12 and 13).
+    closed: usize,
 }
 
 impl<'a> AdapterChangeHandler<'a> {
@@ -54,11 +88,22 @@ impl<'a> AdapterChangeHandler<'a> {
             queue: Vec::new(),
             text_changed: HashSet::new(),
             selection_changed: HashMap::new(),
+            closed: 0,
         }
     }
 }
 
 impl AdapterChangeHandler<'_> {
+    // dpro: (PATCHES.md, 12 and 13).
+    /// Queues a menu's or a tooltip's closed event ahead of the update's other events, after the
+    /// closed events before it: a popup replaced in one update (a tip moving to another node)
+    /// closes before the new one opens, though the tree reports additions first.
+    fn queue_closed(&mut self, element: IRawElementProviderSimple, event_id: UIA_EVENT_ID) {
+        self.queue
+            .insert(self.closed, QueuedEvent::Simple { element, event_id });
+        self.closed += 1;
+    }
+
     fn insert_text_change_if_needed_parent(&mut self, node: NodeRef) {
         if !node.supports_text_ranges() {
             return;
@@ -261,6 +306,15 @@ impl TreeChangeHandler for AdapterChangeHandler<'_> {
                 event_id: UIA_Window_WindowOpenedEventId,
             });
         }
+        // dpro: a menu or a tooltip added is one opened (PATCHES.md, 12 and 13). A popup kept
+        // for its next open comes back as new nodes, so every open raises it.
+        if let Some((opened, _)) = open_close_events(node) {
+            let platform_node = self.context.get_or_create_platform_node(node.id());
+            self.queue.push(QueuedEvent::Simple {
+                element: platform_node.into_interface(),
+                event_id: opened,
+            });
+        }
         if wrapper.name().is_some() && node.live() != Live::Off {
             let platform_node = self.context.get_or_create_platform_node(node.id());
             let element: IRawElementProviderSimple = platform_node.into_interface();
@@ -277,6 +331,26 @@ impl TreeChangeHandler for AdapterChangeHandler<'_> {
     fn node_updated(&mut self, old_node: &NodeRef, new_node: &NodeRef) {
         if old_node.raw_value() != new_node.raw_value() {
             self.insert_text_change_if_needed(new_node);
+        }
+        // dpro: a menu or a tooltip the client starts or stops seeing in an update (shown,
+        // hidden, or its role changed) opens or closes, as upstream's dialogs do (PATCHES.md, 12
+        // and 13). So every opened event has its closed one.
+        let was = open_close_events(old_node);
+        let is = open_close_events(new_node);
+        if was != is {
+            let element: IRawElementProviderSimple = self
+                .context
+                .get_or_create_platform_node(new_node.id())
+                .into_interface();
+            if let Some((_, closed)) = was {
+                self.queue_closed(element.clone(), closed);
+            }
+            if let Some((opened, _)) = is {
+                self.queue.push(QueuedEvent::Simple {
+                    element,
+                    event_id: opened,
+                });
+            }
         }
         let old_node_was_filtered_out = filter(old_node) != FilterResult::Include;
         if filter(new_node) != FilterResult::Include {
@@ -354,9 +428,22 @@ impl TreeChangeHandler for AdapterChangeHandler<'_> {
 
     fn node_removed(&mut self, node: &NodeRef) {
         self.insert_text_change_if_needed(node);
+        // dpro: a menu or a tooltip removed is one closed (PATCHES.md, 12 and 13), raised on the
+        // platform node a client may hold for it, taken before it's dropped.
+        let closed = open_close_events(node).map(|(_, closed)| {
+            let element: IRawElementProviderSimple = self
+                .context
+                .get_or_create_platform_node(node.id())
+                .into_interface();
+            (element, closed)
+        });
         self.context.remove_platform_node(node.id());
         if filter(node) != FilterResult::Include {
             return;
+        }
+        // dpro: (PATCHES.md, 12 and 13).
+        if let Some((element, closed)) = closed {
+            self.queue_closed(element, closed);
         }
         if node.is_dialog() {
             let platform_node = PlatformNode::new(self.context, node.id());
@@ -495,13 +582,17 @@ impl Adapter {
                 let tree = Tree::new(update_factory(), is_window_focused);
                 *context.tree.write().unwrap() = tree;
                 context.is_placeholder.store(false, Ordering::SeqCst);
-                let result = context
-                    .read_tree()
-                    .state()
-                    .focus()
-                    .map(|node| QueuedEvents(vec![focus_event(context, node.id())]));
+                // dpro: the menus and tooltips the whole tree arrives with are opened, before the
+                // focus moves into one (PATCHES.md, 12 and 13).
+                let mut queue = Vec::new();
+                {
+                    let tree = context.read_tree();
+                    let state = tree.state();
+                    queue_opened(context, &state.root(), &mut queue);
+                    queue.extend(state.focus().map(|node| focus_event(context, node.id())));
+                }
                 self.state = State::Active(Arc::clone(context));
-                result
+                (!queue.is_empty()).then(|| QueuedEvents(queue))
             }
             State::Active(context) => {
                 let mut handler = AdapterChangeHandler::new(context);
