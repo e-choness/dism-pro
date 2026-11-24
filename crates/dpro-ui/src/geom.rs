@@ -115,7 +115,11 @@ impl Rect {
     }
 }
 
-/// The nearest whole number, halves up: -0.5 is 0, as 0.5 is 1.
+/// The nearest whole number, halves up: -0.5 is 0, as 0.5 is 1. It differs from `f32::round` at
+/// a negative half, and where the sum itself rounds: the float just under 0.5, and odd whole
+/// numbers past 2^23, where layout's own `f32` is coarser than a pixel. Rounding those as
+/// `round` does cost 0.3 to 1.1 % of C1's repaints and table fling (slice 7d's review), for no
+/// visible change.
 fn nearest(v: f32) -> f32 {
     (v + 0.5).floor()
 }
