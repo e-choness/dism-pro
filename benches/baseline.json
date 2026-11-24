@@ -81,7 +81,7 @@
     "crates/dpro-ui/benches/ir.rs interact::first_frame.shell": 400451,
     "crates/dpro-ui/benches/ir.rs interact::first_frame.text_225": 292356,
     "crates/dpro-ui/benches/ir.rs interact::session.scripted": 15596597,
-    "crates/dpro-ui/benches/ir.rs notice::live_toast.failed": 1932,
+    "crates/dpro-ui/benches/ir.rs notice::live_toast.failed": 4118,
     "crates/dpro-ui/benches/ir.rs notice::notice_event.progress_step": 147253,
     "crates/dpro-ui/benches/ir.rs paint::painted_event.caret_blink": 122608,
     "crates/dpro-ui/benches/ir.rs paint::painted_event.column_drag": 2398155,
