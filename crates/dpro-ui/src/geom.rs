@@ -102,16 +102,22 @@ impl Rect {
 
     /// The physical pixels painting fills for this rectangle at `scale`: each edge rounded to the
     /// nearest pixel boundary, so fills and hairlines are crisp. Always inside [`Rect::to_px`],
-    /// which damage uses.
+    /// which damage uses. Halves round up, never away from zero, so a rectangle moved by whole
+    /// pixels (scrolled) snaps to the same pixels moved, on either side of the window's edge.
     #[must_use]
     pub fn snap(&self, scale: f32) -> RectPx {
         RectPx {
-            x0: px((self.x * scale).round()),
-            y0: px((self.y * scale).round()),
-            x1: px((self.right() * scale).round()),
-            y1: px((self.bottom() * scale).round()),
+            x0: px(nearest(self.x * scale)),
+            y0: px(nearest(self.y * scale)),
+            x1: px(nearest(self.right() * scale)),
+            y1: px(nearest(self.bottom() * scale)),
         }
     }
+}
+
+/// The nearest whole number, halves up: -0.5 is 0, as 0.5 is 1.
+fn nearest(v: f32) -> f32 {
+    (v + 0.5).floor()
 }
 
 /// `as` from a float saturates at the integer's bounds and maps NaN to 0, which is what a pixel
@@ -293,7 +299,6 @@ mod tests {
     /// view paints where reveal put it, above a viewport's top as below it (TD-0009 A4.5's
     /// keyboard audit, rule 4: Shift+Tab left a focus ring a pixel under the viewport's edge).
     #[test]
-    #[ignore = "slice 7d: lands with the code"]
     fn snapping_commutes_with_whole_pixel_moves() {
         for scale in [1.0_f32, 2.0] {
             for y in [-0.5_f32, 0.5, 33.5, 1234.5, -1234.5] {
