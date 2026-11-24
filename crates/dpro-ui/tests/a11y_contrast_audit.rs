@@ -16,8 +16,9 @@
 //! The screens: the shell's table page (a row current, a category checked), its drawer with Hold
 //! to apply half held, a summary page and Settings; the shell's row menu, column menu, Start page
 //! list (also scrolled in a short window, its bar shown) and a tooltip; the composites page,
-//! Details open; and every standard control, enabled and disabled. A5's and A6's fixtures join as
-//! they land.
+//! Details open, and its palette, running job's toast and dialog windows (slice 6c); the Preview
+//! drawer as a pane and as a sheet (slice 6d); and every standard control, enabled and disabled.
+//! A5's and A6's fixtures join as they land.
 //!
 //! How text is found: a screen is painted twice, with `FakeText` and with its metrics but no ink.
 //! Where the two frames differ is text or a glyph, and the second frame says what is under it.
@@ -34,6 +35,8 @@
 
 #[path = "../benches/fixtures/composites.rs"]
 mod composites;
+#[path = "../benches/fixtures/drawer.rs"]
+mod drawer_page;
 #[path = "../benches/fixtures/shell.rs"]
 mod shell;
 
@@ -192,6 +195,11 @@ fn marks<M>(ui: &Ui<M>) -> Vec<String> {
                     name(p)
                 ));
             }
+        }
+        // A box or a radio button its viewport cuts (the last one a scrolled list shows) is
+        // judged where it shows whole: a sliver of it may hold no part of its mark.
+        if matches!(n.role, Role::CheckBox | Role::Radio) && r != n.rect {
+            continue;
         }
         let mark = |x, y| full.at(x, y) == argb(s.highlight_text);
         let disabled_mark =
@@ -376,7 +384,7 @@ fn rings<S: Screen>(screen: &mut S) -> Vec<String> {
 }
 
 /// Rule 6: a popup's edge is `WindowText`, `stroke::CONTRAST` wide, all round.
-fn border(ui: &Ui<shell::Msg>) -> Vec<String> {
+fn border<M>(ui: &Ui<M>) -> Vec<String> {
     let f = paint(ui, &Theme::high_contrast(ID), &mut FakeText);
     let wide = whole(tokens::stroke::CONTRAST);
     let edge = argb(ID.window_text);
@@ -475,6 +483,58 @@ fn shell_screens() -> Vec<(&'static str, shell::Run)> {
     screens
 }
 
+/// Slice 6c's windows as they show: the palette, a running job's toast and the dialog. Each is a
+/// transient surface, so rule 6 holds them to a popup's border (A4.4).
+fn composite_windows() -> Vec<(&'static str, Ui<composites::Msg>)> {
+    use composites::{Model, Run};
+    vec![
+        (
+            "the palette",
+            Run::with(Model::new()).palette_open().win.popup,
+        ),
+        (
+            "a running job's toast",
+            Run::with(Model::new()).job_running().win.toast,
+        ),
+        (
+            "the dialog",
+            Run::with(Model::new()).dialog_open().win.popup,
+        ),
+    ]
+}
+
+impl Screen for drawer_page::Run {
+    type Msg = drawer_page::Msg;
+    fn ui(&self) -> &Ui<drawer_page::Msg> {
+        &self.ui
+    }
+    fn ui_mut(&mut self) -> &mut Ui<drawer_page::Msg> {
+        &mut self.ui
+    }
+    fn input(&mut self, input: Input) {
+        self.step(drawer_page::Step::Input(input));
+        self.settle();
+    }
+}
+
+/// Slice 6d's Preview drawer, open: as a pane beside the page, and as a sheet over it in a
+/// narrow window.
+fn drawer_screens() -> Vec<(&'static str, drawer_page::Run)> {
+    use drawer_page::{Model, Msg, NARROW, Run, START, Step};
+    let open = |size| {
+        let mut run = Run::with(Model::new()).warmed();
+        run.step(Step::Resize(size));
+        run.step(Step::Update(Msg::Open));
+        run.settle();
+        assert!(run.drawer().is_some(), "the drawer is open");
+        run
+    };
+    vec![
+        ("the Preview drawer, a pane", open(START)),
+        ("the Preview drawer, a sheet", open(NARROW)),
+    ]
+}
+
 fn composites_screens() -> Vec<(&'static str, composites::Run)> {
     audit::COMPOSITES
         .iter()
@@ -495,6 +555,12 @@ fn every_pixel_and_text_run_is_a_system_pair() {
     for (name, run) in composites_screens() {
         bad.extend(audit::on(name, colors_and_pairs(&run.ui)));
     }
+    for (name, ui) in composite_windows() {
+        bad.extend(audit::on(name, colors_and_pairs(&ui)));
+    }
+    for (name, run) in drawer_screens() {
+        bad.extend(audit::on(name, colors_and_pairs(&run.ui)));
+    }
     bad.extend(audit::on(
         "the controls",
         colors_and_pairs(&Gallery::new().ui),
@@ -512,18 +578,47 @@ fn the_focus_ring_is_highlight_and_whole_on_every_stop() {
     for (name, mut run) in composites_screens() {
         bad.extend(audit::on(name, rings(&mut run)));
     }
+    for (name, mut run) in drawer_screens() {
+        bad.extend(audit::on(name, rings(&mut run)));
+    }
     bad.extend(audit::on("the controls", rings(&mut Gallery::new())));
     report("focus rings", &bad);
 }
 
-/// Rule 6 on every popup the shell opens.
+/// Rule 6 on every popup the shell opens, and slice 6c's windows.
 #[test]
 fn popups_have_a_contrast_border() {
     let mut bad = Vec::new();
     for (name, ui) in popups() {
         bad.extend(audit::on(name, border(&ui)));
     }
+    for (name, ui) in composite_windows() {
+        bad.extend(audit::on(name, border(&ui)));
+    }
     report("popup borders", &bad);
+}
+
+/// Rule 6 on the Preview drawer, a transient surface (A4.4): its edge beside the page is
+/// `WindowText`, `stroke::CONTRAST` wide, as a pane and as a sheet.
+#[test]
+fn the_drawer_has_a_contrast_border() {
+    let edge = argb(ID.window_text);
+    let mut bad = Vec::new();
+    for (screen, run) in drawer_screens() {
+        let f = paint(&run.ui, &Theme::high_contrast(ID), &mut FakeText);
+        let r = run.ui.info(run.drawer().unwrap()).unwrap().rect.snap(1.0);
+        let y = i32::midpoint(r.y0, r.y1);
+        for d in 0..whole(tokens::stroke::CONTRAST) {
+            let p = f.at(r.x0 + d, y);
+            if p != edge {
+                bad.push(format!(
+                    "{screen}: rule 6: the start edge {d} px in is {}",
+                    name(p)
+                ));
+            }
+        }
+    }
+    report("the drawer's border", &bad);
 }
 
 /// Rule 7's marks on every screen, the popups and the controls included.
@@ -537,6 +632,12 @@ fn selection_is_highlight_and_checks_show_a_mark() {
         bad.extend(audit::on(name, marks(&ui)));
     }
     for (name, run) in composites_screens() {
+        bad.extend(audit::on(name, marks(&run.ui)));
+    }
+    for (name, ui) in composite_windows() {
+        bad.extend(audit::on(name, marks(&ui)));
+    }
+    for (name, run) in drawer_screens() {
         bad.extend(audit::on(name, marks(&run.ui)));
     }
     bad.extend(audit::on("the controls", marks(&Gallery::new().ui)));

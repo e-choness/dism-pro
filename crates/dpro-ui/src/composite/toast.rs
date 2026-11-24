@@ -1,6 +1,10 @@
-//! A job's toast (TD-0009 A3.5 (7)): the job's title, its status line (a polite live region), its
+//! A job's toast (TD-0009 A3.5 (7)): the job's title, its status line (a live region), its
 //! progress and up to two actions, in the toast window at the owner's bottom end, built in
 //! [`Model::toast_view`](crate::platform::Model::toast_view).
+//!
+//! The line speaks as A4.4 says ([`Toast::live`]): the start, a job of unknown size and the end
+//! politely, a failure assertively. While the job's figure moves the line is quiet, because job
+//! progress is spoken by notification (`dpro_app::announce`): a screen reader hears each step once.
 //!
 //! A client sees a group named `region` in the toast window's own tree. The `Ui` showing it keeps
 //! its Dismiss: Esc that nothing else takes sends it, and so does an ended toast's hide once
@@ -17,9 +21,16 @@ use crate::{
 
 use super::{CARD, STRONG};
 
+/// The toast's card: a card whose border is a transient surface's, 2 px of `WindowText` in high
+/// contrast (A4.4).
+const TOAST_CARD: Look = Look {
+    border: Some(Tone::TransientBorder),
+    ..CARD
+};
+
 /// The job's title.
 pub const TOAST_TITLE: Key = Key::name("dpro-ui.toast.title");
-/// The status line, a polite live region.
+/// The status line, a live region ([`Toast::live`]).
 pub const TOAST_LINE: Key = Key::name("dpro-ui.toast.line");
 /// The progress bar, while there's progress to show.
 pub const TOAST_BAR: Key = Key::name("dpro-ui.toast.bar");
@@ -67,8 +78,8 @@ pub struct Toast<'s, M> {
     pub region: &'s str,
     /// The job.
     pub title: &'s str,
-    /// Its status (`ui-toast-*`): a polite live region, which the caller changes at most once
-    /// every 2 s for progress, and at once for a phase or the end (§4.4).
+    /// Its status (`ui-toast-*`): a live region ([`live`](Self::live)), which the caller changes
+    /// at most once every 2 s for progress, and at once for a phase or the end (§4.4).
     pub line: &'s str,
     /// How far it has come, 0 to 1; `None` for no bar.
     pub progress: Option<f32>,
@@ -77,6 +88,21 @@ pub struct Toast<'s, M> {
     /// Dismiss's name (`ui-toast-dismiss`) and message: Dismiss, Esc in the toast, and an ended
     /// toast's hide send it.
     pub dismiss: (&'s str, M),
+}
+
+impl<M> Toast<'_, M> {
+    /// The line's politeness (TD-0009 A4.4): assertive for a failure, which a user reading
+    /// elsewhere must not miss; off while a running job's figure moves, since job progress is a
+    /// notification (`dpro_app::announce`) and the line would say each step a second time; polite
+    /// for the rest: the start (no figure yet, or 0), a job of unknown size, and the end.
+    #[must_use]
+    pub fn live(&self) -> Live {
+        match self.tone {
+            ToastTone::Failed => Live::Assertive,
+            ToastTone::Running if self.progress.is_some_and(|p| p > 0.0) => Live::Off,
+            _ => Live::Polite,
+        }
+    }
 }
 
 impl<M: Clone> Cx<'_, M> {
@@ -94,7 +120,7 @@ impl<M: Clone> Cx<'_, M> {
                     padding: Insets::all(toast::PADDING),
                     ..Style::default()
                 })
-                .look(CARD),
+                .look(TOAST_CARD),
             |cx| toast_parts(cx, t),
         );
         let ended = t.tone != ToastTone::Running;
@@ -146,7 +172,7 @@ fn toast_parts<M: Clone>(cx: &mut Cx<'_, M>, t: &Toast<'_, M>) {
     cx.add(
         Element::text(TOAST_LINE, t.line)
             .text_style(LINE)
-            .live(Live::Polite),
+            .live(t.live()),
     );
     if let Some(p) = t.progress {
         cx.add(

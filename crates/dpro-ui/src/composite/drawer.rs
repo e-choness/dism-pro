@@ -414,10 +414,11 @@ fn footer<M: Clone>(cx: &mut Cx<'_, M>, f: &DrawerFooter<'_, M>) {
 }
 
 /// The drawer: the surface in a hairline (`layer.card` under glass), square, as a pane at the
-/// window's edge is.
+/// window's edge is. The hairline is a transient surface's: 2 px of `WindowText` in high
+/// contrast (A4.4).
 const PANE: Look = Look {
     fill: Some(Tone::Surface),
-    border: Some(Tone::Border),
+    border: Some(Tone::TransientBorder),
     radius: Radius::None,
     ink: Tone::Text,
 };

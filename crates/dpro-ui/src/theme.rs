@@ -1099,9 +1099,12 @@ mod tests {
             Tone::WarnBorder,
             Tone::InfoBorder,
             Tone::CalloutBorder,
+            Tone::RunningBorder,
         ] {
             assert_eq!(t.color(border), sys.window_text, "{border:?}");
         }
+        // No scrim: high contrast has no custom colors (slice 6c, §4.4).
+        assert_eq!(t.color(Tone::Smoke).a, 0);
         assert_eq!(t.color(Tone::InverseAccent), sys.highlight);
         assert_eq!(
             t.ink(Tone::OnInverseAccent, Tone::InverseAccent),
@@ -1514,6 +1517,24 @@ mod tests {
         // The badge step: 12 px semibold.
         assert_eq!(tokens::font::BADGE.to_bits(), 12.0_f32.to_bits());
         assert_eq!(tokens::font::BADGE_WEIGHT, 600);
+    }
+
+    /// Slice 6c's scrim and running border (A3.5 (8), addition 13): `smoke` is black at 22 %
+    /// over light and 26 % over dark, and a running job card's border is the accent at 35 %.
+    #[test]
+    fn the_scrim_and_the_running_border_are_doc_05s() {
+        for (theme, smoke) in [(Theme::LIGHT, SMOKE_LIGHT), (Theme::DARK, SMOKE_DARK)] {
+            assert_eq!(theme.color(Tone::Smoke), Color::hex(0).alpha(smoke));
+            assert_eq!(
+                theme.color(Tone::RunningBorder),
+                theme.color(Tone::Accent).alpha(RUNNING_BORDER_ALPHA)
+            );
+        }
+        assert_eq!(
+            (SMOKE_LIGHT, SMOKE_DARK, RUNNING_BORDER_ALPHA),
+            (56, 66, 89),
+            "22 %, 26 % and 35 % of 255"
+        );
     }
 
     /// The drawer's callout (A3.5 (6), slice 6d): artboard 02's light values. Dark's are

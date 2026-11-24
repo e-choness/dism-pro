@@ -1,6 +1,7 @@
 //! A job's toast (TD-0009 A3.5 (7), A3.9), in its own window at the owner's bottom end: its line
-//! is a polite live region, and the job card's line is live only while the toast doesn't show, so
-//! two live views of one job never coexist. A progress event damages only the two bars (U17). Esc
+//! is a live region (polite, assertive for a failure, quiet while the job's figure moves: A4.4),
+//! and the job card's line is live only while the toast doesn't show, so two live views of one
+//! job never coexist. A progress event damages only the two bars (U17). Esc
 //! or Dismiss hides it; an ended toast hides after Windows' message duration, which costs exactly
 //! one wake, and the pointer over it holds it. That the toast window never takes activation on
 //! show or click, and F6 does, is the host's: dpro-win's T2 tests check the first two (Wine's
@@ -93,14 +94,41 @@ fn the_toast_is_a_named_group_with_its_title_bar_and_dismiss() {
     assert!((run.ui_of(Window::Toast).viewport().w - toast::WIDTH).abs() < 0.5);
 }
 
+/// The toast's line's politeness in the toast window's tree.
+fn line_live(run: &mut Run) -> Option<Live> {
+    let tree = run.a11y_tree_of(Window::Toast);
+    run.ak_in(Window::Toast, &tree, toast_part(run, TOAST_LINE))
+        .expect("the toast's line")
+        .live()
+}
+
+/// A4.4: the line says the start and the end politely and a failure assertively. While the job's
+/// figure moves it's quiet: job progress is a notification (`dpro_app::announce`), so a screen
+/// reader hears each step once.
 #[test]
-fn its_line_is_live_and_two_live_views_of_a_job_never_coexist() {
+fn its_line_speaks_the_start_and_the_end_and_a_failure_interrupts() {
+    let mut run = Run::accessible(Model::new());
+    run.step(Step::Update(Msg::JobStart));
+    run.settle();
+    assert_eq!(line_live(&mut run), Some(Live::Polite), "the start");
+    run.step(Step::Update(Msg::Progress(40)));
+    run.settle();
+    assert_eq!(line_live(&mut run), None, "the figure moving");
+    run.step(Step::Update(Msg::JobEnd(ToastTone::Done)));
+    run.settle();
+    assert_eq!(line_live(&mut run), Some(Live::Polite), "the end");
     let mut run = Run::accessible(Model::new()).job_running();
-    let toast_tree = run.a11y_tree_of(Window::Toast);
-    let line = run
-        .ak_in(Window::Toast, &toast_tree, toast_part(&run, TOAST_LINE))
-        .expect("the toast's line");
-    assert_eq!(line.live(), Some(Live::Polite));
+    run.step(Step::Update(Msg::JobEnd(ToastTone::Failed)));
+    run.settle();
+    assert_eq!(line_live(&mut run), Some(Live::Assertive), "a failure");
+}
+
+#[test]
+fn two_live_views_of_a_job_never_coexist() {
+    let mut run = Run::accessible(Model::new());
+    run.step(Step::Update(Msg::JobStart));
+    run.settle();
+    assert_eq!(line_live(&mut run), Some(Live::Polite));
     let page_tree = run.a11y_tree_of(Window::Page);
     let card_line = run
         .ak(&page_tree, card_part(&run, JOB_LINE))

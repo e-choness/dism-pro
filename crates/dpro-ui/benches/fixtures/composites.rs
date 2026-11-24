@@ -1577,11 +1577,15 @@ impl Windows {
     }
 }
 
-/// A window's frame after its build: sized to its content at `w`, laid out, and, when it opens,
-/// all of it damaged and its whole tree served to a client listening.
+/// A window's frame after its build: sized to its content at `w` in whole pixels, as the platform
+/// sizes the window (scale 1), laid out, and, when it opens, all of it damaged and its whole tree
+/// served to a client listening.
 fn show(ui: &mut Ui<Msg>, text: &mut FakeText, w: f32, opening: bool, a11y: bool) {
     let size = ui.natural_size(text, w);
-    ui.set_viewport(Size { w, h: size.h });
+    ui.set_viewport(Size {
+        w,
+        h: size.h.ceil(),
+    });
     ui.layout(text);
     if opening {
         ui.repaint_all();

@@ -55,9 +55,10 @@ impl<M: Clone> Cx<'_, M> {
                 grow: 1.0,
                 ..Style::default()
             })
+            // A transient surface's border: 2 px of `WindowText` in high contrast (A4.4).
             .look(Look {
                 fill: Some(Tone::Surface),
-                border: Some(Tone::Border),
+                border: Some(Tone::TransientBorder),
                 radius: Radius::Drawer,
                 ink: Tone::Text,
             });
