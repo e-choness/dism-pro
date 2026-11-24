@@ -31,6 +31,7 @@ use dpro_core::units::{Bytes, UnixMillis};
 
 use crate::{
     build::Cx,
+    composite::BadgeTone,
     geom::{Insets, Point, Rect, Size},
     input::{KeyCode, KeyEvent, Mods},
     scroll::{to_logical, to_px},
@@ -53,6 +54,18 @@ pub const TABLE_BODY: Key = Key::name("dpro-ui.table.body");
 /// The check column's key, in the header and in each row. A text column's is `Key::index` of its
 /// [`ColumnId`].
 pub const TABLE_CHECK: Key = Key::name("dpro-ui.table.check");
+/// Group header rows' keys under the rows' viewport are this, mixed with the group's index; see
+/// [`table_group`].
+const GROUP_KEY: Key = Key::name("dpro-ui.table.group");
+
+/// Group `group`'s header row's key under the rows' viewport ([`TABLE_BODY`]), for
+/// [`Ui::find`] (TD-0009 A3.5 (10)).
+#[must_use]
+#[allow(clippy::cast_lossless, reason = "u64::from isn't const")]
+pub const fn table_group(group: u32) -> Key {
+    Key(GROUP_KEY.0 ^ Key::index(group as u64).0)
+}
+
 /// The empty table's status line and its action, under the rows' viewport.
 const STATUS_TEXT: Key = Key::name("dpro-ui.table.status");
 const STATUS_ACTION: Key = Key::name("dpro-ui.table.action");
@@ -123,11 +136,48 @@ pub struct Status<'s, M> {
     pub action: Option<(&'s str, M)>,
 }
 
+/// How many lines a table's rows have (TD-0009 A3.5 (10)).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RowLines {
+    /// A line: rows are the body text's line and the row padding, at least
+    /// [`ROW`](tok::ROW).
+    #[default]
+    One,
+    /// Two: a row's [two-line cell](Cells::two) shows its second line under its first, in
+    /// caption secondary text (Leftovers' evidence, Activity's history). Rows are both lines, the
+    /// gap between them and the row padding, at least [`ROW_TWO`](tok::ROW_TWO).
+    Two,
+}
+
+/// A group of a table's rows, under a header row (TD-0009 A3.5 (10), A3.10 item 5): "Registry",
+/// "3 items". The header isn't a row of the view: it can't be current, checked or selected, and
+/// the keyboard passes over it. A client sees a row of the grid with one row header spanning
+/// every column, named by `name`, and counts it in the grid's rows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RowGroup<'s> {
+    /// Its first row, by index in the view's order. Groups ascend by it, and an empty group isn't
+    /// given.
+    pub start: u32,
+    /// Its header's words, at the header's start ("Registry").
+    pub label: &'s str,
+    /// How many rows it has, in the user's words, at the header's end (`ui-group-count`: "3
+    /// items").
+    pub count: &'s str,
+    /// What a client reads for the header (`ui-group-header`: "Registry, 3 items").
+    pub name: &'s str,
+}
+
 /// A data table, as a view describes it for [`Cx::table`].
 #[derive(Clone, Debug)]
 pub struct Table<'s, M> {
     /// How many rows the view has: indices `0..rows`, in the order shown.
     pub rows: u32,
+    /// How many lines each row has.
+    pub lines: RowLines,
+    /// Its groups, by first row ascending, each under a header row; empty for none. Rows before
+    /// the first group have no header. A group out of order, or past the rows, is left out with
+    /// the groups after it.
+    pub groups: &'s [RowGroup<'s>],
     pub columns: &'s [Column<'s>],
     /// Each column's width as the user left it, in `columns`' order; a column past its end has
     /// its own ([`Width::Auto`]).
@@ -216,6 +266,26 @@ impl<'b> Cells<'b> {
     #[inline]
     pub fn time(&mut self, t: UnixMillis) {
         self.value(Value::Time(t.0));
+    }
+
+    /// The next column's text on two lines (TD-0009 A3.5 (10)): `primary` in its column's face
+    /// (mono for paths), and `secondary` under it in caption secondary text, in a table whose
+    /// rows have [two lines](RowLines::Two). A row's first text cell, usually. The cell is named
+    /// by its first line, which names its row too, and described by its second. In a table of
+    /// one-line rows, the second line is left out.
+    pub fn two(&mut self, primary: &str, secondary: &str) {
+        // Slice 6b's MEASURE stub: the second line lands with the code.
+        let _ = secondary;
+        self.push(primary);
+    }
+
+    /// The next column's badge (TD-0009 A3.5 (1), (10)): `text` in `tone`'s colors, where its
+    /// column puts it (Activity's history shows each job's state so). The cell is named by the
+    /// word.
+    pub fn badge(&mut self, text: &str, tone: BadgeTone) {
+        // Slice 6b's MEASURE stub: the badge lands with the code.
+        let _ = tone;
+        self.push(text);
     }
 
     /// A value's text, kept from an earlier build or formatted now.

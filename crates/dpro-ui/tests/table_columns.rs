@@ -194,6 +194,8 @@ impl Page {
     fn table(&self) -> Table<'_, Msg> {
         Table {
             rows: u32::try_from(self.model.view().len()).expect("rows"),
+            lines: dpro_ui::RowLines::One,
+            groups: &[],
             columns: self.defs,
             widths: self.columns.widths(),
             hidden: if self.hide_all {
