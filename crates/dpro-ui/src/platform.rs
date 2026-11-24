@@ -162,6 +162,23 @@ pub trait Model {
     fn size_units(&self) -> SizeUnits {
         SizeUnits::default()
     }
+
+    // Slice 6c (TD-0009 A3.5 addition 13).
+
+    /// Whether the model's toast shows. After every event the host shows, rebuilds or hides the
+    /// toast window, at the owner's bottom end, to match; it never takes activation.
+    fn toast(&self) -> bool {
+        false
+    }
+
+    /// What the [`toast`](Self::toast) window shows: one [`Cx::toast`].
+    fn toast_view(&self, _cx: &mut Cx<'_, Self::Msg>) {}
+
+    /// The message a key pressed in the main window sends that no part of the page used: the
+    /// app's accelerators (Ctrl+K opens the palette). `None` if it's none.
+    fn accelerator(&self, _key: KeyEvent) -> Option<Self::Msg> {
+        None
+    }
 }
 
 /// The user's formats (TD-0009 A2.5): Windows' days, moments and decimal separator, with the

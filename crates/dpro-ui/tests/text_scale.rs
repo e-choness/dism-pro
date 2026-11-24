@@ -199,3 +199,31 @@ fn a_switch_lays_out_once_and_the_same_size_again_changes_nothing() {
         "back to 100 %, the header is as it was"
     );
 }
+
+/// Slice 6c's windows (TD-0009 A3.9): the palette, a running and an ended toast, the job card and
+/// the dialog, at 100 and 225 %: no text is clipped.
+#[test]
+#[ignore = "slice 6c: lands with the code"]
+fn no_overlay_text_is_clipped_at_100_or_225_percent() {
+    use composites::{Model, Msg as C, Step as S, Window};
+    for scale in [1.0, LARGEST] {
+        let mut short = Vec::new();
+        let mut check = |run: &composites::Run, w: Window, name: &str| {
+            let ui = run.ui_of(w);
+            let mut here = Vec::new();
+            let seen = clipped(ui, ui.root(), &mut here);
+            assert!(seen > 0, "{name} at {scale}: no text at all");
+            short.extend(here.into_iter().map(|s| format!("{name} at {scale}: {s}")));
+        };
+        let run = composites::Run::text_scaled(Model::new(), scale).palette_open();
+        check(&run, Window::Popup, "the palette");
+        let mut run = composites::Run::text_scaled(Model::new(), scale).job_running();
+        check(&run, Window::Toast, "a running toast");
+        check(&run, Window::Page, "the job card");
+        run.step(S::Update(C::JobEnd(dpro_ui::composite::ToastTone::Failed)));
+        check(&run, Window::Toast, "a failed toast");
+        let run = composites::Run::text_scaled(Model::new(), scale).dialog_open();
+        check(&run, Window::Popup, "the dialog");
+        assert_eq!(short, [] as [String; 0], "text clipped");
+    }
+}

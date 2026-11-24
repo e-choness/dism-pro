@@ -137,9 +137,11 @@ pub(super) const fn slot(kind: gui::PopupKind) -> usize {
 /// The window a popup of the toolkit's `kind` shows in.
 const fn window_kind(kind: PopupKind) -> gui::PopupKind {
     match kind {
-        PopupKind::Menu => gui::PopupKind::Menu,
+        // Slice 6c's windows land with the code (the MEASURE commit's stub): the palette and a
+        // dialog show in the menu's, the toast in the tooltip's.
+        PopupKind::Menu | PopupKind::Palette | PopupKind::Dialog => gui::PopupKind::Menu,
         PopupKind::List => gui::PopupKind::List,
-        PopupKind::Tooltip => gui::PopupKind::Tooltip,
+        PopupKind::Tooltip | PopupKind::Toast => gui::PopupKind::Tooltip,
     }
 }
 

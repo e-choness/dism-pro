@@ -31,9 +31,14 @@
     "crates/dpro-ui/benches/ir.rs a11y::a11y_update.row_selection": 4931,
     "crates/dpro-ui/benches/ir.rs a11y::a11y_update.scroll": 45023,
     "crates/dpro-ui/benches/ir.rs a11y::a11y_update.unchanged": 58,
+    "crates/dpro-ui/benches/ir.rs a11y::a11y_window_update.palette_arrow": 64,
+    "crates/dpro-ui/benches/ir.rs a11y::a11y_window_update.toast_line": 875,
     "crates/dpro-ui/benches/ir.rs composite::batch_count.three_to_four": 60477,
     "crates/dpro-ui/benches/ir.rs composite::cards_wrap_resize.narrow": 169584,
+    "crates/dpro-ui/benches/ir.rs composite::palette_arrow.down": 55388,
+    "crates/dpro-ui/benches/ir.rs composite::palette_keystroke.one_char": 340543,
     "crates/dpro-ui/benches/ir.rs composite::scan_size.one_card": 59981,
+    "crates/dpro-ui/benches/ir.rs composite::toast_progress.both": 55346,
     "crates/dpro-ui/benches/ir.rs interact::event.caret_left": 114107,
     "crates/dpro-ui/benches/ir.rs interact::event.check_space": 138929,
     "crates/dpro-ui/benches/ir.rs interact::event.column_drag": 177546,
@@ -68,6 +73,7 @@
     "crates/dpro-ui/benches/ir.rs paint::painted_event.context_menu": 1077781,
     "crates/dpro-ui/benches/ir.rs paint::painted_event.hold_tick": 211403,
     "crates/dpro-ui/benches/ir.rs paint::painted_event.keystroke": 2816266,
+    "crates/dpro-ui/benches/ir.rs paint::painted_event.palette_scrim": 3267975,
     "crates/dpro-ui/benches/ir.rs paint::painted_event.progress": 191938,
     "crates/dpro-ui/benches/ir.rs paint::painted_event.resize": 4144364,
     "crates/dpro-ui/benches/ir.rs paint::painted_event.unchanged": 182852,
@@ -77,7 +83,9 @@
     "crates/dpro-ui/benches/ir.rs paint::repaint_all.dark_150": 5739397,
     "crates/dpro-ui/benches/ir.rs paint::repaint_all.light_100": 3262152,
     "crates/dpro-ui/benches/ir.rs paint::repaint_all.text_225": 2924839,
+    "crates/dpro-ui/benches/ir.rs popup::open.dialog": 150790,
     "crates/dpro-ui/benches/ir.rs popup::open.menu": 241222,
+    "crates/dpro-ui/benches/ir.rs popup::open.palette": 330823,
     "crates/dpro-ui/benches/ir.rs table::fling.frames": 249750445
   }
 }

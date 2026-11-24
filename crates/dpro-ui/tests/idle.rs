@@ -384,3 +384,33 @@ fn the_composites_settle_after_each_change_and_stay_idle() {
         assert_composites_idle(&mut run, when);
     }
 }
+
+/// Slice 6c (A3.7's U6): a running toast, its card and the dialog settle and ask for nothing; an
+/// ended toast costs exactly one wake, the one that hides it, and nothing after.
+#[test]
+#[ignore = "slice 6c: lands with the code"]
+fn an_ended_toast_costs_exactly_one_wake() {
+    use composites::{Model, Msg as C, Step as S};
+    let mut run = composites::Run::accessible(Model::new())
+        .warmed()
+        .job_running();
+    assert!(!run.ui.wants_frame() && !run.win.toast.wants_frame());
+    assert_eq!(run.wake(), None, "a running toast asks for nothing");
+    assert_composites_idle(&mut run, "a job running");
+    run.step(S::Update(C::JobEnd(dpro_ui::composite::ToastTone::Done)));
+    run.settle();
+    let due = run.wake().expect("the hide wake");
+    assert_eq!(due, u64::from(dpro_ui::MESSAGE_MS));
+    // The wake: the platform ticks once, when it's due.
+    run.step(S::Tick(due));
+    assert!(!run.win.toast_open, "the wake hid it");
+    run.settle();
+    assert_eq!(run.wake(), None, "and nothing after");
+    assert_composites_idle(&mut run, "the toast hidden");
+    let mut run = composites::Run::accessible(Model::new())
+        .warmed()
+        .dialog_open();
+    run.settle();
+    assert_eq!(run.wake(), None, "the dialog asks for nothing");
+    assert!(!run.win.popup.wants_frame());
+}

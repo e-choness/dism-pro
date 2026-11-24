@@ -75,6 +75,22 @@ impl<M> Ui<M> {
         self.damage_all();
     }
 
+    /// Shows or hides the scrim (TD-0009 A3.5 addition 13): [`Tone::Smoke`] over the whole window
+    /// while the palette or a dialog is open over it. Paint only: nothing is laid out or hit
+    /// tested differently. A change repaints the window once; the same value changes nothing.
+    pub fn set_scrim(&mut self, on: bool) {
+        if self.scrim != on {
+            self.scrim = on;
+            self.damage_all();
+        }
+    }
+
+    /// Whether the scrim shows.
+    #[must_use]
+    pub fn scrim(&self) -> bool {
+        self.scrim
+    }
+
     /// Repaints the damaged regions in `theme`'s colors. The damage stays for the presenter, which
     /// calls [`clear_damage`](Self::clear_damage) once it has shown it.
     pub fn paint(&self, canvas: &mut Canvas<'_>, text: &mut dyn TextSystem, theme: &Theme) {

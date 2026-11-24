@@ -1054,6 +1054,9 @@ pub(crate) enum Step {
     /// The user's formats changed (Settings › Time & language › Region): sizes' decimal
     /// separator is now this (A2.5, slice 5b3).
     Decimal(&'static str),
+    /// The scrim over the window turned on or off, as the host does while the palette or a dialog
+    /// is open (TD-0009 A3.5 addition 13, slice 6c).
+    Scrim(bool),
 }
 
 /// A key pressed with `mods`, as a step.
@@ -1207,6 +1210,7 @@ impl Run {
                     self.ui.find_row(table, None, name);
                 }
             }
+            Step::Scrim(on) => self.ui.set_scrim(on),
         }
         for m in self.msgs.drain(..) {
             self.shell.update(m);

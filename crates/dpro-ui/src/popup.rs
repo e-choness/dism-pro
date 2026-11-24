@@ -28,6 +28,17 @@ pub enum PopupKind {
     List,
     /// A tooltip: never focused, never clicked.
     Tooltip,
+    /// The command palette (TD-0009 A3.5 (3), addition 13): it takes the activation and focuses
+    /// its field, placed at the top center of the owner's client area. The main window paints
+    /// the scrim while it's open.
+    Palette,
+    /// A job's toast (A3.5 (7)): the model's [`toast`](crate::platform::Model::toast), never its
+    /// popup. It never takes the activation when it shows or is clicked; F6 activates it.
+    /// Placed at the bottom end of the owner's client area.
+    Toast,
+    /// A dialog frame (A3.5 (13)) over the owner: it takes the activation and focuses its
+    /// initial button, centered on the owner's client area, over the scrim.
+    Dialog,
 }
 
 /// A menu or a list the view-model has open.
@@ -48,6 +59,14 @@ pub enum Placement {
     Below,
     /// Above, starting at the anchor's left edge (tooltips).
     Above,
+    /// The anchor is the owner's client area: centered across it, this many physical pixels
+    /// below its top (the palette, A3.5 addition 13).
+    TopCenter(i32),
+    /// The anchor is the owner's client area: this many physical pixels in from its bottom and
+    /// its end (the toast).
+    BottomEnd(i32),
+    /// The anchor is the owner's client area: centered on it (a dialog).
+    Center,
 }
 
 /// Where a popup `w` × `h` physical pixels goes for `anchor`, `gap` pixels from it, inside
@@ -78,8 +97,12 @@ pub fn place(
     // The preferred side if it fits, else the other if that fits, else the roomier.
     let roomier_below = room_below >= room_above;
     let go_below = match placement {
-        Placement::Below => fits_below || (!fits_above && roomier_below),
         Placement::Above => !fits_above && (fits_below || roomier_below),
+        // Slice 6c's placements land with the code (the MEASURE commit's stub).
+        Placement::Below
+        | Placement::TopCenter(_)
+        | Placement::BottomEnd(_)
+        | Placement::Center => fits_below || (!fits_above && roomier_below),
     };
     let y = if go_below { below } else { above };
     let x = if anchor.x0.saturating_add(w) <= work.x1 {

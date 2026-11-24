@@ -321,6 +321,8 @@ impl<M> Ui<M> {
             Extra::Glyph(icon) => (None, crate::tree::glyph_value(icon), None),
             // And a container's presentational children (addition 9): a client doesn't see them.
             Extra::Presentation => (None, PRESENTATION, None),
+            // And a dialog's being one (addition 12): a client sees a dialog.
+            Extra::Dialog => (None, crate::tree::DIALOG, None),
             // A live region's politeness (addition 5, A4.5) is read below.
             Extra::None | Extra::Field { .. } | Extra::Combo { .. } | Extra::Live(_) => {
                 (None, 0.0, None)

@@ -150,7 +150,14 @@ pub struct Ui<M> {
     pub(crate) drag_distance: f32,
     /// Messages layout made (a column's fit), for the host to take ([`Ui::take_messages`]).
     pub(crate) queued: Vec<M>,
+    // Slice 6c (TD-0009 A3.5 (7), (13), addition 13).
+    /// The scrim shows over the window: the palette or a dialog is open over it.
+    pub(crate) scrim: bool,
 }
+
+/// Windows' message duration when the window hasn't said (`SPI_GETMESSAGEDURATION`'s default): 5
+/// seconds.
+pub const MESSAGE_MS: u32 = 5_000;
 
 /// A node's tooltip, a dropdown's accessible name and step, and a field's step: in a side table,
 /// so the nodes without them (nearly all) carry one index.
@@ -260,6 +267,7 @@ impl<M> Ui<M> {
             divider: None,
             drag_distance: DRAG_DISTANCE,
             queued: Vec::new(),
+            scrim: false,
         };
         ui.damage_all();
         ui

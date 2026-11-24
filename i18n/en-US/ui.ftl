@@ -79,3 +79,40 @@ ui-batch-hidden = { $hidden ->
 }
 ui-batch-clear = Clear selection
 ui-batch-region = Selection actions
+
+## The command palette (A3.5 (3)).
+
+ui-palette-name = Command palette
+ui-palette-field = Search commands
+ui-palette-placeholder = Type a command, page or setting
+ui-palette-results = Commands
+# $query (String) - what was typed
+ui-palette-none = No commands match “{ $query }”.
+ui-palette-hint-move = ↑↓ to move
+ui-palette-hint-open = Enter to open
+ui-palette-hint-close = Esc to close
+
+## A job's toast (A3.5 (7)).
+
+ui-toast-region = Job status
+# $job (String) - the job's name
+# $percent (Number) - how far it has come
+ui-toast-progress = { $job }: { $percent } %
+# $job (String) - the job's name
+ui-toast-done = { $job } finished.
+# $job (String) - the job's name
+ui-toast-done-restart = { $job } finished. Restart Windows to complete it.
+# $job (String) - the job's name
+# $applied (Number) - changes applied
+# $total (Number) - changes planned
+ui-toast-failed = { $job } failed. { $applied } of { $total } changes were applied.
+# $job (String) - the job's name
+# $applied (Number) - changes applied
+# $total (Number) - changes planned
+ui-toast-cancelled = { $job } was cancelled after { $applied } of { $total } changes.
+# $job (String) - the job's name
+# $reason (String) - why it stopped
+ui-toast-aborted = { $job } stopped: { $reason }
+ui-toast-view = View
+ui-toast-undo = Undo…
+ui-toast-dismiss = Dismiss

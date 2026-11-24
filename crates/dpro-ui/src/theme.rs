@@ -150,11 +150,17 @@ pub enum Tone {
     InverseAccent,
     /// Text on [`InverseAccent`](Self::InverseAccent).
     OnInverseAccent,
+    // Slice 6c (A3.5 (3), (8), addition 13).
+    /// `smoke`: black at 22 % (26 % in dark) over the main window while the palette or a dialog
+    /// is open. Painted over everything, never a fill; none in high contrast (§4.4).
+    Smoke,
+    /// A running job card's border: accent at 35 %.
+    RunningBorder,
 }
 
 impl Tone {
     /// Every tone, in declaration order (the theme's table order).
-    pub const ALL: [Self; 36] = [
+    pub const ALL: [Self; 38] = [
         Self::App,
         Self::Surface,
         Self::Subtle,
@@ -191,6 +197,8 @@ impl Tone {
         Self::InverseText,
         Self::InverseAccent,
         Self::OnInverseAccent,
+        Self::Smoke,
+        Self::RunningBorder,
     ];
 
     /// A fill high contrast shows as `Highlight`: accent, danger, the selection and the batch
@@ -246,6 +254,11 @@ const OUTLINE_ALPHA: u8 = 77;
 /// Dark's Undoable and Caution badge fills: their status color at 16 % (41 of 255) over the
 /// surface, as dark as the Permanent badge's tint (decision #45 left the dark values to compute).
 const BADGE_TINT_DARK: u8 = 41;
+/// Slice 6c: `smoke`, doc 05's black at 22–26 % (56 and 66 of 255), 22 % over light and 26 % over
+/// dark, where a lighter veil hardly shows; and a running job card's border, accent at 35 % (89).
+const SMOKE_LIGHT: u8 = 56;
+const SMOKE_DARK: u8 = 66;
+const RUNNING_BORDER_ALPHA: u8 = 89;
 
 impl Theme {
     pub const LIGHT: Self = {
@@ -297,6 +310,9 @@ impl Theme {
                 Color::hex(0xE8_EAEE),
                 Color::hex(0x6E_A0FF),
                 Color::hex(0x0B_1630),
+                // Slice 6c: the scrim and a running job card's border.
+                Color::hex(0).alpha(SMOKE_LIGHT),
+                accent.alpha(RUNNING_BORDER_ALPHA),
             ],
             sys: None,
         }
@@ -353,6 +369,9 @@ impl Theme {
                 Color::hex(0x14_171C),
                 Color::hex(0x25_63EB),
                 Color::hex(0xFF_FFFF),
+                // Slice 6c: the scrim and a running job card's border.
+                Color::hex(0).alpha(SMOKE_DARK),
+                accent.alpha(RUNNING_BORDER_ALPHA),
             ],
             sys: None,
         }
@@ -413,6 +432,9 @@ impl Theme {
                 sys.window_text,
                 sys.highlight,
                 sys.highlight_text,
+                // Slice 6c: no scrim (no custom colors), and the card's border in window text.
+                none,
+                sys.window_text,
             ],
             sys: Some(sys),
         }
@@ -733,6 +755,72 @@ pub mod tokens {
         pub const TEXT_MIN_W: f32 = 240.0;
         /// A window narrower than this puts every row's control under its text.
         pub const NARROW: f32 = 600.0;
+    }
+
+    // Slice 6c: the palette, the toast, the job card and the dialog frame (A3.5 (3), (7), (8),
+    // (13)).
+
+    /// The command palette (A3.5 (3)).
+    pub mod palette {
+        /// Its width; less where the owner's client area is narrower than this and two
+        /// [`MARGIN`]s.
+        pub const WIDTH: f32 = 640.0;
+        /// From the owner's client area's top.
+        pub const TOP: f32 = 96.0;
+        /// The least it keeps from the owner's client area's sides.
+        pub const MARGIN: f32 = 16.0;
+        /// At most this many result rows show at 100 % text; the rest scroll.
+        pub const ROWS: u16 = 8;
+        /// A result row's least height at 100 % text, so that [`ROWS`] of them make the list's
+        /// height; taller when the text size needs it.
+        pub const ROW_H: f32 = 40.0;
+        /// Inside a row's edge, from its text.
+        pub const ROW_PAD: f32 = 10.0;
+        /// Inside the field row's, the status's and the hints' edges: 12 × 16.
+        pub const PAD_X: f32 = 16.0;
+        pub const PAD_Y: f32 = 12.0;
+    }
+
+    /// A job's toast (A3.5 (7)).
+    pub mod toast {
+        /// Its width; less where the owner's client area is narrower than this and two
+        /// [`INSET`]s.
+        pub const WIDTH: f32 = 360.0;
+        /// From the owner's client area's bottom and end.
+        pub const INSET: f32 = 16.0;
+        /// Inside its edge.
+        pub const PADDING: f32 = 16.0;
+        /// Its actions' least height, and Dismiss's square.
+        pub const BUTTON_H: f32 = 32.0;
+    }
+
+    /// A job's progress bars (A3.5 (7), (8)).
+    pub mod progress {
+        /// The toast's and the job card's bar: 6 px, a pill.
+        pub const JOB_H: f32 = 6.0;
+    }
+
+    /// A job card (A3.5 (8)).
+    pub mod job {
+        /// Inside its edge.
+        pub const PADDING: f32 = 20.0;
+        /// Cancel's least height.
+        pub const BUTTON_H: f32 = 32.0;
+    }
+
+    /// The dialog frame (A3.5 (13)).
+    pub mod dialog {
+        /// A dialog popup's width (A5's); less where the owner's client area is narrower than
+        /// this and two [`MARGIN`]s.
+        pub const WIDTH: f32 = 440.0;
+        /// The least it keeps from the owner's client area's sides.
+        pub const MARGIN: f32 = 16.0;
+        /// Inside its edge.
+        pub const PADDING: f32 = 24.0;
+        /// Above the footer's buttons.
+        pub const FOOTER_GAP: f32 = 24.0;
+        /// The buttons' least height.
+        pub const BUTTON_H: f32 = 40.0;
     }
 }
 

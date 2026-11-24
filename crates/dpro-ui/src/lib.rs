@@ -93,5 +93,5 @@ pub use table::{
 pub use text::{CaretStop, FakeText, GlyphSink, Icon, TextMetrics, TextStyle, TextSystem};
 pub use theme::{Color, Scheme, SysColors, Theme, Tone, tokens};
 pub use tree::{Element, Group, Key, Landmark, Live, Look, NodeId, NodeInfo, Radius, Role};
-pub use ui::{MAX_TEXT_SCALE, Motion, Ui};
+pub use ui::{MAX_TEXT_SCALE, MESSAGE_MS, Motion, Ui};
 pub use values::{Formats, InvariantFormats, SizeUnits, format_size};

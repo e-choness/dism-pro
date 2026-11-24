@@ -191,6 +191,9 @@ pub(crate) struct Field<M> {
     pub(crate) line: f32,
     /// The content box's width at the last layout.
     pub(crate) view: f32,
+    /// The node it drives (UIA's `ControllerFor`): the palette's results (TD-0009 A3.5 (3)), or
+    /// [`NIL`].
+    pub(crate) controls: u32,
 }
 
 impl<M> Field<M> {
@@ -210,6 +213,7 @@ impl<M> Field<M> {
             ordered: true,
             line: 0.0,
             view: 0.0,
+            controls: NIL,
         }
     }
 
@@ -578,6 +582,7 @@ impl<M> Ui<M> {
         slot.stops_valid = false;
         slot.width = 0.0;
         slot.view = 0.0;
+        slot.controls = NIL;
         self.free_fields.push(f);
     }
 

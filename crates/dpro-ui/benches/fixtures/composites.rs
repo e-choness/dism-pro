@@ -22,12 +22,13 @@ use std::fmt::Write as _;
 
 use dpro_ui::{
     Align, Axes, Bytes, Canvas, Cx, Dim, Element, FakeText, Input, Insets, InvariantFormats, Key,
-    KeyCode, KeyEvent, Landmark, Live, Mods, Motion, Point, RectPx, Size, SizeUnits, Style,
-    TextEdit, TextStyle, Theme, Tri, Ui,
+    KeyCode, KeyEvent, Landmark, Live, Mods, Motion, Point, Popup, PopupKind, RectPx, Size,
+    SizeUnits, Style, TextEdit, TextStyle, Theme, Tri, Ui,
     accesskit::{Node, NodeId as AkId, TreeUpdate},
     composite::{
-        BadgeSpec, BadgeTone, BatchBar, CardValue, Emphasis, ErrorPanel, ErrorTone, InfoBar,
-        InfoTone, LogExcerpt, ScanCard, ScanLabels, ScanSize, SettingsRow, StatusTone, SummaryCard,
+        BadgeSpec, BadgeTone, BatchBar, CardValue, DialogFrame, Emphasis, ErrorPanel, ErrorTone,
+        InfoBar, InfoTone, JobCard, LogExcerpt, PaletteRow, PaletteView, ScanCard, ScanLabels,
+        ScanSize, SettingsRow, StatusTone, SummaryCard, Toast, ToastTone,
     },
     tokens::{self, SPACE, font},
 };
@@ -249,7 +250,37 @@ pub(crate) enum Msg {
     When(u8),
     Keep,
     Days(bool),
+    /// A field's edit: the palette's while it's open (it takes activation, so its field is the
+    /// one typed into), else the Days field's, which only its step changes. One variant for both
+    /// (slice 6c): a second one holding a `TextEdit` costs `Msg` a tag, 8 bytes, and every
+    /// composites bench a wider message to move.
     Edit(TextEdit),
+    // Slice 6c.
+    /// Ctrl+K: the palette opens with an empty query; and its `on_close` (Esc, a click outside).
+    PaletteOpen,
+    PaletteClose,
+    /// The palette's field: Up (`true`) or Down, Enter, and a click on result `i`.
+    PaletteStep(bool),
+    PaletteRun,
+    PalettePick(u32),
+    /// A job starts (its toast shows, and its card), its progress in percent, its line brought up
+    /// to date (at most every 2 s, §4.4), a second of it, and its end.
+    JobStart,
+    Progress(u32),
+    JobLine,
+    JobTick,
+    JobEnd(ToastTone),
+    /// The toast's Dismiss (its button, Esc, an ended toast's hide), and its actions.
+    ToastDismiss,
+    ToastView,
+    ToastUndo,
+    /// The job card's Cancel.
+    JobCancel,
+    /// The close-while-running dialog opens; one of its buttons; its cancel (Esc, a click
+    /// outside).
+    DialogOpen,
+    DialogAnswer(u8),
+    DialogCancel,
 }
 
 /// What a scan card shows.
@@ -282,6 +313,8 @@ pub(crate) struct Model {
     days_text: String,
     /// The last message a test may look for: what a card opened, a batch action, …
     pub(crate) last: Option<Msg>,
+    /// Slice 6c: the palette, the job and the dialog.
+    pub(crate) over: Overlay,
 }
 
 impl Model {
@@ -330,6 +363,7 @@ impl Model {
             days: 30,
             days_text: String::with_capacity(8),
             last: None,
+            over: Overlay::new(),
         };
         m.format();
         m
@@ -382,8 +416,27 @@ impl Model {
             | Msg::OpenLog
             | Msg::Copy
             | Msg::InfoAction
-            | Msg::Keep
-            | Msg::Edit(_) => {}
+            | Msg::Keep => {}
+            Msg::Edit(_) if !self.over.palette => {}
+            // Slice 6c.
+            Msg::PaletteOpen
+            | Msg::PaletteClose
+            | Msg::Edit(_)
+            | Msg::PaletteStep(_)
+            | Msg::PaletteRun
+            | Msg::PalettePick(_)
+            | Msg::JobStart
+            | Msg::Progress(_)
+            | Msg::JobLine
+            | Msg::JobTick
+            | Msg::JobEnd(_)
+            | Msg::ToastDismiss
+            | Msg::ToastView
+            | Msg::ToastUndo
+            | Msg::JobCancel
+            | Msg::DialogOpen
+            | Msg::DialogAnswer(_)
+            | Msg::DialogCancel => self.over.update(&msg),
         }
         self.format();
         self.last = Some(msg);
@@ -419,6 +472,10 @@ pub(crate) fn view(m: &Model, cx: &mut Cx<'_, Msg>) {
                     })
                     .heading(1),
             );
+            // Slice 6c: a running job's card, as Activity's Running section shows it.
+            if m.over.job.is_some_and(|j| j.tone == ToastTone::Running) {
+                job_card(m, cx);
+            }
             cx.badges(BADGES, &BADGE_SPECS);
             cards(cx);
             scans(m, cx);
@@ -641,6 +698,9 @@ pub(crate) enum Step {
     Tick(u64),
     /// Windows' text size changed, as a factor: 1 to 2.25.
     TextScale(f32),
+    /// Slice 6c: input to the popup's window (the palette or the dialog), and to the toast's.
+    Popup(Input),
+    Toast(Input),
 }
 
 /// A key pressed, as a step.
@@ -677,6 +737,8 @@ pub(crate) struct Run {
     pub(crate) damage: Vec<RectPx>,
     /// Layouts run since the run started: a frame's build and layout counts one.
     pub(crate) frames: u64,
+    /// Slice 6c: the popup's and the toast's windows.
+    pub(crate) win: Windows,
 }
 
 impl Run {
@@ -720,11 +782,14 @@ impl Run {
             take_a11y: false,
             damage: Vec::with_capacity(256),
             frames: 0,
+            win: Windows::new(motion),
         };
         run.ui.set_active(true);
         run.ui
             .set_formats(InvariantFormats::new(SizeUnits::new(UNITS)));
         run.ui.set_text_scale(text_scale);
+        run.win.popup.set_text_scale(text_scale);
+        run.win.toast.set_text_scale(text_scale);
         run.frame();
         run
     }
@@ -741,8 +806,19 @@ impl Run {
             Step::Tick(ms) => {
                 self.now += ms;
                 self.ui.tick(self.now, &mut self.msgs);
+                self.win.tick(self.now, &mut self.msgs);
             }
-            Step::TextScale(t) => self.ui.set_text_scale(t),
+            Step::TextScale(t) => {
+                self.ui.set_text_scale(t);
+                self.win.popup.set_text_scale(t);
+                self.win.toast.set_text_scale(t);
+            }
+            Step::Popup(input) => self.popup_input(input),
+            Step::Toast(input) => {
+                if self.win.toast_open {
+                    self.win.toast.dispatch(input, &mut self.msgs);
+                }
+            }
         }
         for m in self.msgs.drain(..) {
             self.model.update(m);
@@ -752,24 +828,50 @@ impl Run {
 
     /// Ticks 60 Hz frames until the UI stops asking for them.
     pub(crate) fn settle(&mut self) {
-        while self.ui.wants_frame() {
+        while self.ui.wants_frame() || self.win.wants_frame() {
             self.step(Step::Tick(FRAME_MS));
         }
     }
 
-    /// How long until the platform's one-shot wake is due, if it is: the caret's next blink or a
-    /// tooltip's next change.
+    /// How long until the platform's one-shot wake is due, if it is: the caret's next blink, a
+    /// tooltip's next change, or an ended toast's hide.
     pub(crate) fn wake(&mut self) -> Option<u64> {
         [
             self.ui.caret_timer(self.now),
             self.ui.tooltip_timer(self.now),
+            self.win
+                .popup_open
+                .and_then(|_| self.win.popup.caret_timer(self.now)),
+            self.win
+                .toast_open
+                .then(|| self.win.toast.expiry_timer(self.now))
+                .flatten(),
         ]
         .into_iter()
         .flatten()
         .min()
     }
 
+    /// What the platform does with input to the popup's window: Esc sends its `on_close`; the
+    /// palette's and the dialog's messages run as they come (they close themselves).
+    fn popup_input(&mut self, input: Input) {
+        let Some(open) = popup(&self.model) else {
+            return;
+        };
+        if let Input::Key(k) = input
+            && k.down
+            && k.key == KeyCode::Escape
+        {
+            self.msgs.push(open.on_close);
+            return;
+        }
+        self.win.popup.dispatch(input, &mut self.msgs);
+    }
+
     fn frame(&mut self) {
+        // The scrim shows over the page while the palette or the dialog is open (A3.5 addition
+        // 13).
+        self.ui.set_scrim(popup(&self.model).is_some());
         let model = &self.model;
         self.ui.build(|cx| view(model, cx));
         self.ui.layout(&mut self.text);
@@ -788,6 +890,12 @@ impl Run {
         if self.take_a11y {
             drop(self.ui.a11y_update());
         }
+        self.win.frame(
+            &self.model,
+            &mut self.text,
+            self.theme.as_ref(),
+            self.take_a11y,
+        );
     }
 
     /// The node at `path` from the root.
@@ -913,4 +1021,756 @@ impl Run {
         self.settle();
         self
     }
+}
+
+// ---- Slice 6c: the palette, a job's toast and card, and the dialog (A3.7) -------------------
+
+/// The palette's popup, the toast and the dialog's popup; the job card is on the page.
+pub(crate) const PALETTE: Key = Key::name("palette");
+pub(crate) const TOAST: Key = Key::name("toast");
+pub(crate) const JOB: Key = Key::name("job");
+pub(crate) const DIALOG: Key = Key::name("dialog");
+/// The dialog's body text.
+pub(crate) const DIALOG_TEXT: Key = Key::name("dialog-text");
+
+/// The palette's entries as the app's registry ranks them (A5 owns the real ones): a command,
+/// where it is, and its keys. Pages, then commands, then settings.
+pub(crate) const ENTRIES: [(&str, &str, &str); 64] = [
+    ("Home", "Page", "Ctrl+1"),
+    ("Clean", "Page", "Ctrl+2"),
+    ("Optimize", "Page", "Ctrl+3"),
+    ("Drivers", "Page", "Ctrl+4"),
+    ("Updates", "Page", "Ctrl+5"),
+    ("Apps", "Page", "Ctrl+6"),
+    ("Features", "Page", ""),
+    ("Startup", "Page", ""),
+    ("Services", "Page", ""),
+    ("Activity", "Page", "Ctrl+0"),
+    ("Images", "Page", ""),
+    ("Boot entries", "Page", ""),
+    ("Restore points", "Page", ""),
+    ("Hosts file", "Page", ""),
+    ("File associations", "Page", ""),
+    ("Settings", "Page", "Ctrl+,"),
+    ("Scan for junk files", "Clean", "F5"),
+    ("Clean selected categories", "Clean", "Ctrl+Enter"),
+    ("Empty the Recycle Bin", "Clean", ""),
+    ("Clean the Windows Update cache", "Clean", ""),
+    ("Delete error reports", "Clean", ""),
+    ("Clean thumbnails", "Clean", ""),
+    ("Clean Delivery Optimization files", "Clean", ""),
+    ("Analyze the component store", "Optimize", ""),
+    ("Clean up the component store", "Optimize", ""),
+    ("Reset the base of superseded components", "Optimize", ""),
+    ("Export drivers", "Drivers", ""),
+    ("Remove old driver packages", "Drivers", ""),
+    ("Add a driver", "Drivers", ""),
+    ("Check for updates", "Updates", ""),
+    ("Hide an update", "Updates", ""),
+    ("Uninstall an update", "Updates", ""),
+    ("Uninstall an app", "Apps", ""),
+    ("Remove a provisioned app", "Apps", ""),
+    ("Turn a feature on or off", "Features", ""),
+    ("Disable a startup item", "Startup", ""),
+    ("Change the startup type of a service", "Services", ""),
+    ("Undo the last job", "Activity", "Ctrl+Z"),
+    ("Open the job log", "Activity", ""),
+    ("Mount an image", "Images", ""),
+    ("Unmount an image", "Images", ""),
+    ("Capture an image", "Images", ""),
+    ("Change the target", "Target", "Ctrl+T"),
+    ("Open an offline Windows", "Target", ""),
+    ("Create a restore point", "Restore points", ""),
+    ("Edit the hosts file", "Hosts file", ""),
+    ("Copy diagnostics", "Help", ""),
+    ("Check for a new version", "Help", ""),
+    ("Theme", "Appearance", ""),
+    ("Glass effects", "Appearance", ""),
+    ("Text size", "Appearance", ""),
+    ("Language", "Language", ""),
+    ("Keep logs for", "Cleanup", ""),
+    ("Empty the Recycle Bin when cleaning", "Cleanup", ""),
+    ("Scan when the page opens", "Cleanup", ""),
+    ("Restore point before each job", "Safety", ""),
+    ("Undo history", "Safety", ""),
+    ("Confirm permanent changes", "Safety", ""),
+    ("Agent access", "Agents", ""),
+    ("Command palette shortcut", "Keyboard", ""),
+    ("Show accelerator keys", "Keyboard", ""),
+    ("Telemetry", "Privacy", ""),
+    ("Update channel", "Updates", ""),
+    ("Reset all settings", "Advanced", ""),
+];
+/// The areas: each one's first entry and its header.
+pub(crate) const AREAS: [(u32, &str); 3] = [(0, "Pages"), (16, "Commands"), (48, "Settings")];
+/// At most this many results (A5's `palette::MAX_ROWS`).
+pub(crate) const MAX_ROWS: usize = 50;
+/// The entries that can't be undone carry a badge.
+const PERMANENT: [u32; 2] = [20, 25];
+/// The entry disabled while a job holds its target.
+pub(crate) const DISABLED: u32 = 24;
+/// The job the toast and the card show.
+pub(crate) const JOB_NAME: &str = "Cleanup";
+/// The dialog's buttons: none is the default; focus starts on the first.
+pub(crate) const DIALOG_BUTTONS: [(&str, Msg, Emphasis); 3] = [
+    ("Keep running", Msg::DialogAnswer(0), Emphasis::Normal),
+    (
+        "Close when it's done",
+        Msg::DialogAnswer(1),
+        Emphasis::Primary,
+    ),
+    (
+        "Cancel the job and close",
+        Msg::DialogAnswer(2),
+        Emphasis::Danger,
+    ),
+];
+
+/// A job, as the toast and the card show it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Job {
+    /// How far it has come, in percent.
+    pub(crate) percent: u16,
+    pub(crate) tone: ToastTone,
+    /// Its toast shows.
+    pub(crate) toast: bool,
+    pub(crate) cancelling: bool,
+    pub(crate) seconds: u32,
+}
+
+/// What shows over the page and in its windows: the palette, a job, the dialog.
+pub(crate) struct Overlay {
+    pub(crate) palette: bool,
+    pub(crate) query: String,
+    pub(crate) rows: Vec<PaletteRow<'static>>,
+    pub(crate) groups: Vec<(u32, &'static str)>,
+    pub(crate) highlighted: Option<u32>,
+    pub(crate) status: String,
+    pub(crate) job: Option<Job>,
+    /// The job's line and elapsed time, formatted on change.
+    pub(crate) line: String,
+    pub(crate) elapsed: String,
+    pub(crate) dialog: bool,
+    /// What the palette, the toast or the dialog last ran.
+    pub(crate) ran: Option<Msg>,
+}
+
+impl Overlay {
+    fn new() -> Self {
+        let mut o = Self {
+            palette: false,
+            query: String::with_capacity(64),
+            rows: Vec::with_capacity(MAX_ROWS),
+            groups: Vec::with_capacity(AREAS.len()),
+            highlighted: None,
+            status: String::with_capacity(128),
+            job: None,
+            line: String::with_capacity(96),
+            elapsed: String::with_capacity(16),
+            dialog: false,
+            ran: None,
+        };
+        o.refilter();
+        o
+    }
+
+    /// Whether the toast shows.
+    pub(crate) fn toast(&self) -> bool {
+        self.job.is_some_and(|j| j.toast)
+    }
+
+    fn update(&mut self, msg: &Msg) {
+        match msg {
+            Msg::PaletteOpen => {
+                self.palette = true;
+                self.query.clear();
+                self.refilter();
+            }
+            Msg::PaletteClose => self.palette = false,
+            Msg::Edit(edit) => {
+                if edit.apply(&mut self.query) {
+                    self.refilter();
+                }
+            }
+            Msg::PaletteStep(up) => {
+                let n = u32::try_from(self.rows.len()).unwrap_or(0);
+                if n > 0 {
+                    let h = self.highlighted.unwrap_or(0);
+                    self.highlighted = Some(if *up { (h + n - 1) % n } else { (h + 1) % n });
+                }
+            }
+            Msg::PaletteRun => {
+                if let Some(h) = self.highlighted {
+                    self.run(h);
+                }
+            }
+            Msg::PalettePick(i) => self.run(*i),
+            Msg::JobStart => {
+                self.job = Some(Job {
+                    percent: 0,
+                    tone: ToastTone::Running,
+                    toast: true,
+                    cancelling: false,
+                    seconds: 0,
+                });
+                self.format_job();
+            }
+            Msg::Progress(p) => {
+                if let Some(j) = &mut self.job {
+                    j.percent = u16::try_from((*p).min(100)).unwrap_or(100);
+                }
+            }
+            Msg::JobLine | Msg::JobTick | Msg::JobEnd(_) | Msg::JobCancel => {
+                if let Some(j) = &mut self.job {
+                    match msg {
+                        Msg::JobTick => j.seconds += 1,
+                        Msg::JobEnd(tone) => {
+                            j.tone = *tone;
+                            j.toast = true;
+                        }
+                        Msg::JobCancel => j.cancelling = true,
+                        _ => {}
+                    }
+                }
+                self.format_job();
+            }
+            Msg::ToastDismiss => {
+                if let Some(j) = &mut self.job {
+                    j.toast = false;
+                    // An ended job is in Activity's history; a running one goes on.
+                    if j.tone != ToastTone::Running {
+                        self.job = None;
+                    }
+                }
+            }
+            Msg::ToastView | Msg::ToastUndo => self.ran = Some(msg.clone()),
+            Msg::DialogOpen => self.dialog = true,
+            Msg::DialogAnswer(_) => {
+                self.ran = Some(msg.clone());
+                self.dialog = false;
+            }
+            Msg::DialogCancel => self.dialog = false,
+            _ => {}
+        }
+    }
+
+    /// Result `i` runs, if it's enabled: the palette closes.
+    fn run(&mut self, i: u32) {
+        if self.rows.get(i as usize).is_some_and(|r| r.enabled) {
+            self.ran = Some(Msg::PalettePick(i));
+            self.palette = false;
+        }
+    }
+
+    /// The results for the query: the entries whose label holds it (ASCII case aside), at most
+    /// [`MAX_ROWS`], each area under its header; the first highlighted; "no matches" if none.
+    fn refilter(&mut self) {
+        self.rows.clear();
+        self.groups.clear();
+        for (entry, (label, detail, accel)) in (0..).zip(ENTRIES) {
+            if self.rows.len() == MAX_ROWS {
+                break;
+            }
+            if !holds(label, &self.query) {
+                continue;
+            }
+            let at = u32::try_from(self.rows.len()).unwrap_or(u32::MAX);
+            if let Some(&(_, header)) = AREAS.iter().rev().find(|(first, _)| entry >= *first)
+                && self.groups.last().is_none_or(|&(_, h)| h != header)
+            {
+                self.groups.push((at, header));
+            }
+            self.rows.push(PaletteRow {
+                entry,
+                label,
+                detail,
+                accel,
+                badge: PERMANENT.contains(&entry).then_some(BadgeSpec {
+                    text: "Permanent",
+                    tone: BadgeTone::Permanent,
+                    description: Some("Can't be undone."),
+                }),
+                enabled: entry != DISABLED,
+                reason: if entry == DISABLED { BUSY } else { "" },
+            });
+        }
+        self.highlighted = (!self.rows.is_empty()).then_some(0);
+        self.status.clear();
+        if self.rows.is_empty() {
+            let _ = write!(
+                self.status,
+                "No commands match \u{201c}{}\u{201d}.",
+                self.query
+            );
+        }
+    }
+
+    /// The job's line and elapsed time, into their buffers.
+    fn format_job(&mut self) {
+        let Some(j) = self.job else {
+            return;
+        };
+        self.line.clear();
+        let _ = match j.tone {
+            ToastTone::Running => write!(self.line, "{JOB_NAME}: {} %", j.percent),
+            ToastTone::Done => write!(self.line, "{JOB_NAME} finished."),
+            ToastTone::Warning => write!(
+                self.line,
+                "{JOB_NAME} finished. Restart Windows to complete it."
+            ),
+            ToastTone::Failed => {
+                write!(self.line, "{JOB_NAME} failed. 4 of 7 changes were applied.")
+            }
+        };
+        self.elapsed.clear();
+        let _ = write!(self.elapsed, "{}:{:02}", j.seconds / 60, j.seconds % 60);
+    }
+}
+
+/// Whether `hay` holds `needle`, ASCII case aside, without allocating.
+fn holds(hay: &str, needle: &str) -> bool {
+    needle.is_empty()
+        || hay
+            .as_bytes()
+            .windows(needle.len())
+            .any(|w| w.eq_ignore_ascii_case(needle.as_bytes()))
+}
+
+/// The model's popup: the palette or the dialog.
+pub(crate) fn popup(m: &Model) -> Option<Popup<Msg>> {
+    if m.over.palette {
+        Some(Popup {
+            kind: PopupKind::Palette,
+            on_close: Msg::PaletteClose,
+        })
+    } else if m.over.dialog {
+        Some(Popup {
+            kind: PopupKind::Dialog,
+            on_close: Msg::DialogCancel,
+        })
+    } else {
+        None
+    }
+}
+
+/// What the popup's window shows.
+pub(crate) fn popup_view(m: &Model, cx: &mut Cx<'_, Msg>) {
+    if m.over.palette {
+        palette_view(m, cx);
+    } else if m.over.dialog {
+        dialog_view(cx);
+    }
+}
+
+/// The palette's view.
+pub(crate) fn palette_view(m: &Model, cx: &mut Cx<'_, Msg>) {
+    let o = &m.over;
+    cx.palette(
+        PALETTE,
+        &PaletteView {
+            name: "Command palette",
+            field: "Search commands",
+            placeholder: "Type a command, page or setting",
+            results: "Commands",
+            esc: "Esc",
+            query: &o.query,
+            on_edit: Msg::Edit,
+            on_step: Msg::PaletteStep,
+            on_run: Msg::PaletteRun,
+            on_pick: Msg::PalettePick,
+            rows: &o.rows,
+            groups: &o.groups,
+            highlighted: o.highlighted,
+            status: &o.status,
+            hints: ["\u{2191}\u{2193} to move", "Enter to open", "Esc to close"],
+        },
+    );
+}
+
+/// The toast's view, while it shows.
+pub(crate) fn toast_view(m: &Model, cx: &mut Cx<'_, Msg>) {
+    let Some(j) = m.over.job.filter(|j| j.toast) else {
+        return;
+    };
+    let ended = j.tone != ToastTone::Running;
+    cx.toast(
+        TOAST,
+        &Toast {
+            tone: j.tone,
+            region: "Job status",
+            title: JOB_NAME,
+            line: &m.over.line,
+            progress: (!ended).then(|| f32::from(j.percent) / 100.0),
+            actions: [
+                ended.then_some(("View", Msg::ToastView)),
+                (j.tone == ToastTone::Done).then_some(("Undo\u{2026}", Msg::ToastUndo)),
+            ],
+            dismiss: ("Dismiss", Msg::ToastDismiss),
+        },
+    );
+}
+
+/// The running job's card. Its line is live only while the toast doesn't show (one live view of
+/// a job, A3.5 (7)).
+fn job_card(m: &Model, cx: &mut Cx<'_, Msg>) {
+    let Some(j) = m.over.job else {
+        return;
+    };
+    cx.job_card(
+        JOB,
+        &JobCard {
+            title: JOB_NAME,
+            elapsed: &m.over.elapsed,
+            progress: f32::from(j.percent) / 100.0,
+            line: &m.over.line,
+            live: !j.toast,
+            cancel: Some((
+                if j.cancelling {
+                    "Cancelling\u{2026}"
+                } else {
+                    "Cancel"
+                },
+                Msg::JobCancel,
+            )),
+            cancelling: j.cancelling,
+        },
+    );
+}
+
+/// The close-while-running dialog (A5's `ui-close-running`).
+pub(crate) fn dialog_view(cx: &mut Cx<'_, Msg>) {
+    cx.dialog_frame(
+        DIALOG,
+        &DialogFrame {
+            title: "A job is still running",
+            description: Some("Cleanup is 40 % done."),
+            buttons: &DIALOG_BUTTONS,
+            initial: 0,
+            cancel: Msg::DialogCancel,
+        },
+        |cx| {
+            cx.add(
+                Element::text(
+                    DIALOG_TEXT,
+                    "Closing now stops it after the current change. The changes it made stay, \
+                     and Activity can undo them.",
+                )
+                .text_style(TextStyle {
+                    wrap: true,
+                    ..TextStyle::default()
+                }),
+            );
+        },
+    );
+}
+
+/// Which window a test or a bench looks at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Window {
+    Page,
+    Popup,
+    Toast,
+}
+
+/// The windows over the page, as the platform hosts them: the model's popup (the palette or the
+/// dialog) and its toast, each a `Ui` of its own at the width the host gives it.
+pub(crate) struct Windows {
+    pub(crate) popup: Ui<Msg>,
+    pub(crate) popup_open: Option<PopupKind>,
+    pub(crate) toast: Ui<Msg>,
+    pub(crate) toast_open: bool,
+    popup_pixels: Vec<u32>,
+    toast_pixels: Vec<u32>,
+    /// Each window's last frame's damage.
+    pub(crate) popup_damage: Vec<RectPx>,
+    pub(crate) toast_damage: Vec<RectPx>,
+}
+
+impl Windows {
+    fn new(motion: Motion) -> Self {
+        let mut popup = Ui::new(Size { w: 0.0, h: 0.0 }, 1.0, motion);
+        let mut toast = Ui::new(Size { w: 0.0, h: 0.0 }, 1.0, motion);
+        popup.set_formats(InvariantFormats::new(SizeUnits::new(UNITS)));
+        toast.set_formats(InvariantFormats::new(SizeUnits::new(UNITS)));
+        Self {
+            popup,
+            popup_open: None,
+            toast,
+            toast_open: false,
+            popup_pixels: Vec::new(),
+            toast_pixels: Vec::new(),
+            popup_damage: Vec::with_capacity(64),
+            toast_damage: Vec::with_capacity(16),
+        }
+    }
+
+    fn tick(&mut self, now: u64, out: &mut Vec<Msg>) {
+        if self.popup_open.is_some() {
+            self.popup.tick(now, out);
+        }
+        if self.toast_open {
+            self.toast.tick(now, out);
+        }
+    }
+
+    fn wants_frame(&self) -> bool {
+        (self.popup_open.is_some() && self.popup.wants_frame())
+            || (self.toast_open && self.toast.wants_frame())
+    }
+
+    /// Opens, rebuilds or hides each window to match the model, as the host does after the main
+    /// view: built, sized to its content at its width, laid out, focused when it opens (the
+    /// popup), painted when frames are, and its update taken while a client listens.
+    fn frame(&mut self, model: &Model, text: &mut FakeText, theme: Option<&Theme>, a11y: bool) {
+        let want = popup(model).map(|p| p.kind);
+        if want != self.popup_open && self.popup_open.is_some() {
+            hide(&mut self.popup);
+            self.popup.build(|_| {});
+            self.popup.clear_damage();
+            self.popup_open = None;
+        }
+        if let Some(kind) = want {
+            let opening = self.popup_open.is_none();
+            let w = if kind == PopupKind::Palette {
+                tokens::palette::WIDTH
+            } else {
+                tokens::dialog::WIDTH
+            };
+            self.popup.build(|cx| popup_view(model, cx));
+            show(&mut self.popup, text, w, opening, a11y);
+            if opening {
+                self.popup.set_active(true);
+                self.popup.focus_first(true);
+            }
+            self.popup_open = Some(kind);
+            finish(
+                &mut self.popup,
+                &mut self.popup_pixels,
+                &mut self.popup_damage,
+                text,
+                theme,
+                a11y,
+            );
+        }
+        let toast = model.over.toast();
+        if !toast && self.toast_open {
+            hide(&mut self.toast);
+            // The next toast is a new one: its tree, and its hide wake, start again.
+            self.toast.build(|_| {});
+            self.toast.clear_damage();
+            self.toast_open = false;
+        }
+        if toast {
+            let opening = !self.toast_open;
+            self.toast.build(|cx| toast_view(model, cx));
+            show(&mut self.toast, text, tokens::toast::WIDTH, opening, a11y);
+            self.toast_open = true;
+            finish(
+                &mut self.toast,
+                &mut self.toast_pixels,
+                &mut self.toast_damage,
+                text,
+                theme,
+                a11y,
+            );
+        }
+    }
+}
+
+/// A window's frame after its build: sized to its content at `w`, laid out, and, when it opens,
+/// all of it damaged and its whole tree served to a client listening.
+fn show(ui: &mut Ui<Msg>, text: &mut FakeText, w: f32, opening: bool, a11y: bool) {
+    let size = ui.natural_size(text, w);
+    ui.set_viewport(Size { w, h: size.h });
+    ui.layout(text);
+    if opening {
+        ui.repaint_all();
+        if a11y {
+            drop(ui.a11y_tree());
+        }
+    }
+}
+
+/// A window's damage painted when frames are, kept for the tests, then cleared; and its update
+/// taken while a client listens.
+fn finish(
+    ui: &mut Ui<Msg>,
+    pixels: &mut Vec<u32>,
+    damage: &mut Vec<RectPx>,
+    text: &mut FakeText,
+    theme: Option<&Theme>,
+    a11y: bool,
+) {
+    if let Some(theme) = theme {
+        let (w, h) = ui.pixel_size();
+        pixels.resize(usize::try_from(u64::from(w) * u64::from(h)).unwrap_or(0), 0);
+        if let Some(mut canvas) = Canvas::new(pixels, w, h) {
+            ui.paint(&mut canvas, text, theme);
+        }
+    }
+    damage.clear();
+    damage.extend_from_slice(ui.damage());
+    ui.clear_damage();
+    if a11y {
+        drop(ui.a11y_update());
+    }
+}
+
+/// A window hidden: its press, hover and focus go.
+fn hide(ui: &mut Ui<Msg>) {
+    ui.cancel_press();
+    let mut none = Vec::new();
+    ui.dispatch(Input::PointerLeave, &mut none);
+    ui.set_focus(None);
+    ui.set_active(false);
+}
+
+impl Run {
+    /// The `Ui` of window `w`.
+    pub(crate) fn ui_of(&self, w: Window) -> &Ui<Msg> {
+        match w {
+            Window::Page => &self.ui,
+            Window::Popup => &self.win.popup,
+            Window::Toast => &self.win.toast,
+        }
+    }
+
+    /// The accessibility update window `w`'s frames left since the last one taken.
+    pub(crate) fn a11y_update_of(&mut self, w: Window) -> Option<TreeUpdate> {
+        match w {
+            Window::Page => self.ui.a11y_update(),
+            Window::Popup => self.win.popup.a11y_update(),
+            Window::Toast => self.win.toast.a11y_update(),
+        }
+    }
+
+    /// Window `w`'s whole tree, as a client that starts listening gets it.
+    pub(crate) fn a11y_tree_of(&mut self, w: Window) -> TreeUpdate {
+        match w {
+            Window::Page => self.ui.a11y_tree(),
+            Window::Popup => self.win.popup.a11y_tree(),
+            Window::Toast => self.win.toast.a11y_tree(),
+        }
+    }
+
+    /// The first node keyed `key` in window `w`, breadth first from its root.
+    pub(crate) fn part_in(&self, w: Window, key: Key) -> Option<dpro_ui::NodeId> {
+        let ui = self.ui_of(w);
+        let mut queue = std::collections::VecDeque::from([ui.root()]);
+        while let Some(id) = queue.pop_front() {
+            for c in ui.children(id) {
+                if ui.info(c).is_some_and(|n| n.key == key) {
+                    return Some(c);
+                }
+                queue.push_back(c);
+            }
+        }
+        None
+    }
+
+    /// The center of node `id` in window `w`.
+    pub(crate) fn center_in(&self, w: Window, id: dpro_ui::NodeId) -> Point {
+        self.ui_of(w)
+            .info(id)
+            .map_or(Point::default(), |n| n.rect.center())
+    }
+
+    /// Node `id` of window `w` as a client sees it in `tree`, if it's there.
+    pub(crate) fn ak_in<'t>(
+        &self,
+        w: Window,
+        tree: &'t TreeUpdate,
+        id: dpro_ui::NodeId,
+    ) -> Option<&'t Node> {
+        let ui = self.ui_of(w);
+        tree.nodes
+            .iter()
+            .find(|(ak, _)| ui.a11y_node(*ak) == Some(id))
+            .map(|(_, node)| node)
+    }
+
+    /// The main window's last painted pixel at (2, 2): the page's background, in its padding.
+    pub(crate) fn page_pixel(&self) -> u32 {
+        let (w, _) = self.ui.pixel_size();
+        self.pixels
+            .get(usize::try_from(2 * w + 2).unwrap_or(usize::MAX))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// The palette opened, settled: its field focused, the 50 first entries listed, the first
+    /// highlighted.
+    pub(crate) fn palette_open(mut self) -> Self {
+        self.step(Step::Update(Msg::PaletteOpen));
+        self.settle();
+        self
+    }
+
+    /// The dialog opened, settled.
+    pub(crate) fn dialog_open(mut self) -> Self {
+        self.step(Step::Update(Msg::DialogOpen));
+        self.settle();
+        self
+    }
+
+    /// A job started and at 40 %, its toast and its card showing, settled.
+    pub(crate) fn job_running(mut self) -> Self {
+        for s in [
+            Step::Update(Msg::JobStart),
+            Step::Update(Msg::Progress(40)),
+            Step::Update(Msg::JobLine),
+        ] {
+            self.step(s);
+        }
+        self.settle();
+        self
+    }
+
+    /// Steps that warm slice 6c's composites, and end where they started: the palette opened,
+    /// typed into (to no results and back), its highlight moved both ways and closed with Esc; a
+    /// job started, its progress, line and time, a cancel asked for, its end and its toast
+    /// dismissed; the dialog opened, Tab, and closed with Esc.
+    pub(crate) fn overlay_session() -> Vec<Step> {
+        vec![
+            Step::Update(Msg::PaletteOpen),
+            popup_char('s'),
+            popup_char('e'),
+            popup_key(KeyCode::Down),
+            popup_key(KeyCode::Down),
+            popup_key(KeyCode::Up),
+            popup_char('q'),
+            popup_char('q'),
+            popup_key(KeyCode::Backspace),
+            popup_key(KeyCode::Backspace),
+            popup_key(KeyCode::Backspace),
+            popup_key(KeyCode::Backspace),
+            popup_key(KeyCode::Up),
+            popup_key(KeyCode::Escape),
+            Step::Update(Msg::JobStart),
+            Step::Update(Msg::Progress(10)),
+            Step::Update(Msg::Progress(20)),
+            Step::Update(Msg::JobLine),
+            Step::Update(Msg::JobTick),
+            Step::Update(Msg::JobCancel),
+            Step::Update(Msg::JobEnd(ToastTone::Done)),
+            Step::Update(Msg::ToastDismiss),
+            Step::Update(Msg::DialogOpen),
+            popup_key(KeyCode::Tab),
+            popup_key(KeyCode::Escape),
+        ]
+    }
+}
+
+/// A character typed in the popup, as a step.
+pub(crate) fn popup_char(c: char) -> Step {
+    Step::Popup(Input::Char(c))
+}
+
+/// A key pressed in the popup, as a step.
+pub(crate) fn popup_key(key: KeyCode) -> Step {
+    Step::Popup(Input::Key(KeyEvent {
+        key,
+        down: true,
+        mods: Mods::default(),
+    }))
 }
