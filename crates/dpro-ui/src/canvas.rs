@@ -332,11 +332,34 @@ impl Shape {
 fn span(run: &mut [u32], c: Color) {
     if c.a == 255 {
         run.fill(opaque(c));
-    } else {
+    } else if c.a != 0 {
+        // `blend_px` at full coverage, exactly, with the source's half done once and two
+        // channels to a multiply: a window-wide scrim is one such span (slice 6c).
+        let src = premultiplied(c);
+        let inv = 255 - u32::from(c.a);
         for p in run {
-            blend_px(p, c, 255);
+            *p = src + scaled(*p, inv);
         }
     }
+}
+
+/// A pixel's red and blue, or (shifted down a byte) its green and alpha: two 16-bit lanes.
+const LANES: u32 = 0x00FF_00FF;
+
+/// Each channel of the pixel `px` times `k` / 255, rounded as [`div255`] rounds, two channels to
+/// a multiply: a 16-bit lane holds at most 255 × 255 + 128 + 254, so no lane carries into the
+/// next.
+#[expect(
+    clippy::inline_always,
+    reason = "a span's per-pixel step, as `blend_px` is"
+)]
+#[inline(always)]
+fn scaled(px: u32, k: u32) -> u32 {
+    let lanes = |v: u32| {
+        let x = v * k + 0x0080_0080;
+        ((x + ((x >> 8) & LANES)) >> 8) & LANES
+    };
+    lanes(px & LANES) | lanes((px >> 8) & LANES) << 8
 }
 
 /// An opaque color as a pixel.
@@ -439,6 +462,31 @@ mod tests {
 
     fn at(c: &Canvas<'_>, x: u32, y: u32) -> u32 {
         c.pixels()[idx_u(y * c.width() + x)]
+    }
+
+    /// A translucent span (a scrim, a state layer) is `blend_px` at full coverage, to the bit,
+    /// for every alpha over pixels of every channel value.
+    #[test]
+    fn a_translucent_span_is_blend_px_at_full_coverage() {
+        let dsts: Vec<u32> = (0..=255u32)
+            .map(|v| v << 24 | (255 - v) << 16 | (v * 7 % 256) << 8 | (v * 13 % 256))
+            .chain([0, 0xFFFF_FFFF, 0xFF00_FF00, 0x00FF_00FF])
+            .collect();
+        for a in 1..=255u8 {
+            let c = Color {
+                r: 200,
+                g: a,
+                b: 255 - a,
+                a,
+            };
+            let mut run = dsts.clone();
+            span(&mut run, c);
+            for (got, &dst) in run.iter().zip(&dsts) {
+                let mut want = dst;
+                blend_px(&mut want, c, 255);
+                assert_eq!(*got, want, "alpha {a} over {dst:#010x}");
+            }
+        }
     }
 
     #[test]
