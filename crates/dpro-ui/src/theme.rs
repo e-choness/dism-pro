@@ -576,6 +576,9 @@ pub mod tokens {
         pub const FOCUS: f32 = 2.0;
         /// A hairline drawn as a box: the dividers between settings rows (A3.5 (15)).
         pub const HAIRLINE: f32 = 1.0;
+        /// `stroke.contrast` (TD-0009 A4.4, A4.10 item 7): a transient surface's border in high
+        /// contrast, as Microsoft asks of flyouts and dialogs.
+        pub const CONTRAST: f32 = 2.0;
     }
 
     /// Menus, dropdown lists and tooltips (TD-0009 A1.10 item 1: the metrics of `WinUI`, until the

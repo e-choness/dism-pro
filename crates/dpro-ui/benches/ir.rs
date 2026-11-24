@@ -12,8 +12,8 @@
 //!   first frame at 100 and at 225 %. Popups (TD-0009 A1.7): Shift+F10 on a row (it's picked and
 //!   its menu built and laid out), Down in the open menu, and a pending tooltip coming due.
 //! - `paint`: U3 without presenting, frames painted at 1000 × 700, scale 1, light theme; and the
-//!   whole window repainted, as after a theme switch, at scales 1 and 1.5 and with the text at
-//!   225 %. With a keystroke and a caret blink in the field, a hold's frame, a progress report and
+//!   whole window repainted, as after a theme switch, at scales 1 and 1.5, with the text at
+//!   225 %, and in high contrast (slice 7d's audit). With a keystroke and a caret blink in the field, a hold's frame, a progress report and
 //!   Shift+F10 on a row, the menu's window included.
 //! - `popup`: a 6-item menu's `Ui` built, laid out and painted whole, as its window first shows.
 //! - `a11y`: U12 with a client listening, as in `a11y.rs`: the whole tree (the shell's, and an open
@@ -216,6 +216,30 @@ fn warm_painted_225() -> (Run, Vec<Step>) {
     warmed(Run::painted_text_scaled(Shell::new(), Theme::LIGHT, 2.25))
 }
 
+/// A dark contrast theme's system colors, as Night sky's are: all high contrast paints with.
+const CONTRAST: dpro_ui::SysColors = {
+    use dpro_ui::Color;
+    dpro_ui::SysColors {
+        window: Color::hex(0x00_0000),
+        window_text: Color::hex(0xFF_FFFF),
+        highlight: Color::hex(0x8E_E3F0),
+        highlight_text: Color::hex(0x26_3B50),
+        hot_light: Color::hex(0x75_E9FC),
+        gray_text: Color::hex(0xA6_A6A6),
+        btn_face: Color::hex(0x00_0000),
+        btn_text: Color::hex(0xFF_FFFF),
+    }
+};
+
+/// Warm and painted in high contrast at scale 1 (TD-0009 A4.5's audit, slice 7d).
+fn warm_painted_contrast() -> (Run, Vec<Step>) {
+    warmed(Run::painted(
+        Shell::new(),
+        1.0,
+        Theme::high_contrast(CONTRAST),
+    ))
+}
+
 #[library_benchmark]
 #[bench::scripted(setup = warm)]
 fn session((mut run, steps): (Run, Vec<Step>)) -> (Run, Vec<Step>) {
@@ -305,6 +329,7 @@ fn painted_first_frame(shell: Shell) -> Run {
 #[bench::light_100(setup = warm_painted)]
 #[bench::dark_150(setup = warm_painted_150)]
 #[bench::text_225(setup = warm_painted_225)]
+#[bench::contrast_100(setup = warm_painted_contrast)]
 fn repaint_all((mut run, steps): (Run, Vec<Step>)) -> (Run, Vec<Step>) {
     run.repaint_all();
     (run, steps)

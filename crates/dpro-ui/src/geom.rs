@@ -289,6 +289,27 @@ mod tests {
         assert!(px.contains_px(1, 0) && !px.contains_px(2, 0));
     }
 
+    /// A rectangle moved by whole pixels snaps to the same pixels, moved: a node scrolled into
+    /// view paints where reveal put it, above a viewport's top as below it (TD-0009 A4.5's
+    /// keyboard audit, rule 4: Shift+Tab left a focus ring a pixel under the viewport's edge).
+    #[test]
+    #[ignore = "slice 7d: lands with the code"]
+    fn snapping_commutes_with_whole_pixel_moves() {
+        for scale in [1.0_f32, 2.0] {
+            for y in [-0.5_f32, 0.5, 33.5, 1234.5, -1234.5] {
+                let r = Rect::new(2.5, y, 34.0, 34.0);
+                let moved = Rect::new(2.5 - 3.0, y - 1235.0, 34.0, 34.0);
+                let (a, b) = (r.snap(scale), moved.snap(scale));
+                let (dx, dy) = (px(3.0 * scale), px(1235.0 * scale));
+                assert_eq!(
+                    (a.x0 - dx, a.y0 - dy, a.x1 - dx, a.y1 - dy),
+                    (b.x0, b.y0, b.x1, b.y1),
+                    "{y} at {scale}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn containment_is_half_open() {
         let r = Rect::new(0.0, 0.0, 10.0, 10.0);
