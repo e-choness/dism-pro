@@ -418,12 +418,15 @@ fn a_disguised_name_lists_escaped_and_opens_as_itself() {
     let dir = std::env::temp_dir().join(format!("dpro-picker-bidi-{}", std::process::id()));
     drop(std::fs::remove_dir_all(&dir));
     let disguised = dir.join("photo\u{202E}gpj.exe");
-    if let Err(e) = std::fs::create_dir_all(&disguised) {
-        assert!(cfg!(windows), "a test folder: {e}");
-        std::fs::create_dir_all(dir.join("photo gpj.exe")).expect("a plain test folder");
-        eprintln!("this file system can't store a U+202E name ({e}); T1 lists one");
-        drop(std::fs::remove_dir_all(&dir));
-        return;
+    match std::fs::create_dir_all(&disguised) {
+        Ok(()) => {}
+        Err(e) if cfg!(windows) => {
+            std::fs::create_dir_all(dir.join("photo gpj.exe")).expect("a plain test folder");
+            eprintln!("this file system can't store a U+202E name ({e}); T1 lists one");
+            drop(std::fs::remove_dir_all(&dir));
+            return;
+        }
+        Err(e) => panic!("a test folder: {e}"),
     }
     std::fs::write(disguised.join("inner.txt"), b"x").expect("a test file");
     let mut m = FolderModel::new(Mode::File(Types::new(&["*.txt"])));
