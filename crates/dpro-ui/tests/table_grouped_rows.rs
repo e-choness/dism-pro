@@ -705,6 +705,23 @@ fn a_two_line_cell_is_named_by_its_first_line_and_described_by_its_second() {
     assert_eq!(cell.description(), None);
 }
 
+/// The current row's cells are pushed first, each build: every other row's two-line and badge
+/// cells are still theirs, at their own columns.
+#[test]
+fn the_rows_beside_the_current_one_keep_their_two_line_and_badge_cells() {
+    let mut page = Page::new(40, &STARTS);
+    page.current = Some(2);
+    let mut run = Run::new(page);
+    let tree = run.ui.a11y_tree();
+    for r in [1, 2, 4] {
+        let cell = node(&tree, &run.ui, run.cell(r, NAME));
+        assert_eq!(cell.label(), Some(name(r).as_str()), "row {r}");
+        assert_eq!(cell.description(), Some(evidence(r).as_str()), "row {r}");
+        let state = run.cell(r, STATE);
+        assert_eq!(descendants(&run.ui, state).len(), 1, "row {r}'s badge");
+    }
+}
+
 /// A badge cell holds the badge, centred in the row, and is named by its word; the badge itself
 /// is the cell's to say.
 #[test]

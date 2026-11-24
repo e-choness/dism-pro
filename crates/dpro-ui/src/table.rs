@@ -226,6 +226,9 @@ pub struct Cells<'b> {
     keep: usize,
     /// The table's rows have two lines, so a two-line cell keeps its second.
     two: bool,
+    /// Where this row's cells start in `ends`: after the current row's, which a build pushes
+    /// first and keeps.
+    first: usize,
 }
 
 /// [`Cells::keep`] for a build: every value is formatted, or kept from an earlier build.
@@ -270,6 +273,7 @@ impl<'b> Cells<'b> {
         keep: usize,
         two: bool,
     ) -> Self {
+        let first = ends.len();
         Self {
             text,
             ends,
@@ -278,12 +282,13 @@ impl<'b> Cells<'b> {
             formats,
             keep,
             two,
+            first,
         }
     }
 
-    /// The next cell's place in the row.
+    /// The next cell's place in the row, its column as [`CellText::mark`] counts them.
     fn next_cell(&self) -> u32 {
-        u32::try_from(self.ends.len()).unwrap_or(u32::MAX)
+        u32::try_from(self.ends.len() - self.first).unwrap_or(u32::MAX)
     }
 
     /// The next column's text. It's copied, so it can come from anywhere.
