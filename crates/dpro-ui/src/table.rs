@@ -31,6 +31,7 @@ use dpro_core::units::{Bytes, UnixMillis};
 
 use crate::{
     build::Cx,
+    composite::BadgeTone,
     geom::{Insets, Point, Rect, Size},
     input::{KeyCode, KeyEvent, Mods},
     scroll::{to_logical, to_px},
@@ -53,6 +54,18 @@ pub const TABLE_BODY: Key = Key::name("dpro-ui.table.body");
 /// The check column's key, in the header and in each row. A text column's is `Key::index` of its
 /// [`ColumnId`].
 pub const TABLE_CHECK: Key = Key::name("dpro-ui.table.check");
+/// Group header rows' keys under the rows' viewport are this, mixed with the group's index; see
+/// [`table_group`].
+const GROUP_KEY: Key = Key::name("dpro-ui.table.group");
+
+/// Group `group`'s header row's key under the rows' viewport ([`TABLE_BODY`]), for
+/// [`Ui::find`] (TD-0009 A3.5 (10)).
+#[must_use]
+#[allow(clippy::cast_lossless, reason = "u64::from isn't const")]
+pub const fn table_group(group: u32) -> Key {
+    Key(GROUP_KEY.0 ^ Key::index(group as u64).0)
+}
+
 /// The empty table's status line and its action, under the rows' viewport.
 const STATUS_TEXT: Key = Key::name("dpro-ui.table.status");
 const STATUS_ACTION: Key = Key::name("dpro-ui.table.action");
@@ -123,11 +136,48 @@ pub struct Status<'s, M> {
     pub action: Option<(&'s str, M)>,
 }
 
+/// How many lines a table's rows have (TD-0009 A3.5 (10)).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RowLines {
+    /// A line: rows are the body text's line and the row padding, at least
+    /// [`ROW`](tok::ROW).
+    #[default]
+    One,
+    /// Two: a row's [two-line cell](Cells::two) shows its second line under its first, in
+    /// caption secondary text (Leftovers' evidence, Activity's history). Rows are both lines, the
+    /// gap between them and the row padding, at least [`ROW_TWO`](tok::ROW_TWO).
+    Two,
+}
+
+/// A group of a table's rows, under a header row (TD-0009 A3.5 (10), A3.10 item 5): "Registry",
+/// "3 items". The header isn't a row of the view: it can't be current, checked or selected, and
+/// the keyboard passes over it. A client sees a row of the grid with one row header spanning
+/// every column, named by `name`, and counts it in the grid's rows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RowGroup<'s> {
+    /// Its first row, by index in the view's order. Groups ascend by it, and an empty group isn't
+    /// given.
+    pub start: u32,
+    /// Its header's words, at the header's start ("Registry").
+    pub label: &'s str,
+    /// How many rows it has, in the user's words, at the header's end (`ui-group-count`: "3
+    /// items").
+    pub count: &'s str,
+    /// What a client reads for the header (`ui-group-header`: "Registry, 3 items").
+    pub name: &'s str,
+}
+
 /// A data table, as a view describes it for [`Cx::table`].
 #[derive(Clone, Debug)]
 pub struct Table<'s, M> {
     /// How many rows the view has: indices `0..rows`, in the order shown.
     pub rows: u32,
+    /// How many lines each row has.
+    pub lines: RowLines,
+    /// Its groups, by first row ascending, each under a header row; empty for none. Rows before
+    /// the first group have no header. A group out of order, or past the rows, is left out with
+    /// the groups after it.
+    pub groups: &'s [RowGroup<'s>],
     pub columns: &'s [Column<'s>],
     /// Each column's width as the user left it, in `columns`' order; a column past its end has
     /// its own ([`Width::Auto`]).
@@ -167,31 +217,78 @@ pub struct Row<'s> {
 pub struct Cells<'b> {
     text: &'b mut String,
     ends: &'b mut Vec<usize>,
+    /// The cells that aren't one line of text: two-line cells and badges (TD-0009 A3.5 (10)).
+    marks: &'b mut Vec<Mark>,
     values: &'b mut ValueCache,
     formats: &'b dyn Formats,
     /// The one column a search reads, or [`ALL`] for a build. A search goes through every row, so
     /// it formats only that column's values, and keeps none: the others are left empty.
     keep: usize,
+    /// The table's rows have two lines, so a two-line cell keeps its second.
+    two: bool,
+    /// Where this row's cells start in `ends`: after the current row's, which a build pushes
+    /// first and keeps.
+    first: usize,
 }
 
 /// [`Cells::keep`] for a build: every value is formatted, or kept from an earlier build.
 const ALL: usize = usize::MAX;
 
+/// A cell that isn't one line of text, by its place in its row's cells (TD-0009 A3.5 (10)).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Mark {
+    cell: u32,
+    kind: MarkKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum MarkKind {
+    /// Two lines: the first is this many bytes of the cell's text, the second the rest.
+    Two(u32),
+    /// A badge of the cell's text, in this tone.
+    Badge(BadgeTone),
+}
+
+/// The longest first line a two-line cell keeps a second line after: its length is in its node's
+/// value ([`lines_value`]), which an `f32` holds exactly below 2^24.
+const MAX_SPLIT: usize = (1 << 24) - 2;
+
+/// A two-line cell's node value: one more than its first line's length, so a one-line cell's is
+/// 0. A cell has no other value.
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "below 2^24 (MAX_SPLIT), exact in f32"
+)]
+pub(crate) const fn lines_value(split: u32) -> f32 {
+    (split + 1) as f32
+}
+
 impl<'b> Cells<'b> {
     fn new(
         text: &'b mut String,
         ends: &'b mut Vec<usize>,
+        marks: &'b mut Vec<Mark>,
         values: &'b mut ValueCache,
         formats: &'b dyn Formats,
         keep: usize,
+        two: bool,
     ) -> Self {
+        let first = ends.len();
         Self {
             text,
             ends,
+            marks,
             values,
             formats,
             keep,
+            two,
+            first,
         }
+    }
+
+    /// The next cell's place in the row, its column as [`CellText::mark`] counts them.
+    fn next_cell(&self) -> u32 {
+        u32::try_from(self.ends.len() - self.first).unwrap_or(u32::MAX)
     }
 
     /// The next column's text. It's copied, so it can come from anywhere.
@@ -216,6 +313,42 @@ impl<'b> Cells<'b> {
     #[inline]
     pub fn time(&mut self, t: UnixMillis) {
         self.value(Value::Time(t.0));
+    }
+
+    /// The next column's text on two lines (TD-0009 A3.5 (10)): `primary` in its column's face
+    /// (mono for paths), and `secondary` under it in caption secondary text, in a table whose
+    /// rows have [two lines](RowLines::Two). A row's first text cell, usually. The cell is named
+    /// by its first line, which names its row too, and described by its second. In a table of
+    /// one-line rows, the second line is left out.
+    pub fn two(&mut self, primary: &str, secondary: &str) {
+        // A search reads first lines only, and a one-line row shows only them.
+        if self.two && self.keep == ALL && !secondary.is_empty() && primary.len() <= MAX_SPLIT {
+            let cell = self.next_cell();
+            let split = u32::try_from(primary.len()).unwrap_or(u32::MAX);
+            self.marks.push(Mark {
+                cell,
+                kind: MarkKind::Two(split),
+            });
+            self.text.push_str(primary);
+            self.text.push_str(secondary);
+            self.ends.push(self.text.len());
+        } else {
+            self.push(primary);
+        }
+    }
+
+    /// The next column's badge (TD-0009 A3.5 (1), (10)): `text` in `tone`'s colors, where its
+    /// column puts it (Activity's history shows each job's state so). The cell is named by the
+    /// word.
+    pub fn badge(&mut self, text: &str, tone: BadgeTone) {
+        if self.keep == ALL {
+            let cell = self.next_cell();
+            self.marks.push(Mark {
+                cell,
+                kind: MarkKind::Badge(tone),
+            });
+        }
+        self.push(text);
     }
 
     /// A value's text, kept from an earlier build or formatted now.
@@ -253,6 +386,7 @@ impl fmt::Debug for Cells<'_> {
         f.debug_struct("Cells")
             .field("text", &self.text)
             .field("ends", &self.ends)
+            .field("marks", &self.marks)
             .finish_non_exhaustive()
     }
 }
@@ -363,18 +497,35 @@ pub(crate) struct TableState<M> {
     /// The rows built, as (node, index), in order.
     built: Vec<(u32, u32)>,
     scratch: Vec<(u32, u32)>,
-    /// The range the last build made: `from..to`.
-    range: (u32, u32),
+    /// What the last build made.
+    span: Span,
     current: Option<u32>,
     current_key: Option<Key>,
-    /// A row to scroll into view at the next build, once the view is known.
-    reveal: Option<u32>,
+    /// A row or group header to scroll into view at the next build, once the view is known.
+    reveal: Option<Item>,
     /// The text of the values its cells showed.
     values: ValueCache,
     /// A client's search by name, which the next build runs (TD-0009 A2.5).
     find: Option<Find>,
     /// The row the last search found, for [`Ui::take_found`].
     found: Option<u32>,
+    // Grouped and two-line rows (TD-0009 A3.5 (10), slice 6b).
+    /// Its rows have two lines.
+    two: bool,
+    /// Its groups' first rows, ascending: the view's, up to the first out of order or past the
+    /// rows.
+    starts: Vec<u32>,
+    /// A group header's height in whole physical pixels, from layout; 0 until it has measured.
+    group_px: i64,
+    /// A group header's height in logical pixels, before rounding: for a new scale.
+    group_h: f32,
+    /// The header height the last build used: measured, or guessed.
+    built_gp: i64,
+    /// The group headers built, as (node, group), in order.
+    heads: Vec<(u32, u32)>,
+    heads_scratch: Vec<(u32, u32)>,
+    /// The cells of the rows the last build made that aren't one line of text.
+    marks: Vec<Mark>,
 }
 
 /// A search for a table's first row from `from` on whose name (its first shown column's text) is
@@ -409,22 +560,389 @@ impl<M> TableState<M> {
             base_row: 0,
             built: Vec::new(),
             scratch: Vec::new(),
-            range: (0, 0),
+            span: Span::default(),
             current: None,
             current_key: None,
             reveal: None,
             values: ValueCache::default(),
             find: None,
             found: None,
+            two: false,
+            starts: Vec::new(),
+            group_px: 0,
+            group_h: 0.0,
+            built_gp: 0,
+            heads: Vec::new(),
+            heads_scratch: Vec::new(),
+            marks: Vec::new(),
+        }
+    }
+
+    /// Where its rows and headers are, at the heights the last build used until layout has
+    /// measured them.
+    fn geom(&self) -> Geom<'_> {
+        Geom {
+            rows: self.rows,
+            rp: if self.row_px > 0 {
+                self.row_px
+            } else {
+                self.built_px
+            },
+            gp: if self.group_px > 0 {
+                self.group_px
+            } else {
+                self.built_gp
+            },
+            starts: &self.starts,
+        }
+    }
+
+    /// Takes `table`'s lines and groups (A3.5 (10)): the groups' first rows as far as they're in
+    /// order and within the rows, compared in place, as they're the same at almost every build.
+    /// Returns whether the row height and whether the groups changed.
+    fn take_shape(&mut self, table: &Table<'_, M>) -> (bool, bool) {
+        let two = table.lines == RowLines::Two;
+        let reshaped = self.two != two;
+        self.two = two;
+        let valid = valid_groups(table.groups, table.rows);
+        let regrouped = self.starts.len() != valid
+            || !(self.starts.iter().zip(table.groups)).all(|(&s, g)| s == g.start);
+        if regrouped {
+            self.starts.clear();
+            self.starts
+                .extend(table.groups[..valid].iter().map(|g| g.start));
+        }
+        (reshaped, regrouped)
+    }
+
+    /// Whether the last build used the heights layout measured. A table without groups doesn't
+    /// wait on its headers' height.
+    fn built_measured(&self) -> bool {
+        self.built_px == self.row_px && (self.starts.is_empty() || self.built_gp == self.group_px)
+    }
+
+    /// Where a view at offset `off` scrolls to show `item`: no further than it must. A group's
+    /// first row brings its header with it, if both fit. `None` if there's no such item.
+    fn reveal_to(&self, item: Item, off: i64) -> Option<i64> {
+        let geom = self.geom();
+        let view = self.view_px;
+        match item {
+            Item::Row(r) if r < self.rows => {}
+            Item::Head(g) if (g as usize) < self.starts.len() => {}
+            _ => return None,
+        }
+        let (mut top, bottom) = geom.extent(item);
+        if let Item::Row(r) = item
+            && self.starts.binary_search(&r).is_ok()
+            && bottom - (top - geom.gp) <= view
+        {
+            top -= geom.gp;
+        }
+        Some(if top < off || bottom - top > view {
+            top
+        } else if bottom > off + view {
+            bottom - view
+        } else {
+            off
+        })
+    }
+}
+
+/// How many of `groups` a table of `rows` rows keeps: those in order, each past the last and
+/// within the rows, up to the first that isn't.
+fn valid_groups(groups: &[RowGroup<'_>], rows: u32) -> usize {
+    let mut next = 0;
+    groups
+        .iter()
+        .take_while(|g| {
+            let ok = g.start >= next && g.start < rows;
+            next = g.start.saturating_add(1);
+            ok
+        })
+        .count()
+}
+
+/// A two-line cell's text as its lines, the first `split` bytes long (both in the first if
+/// that isn't a character's edge).
+pub(crate) fn lines_of(text: &str, split: usize) -> (&str, &str) {
+    text.split_at_checked(split).unwrap_or((text, ""))
+}
+
+/// A table's heights from its text: a row's and a group header's, logical and in whole physical
+/// pixels, and the column header's in pixels.
+#[derive(Clone, Copy, Debug)]
+struct Heights {
+    row_h: f32,
+    rp: i64,
+    group_h: f32,
+    gp: i64,
+    head: i64,
+}
+
+/// What a table's rows' view holds: a row, or a group's header (TD-0009 A3.5 (10)).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Item {
+    Row(u32),
+    Head(u32),
+}
+
+/// What a build makes: rows `rows.0..rows.1` and group headers `heads.0..heads.1`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Span {
+    rows: (u32, u32),
+    heads: (u32, u32),
+}
+
+/// Where a table's rows and group headers are down its rows' view, in whole physical pixels
+/// (TD-0009 A3.5 (10)). Rows have one height and headers another, so row `i` is at `i × rp`
+/// and a header for each group that starts at or before it; finding what's at a height is a
+/// binary search over the groups. Without groups it's A2's arithmetic.
+#[derive(Clone, Copy, Debug)]
+struct Geom<'a> {
+    rows: u32,
+    rp: i64,
+    gp: i64,
+    starts: &'a [u32],
+}
+
+impl Geom<'_> {
+    fn groups(&self) -> u32 {
+        u32::try_from(self.starts.len()).unwrap_or(u32::MAX)
+    }
+
+    /// How many groups start at or before row `r`: its header, and those above it.
+    fn through(&self, r: u32) -> u32 {
+        if self.starts.is_empty() {
+            return 0;
+        }
+        u32::try_from(self.starts.partition_point(|&s| s <= r)).unwrap_or(u32::MAX)
+    }
+
+    fn row_top(&self, r: u32) -> i64 {
+        i64::from(r) * self.rp + i64::from(self.through(r)) * self.gp
+    }
+
+    fn head_top(&self, g: u32) -> i64 {
+        i64::from(self.starts[g as usize]) * self.rp + i64::from(g) * self.gp
+    }
+
+    /// The top of what's first at row `r`: its group's header if it starts one, else the row.
+    fn item_top(&self, r: u32) -> i64 {
+        let before = if self.starts.is_empty() {
+            0
+        } else {
+            self.starts.partition_point(|&s| s < r)
+        };
+        i64::from(r) * self.rp + i64::try_from(before).unwrap_or(i64::MAX) * self.gp
+    }
+
+    /// Every row and header.
+    fn height(&self) -> i64 {
+        i64::from(self.rows)
+            .saturating_mul(self.rp)
+            .saturating_add(i64::from(self.groups()) * self.gp)
+    }
+
+    /// How many headers start at or above `y`.
+    fn heads_to(&self, y: i64) -> u32 {
+        let (mut lo, mut hi) = (0, self.groups());
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if self.head_top(mid) <= y {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        lo
+    }
+
+    /// What's at `y`, which is in `0..height()`; the table has rows.
+    fn at(&self, y: i64) -> Item {
+        let last = self.rows.saturating_sub(1);
+        let row = |px: i64| u32::try_from(px / self.rp).unwrap_or(u32::MAX);
+        if self.starts.is_empty() {
+            return Item::Row(row(y).min(last));
+        }
+        match self.heads_to(y).checked_sub(1) {
+            // Above the first header: rows without a group.
+            None => Item::Row(row(y).min(last)),
+            Some(g) => {
+                let below = y - self.head_top(g) - self.gp;
+                if below < 0 {
+                    Item::Head(g)
+                } else {
+                    Item::Row(self.starts[g as usize].saturating_add(row(below)).min(last))
+                }
+            }
+        }
+    }
+
+    /// The rows and headers at least partly between `lo` and `hi`.
+    fn span(&self, lo: i64, hi: i64) -> Span {
+        let end = self.height();
+        let lo = lo.max(0);
+        if self.rows == 0 || self.rp <= 0 || hi <= lo {
+            return Span::default();
+        }
+        let (rows, groups) = (self.rows, self.groups());
+        if lo >= end {
+            return Span {
+                rows: (rows, rows),
+                heads: (groups, groups),
+            };
+        }
+        let first = match self.at(lo) {
+            Item::Row(r) => r,
+            Item::Head(g) => self.starts[g as usize],
+        };
+        let to = match self.at(hi.min(end) - 1) {
+            Item::Row(r) => r + 1,
+            Item::Head(g) => self.starts[g as usize],
+        };
+        let (g0, g1) = if self.starts.is_empty() {
+            (0, 0)
+        } else {
+            (self.heads_to(lo - self.gp), self.heads_to(hi - 1))
+        };
+        Span {
+            rows: (first.min(to), to),
+            heads: (g0.min(g1), g1),
+        }
+    }
+
+    /// What a build makes for a view of `view` at offset `off`: what's in view, and half a view
+    /// either side.
+    fn span_for(&self, off: i64, view: i64) -> Span {
+        if view <= 0 {
+            return Span::default();
+        }
+        // Without groups, A2's arithmetic: every build of most tables asks.
+        if self.starts.is_empty() {
+            if self.rows == 0 || self.rp <= 0 {
+                return Span::default();
+            }
+            let (rows, rp) = (self.rows, self.rp);
+            let start = off.saturating_sub(view / 2).max(0);
+            let end = off.saturating_add(view).saturating_add(view / 2);
+            let row = |px: i64| u32::try_from(px).unwrap_or(u32::MAX).min(rows);
+            let to = row(end.saturating_add(rp - 1) / rp);
+            return Span {
+                rows: (row(start / rp).min(to), to),
+                heads: (0, 0),
+            };
+        }
+        self.span(
+            off.saturating_sub(view / 2),
+            off.saturating_add(view).saturating_add(view / 2),
+        )
+    }
+
+    /// The last row whose top is at or above `y`.
+    fn row_by(&self, y: i64) -> u32 {
+        if y < 0 {
+            return 0;
+        }
+        match self.at(y.min(self.height() - 1)) {
+            Item::Row(r) => r,
+            Item::Head(g) => self.starts[g as usize].saturating_sub(1),
+        }
+    }
+
+    /// The first row whose top is at or below `y`.
+    fn row_from(&self, y: i64) -> u32 {
+        if y <= 0 {
+            return 0;
+        }
+        match self.at(y.min(self.height() - 1)) {
+            Item::Row(r) if self.row_top(r) >= y => r,
+            Item::Row(r) => (r + 1).min(self.rows.saturating_sub(1)),
+            Item::Head(g) => self.starts[g as usize],
+        }
+    }
+
+    /// Offset `off` in this geometry, in `new`'s (the same rows at other heights): the row or
+    /// header at it keeps its place at the top, as far into it as it was.
+    fn rescaled(&self, new: &Geom<'_>, off: i64) -> i64 {
+        if self.rows == 0 || self.rp <= 0 || off <= 0 {
+            return off.max(0);
+        }
+        let item = self.at(off.min(self.height() - 1));
+        let (top, bottom) = self.extent(item);
+        let (new_top, new_bottom) = new.extent(item);
+        let (into, old_h, new_h) = (off - top, bottom - top, new_bottom - new_top);
+        if old_h <= 0 {
+            return new_top;
+        }
+        new_top + into / old_h * new_h + into % old_h * new_h / old_h
+    }
+
+    /// Where `item` is, top and bottom.
+    fn extent(&self, item: Item) -> (i64, i64) {
+        match item {
+            Item::Row(r) => {
+                let top = self.row_top(r);
+                (top, top + self.rp)
+            }
+            Item::Head(g) => {
+                let top = self.head_top(g);
+                (top, top + self.gp)
+            }
         }
     }
 }
 
-/// What a build makes: the rows `from..to`, and `extra`, the current row, out of that range.
+/// Row `r`'s index as a client counts the grid's rows: the group headers above it counted
+/// (A3.10 item 5).
+fn grid_of(starts: &[u32], r: u32) -> u32 {
+    if starts.is_empty() {
+        return r;
+    }
+    let through = u32::try_from(starts.partition_point(|&s| s <= r)).unwrap_or(u32::MAX);
+    r.saturating_add(through)
+}
+
+/// Group `g`'s header's index as a client counts the grid's rows.
+fn head_grid_of(starts: &[u32], g: u32) -> u32 {
+    starts[g as usize].saturating_add(g)
+}
+
+/// What's at a client's index `k` in a table of `rows` rows: a row, or a group's header. `None`
+/// past the end.
+fn item_of_grid(starts: &[u32], rows: u32, k: u32) -> Option<Item> {
+    let total = rows.saturating_add(u32::try_from(starts.len()).unwrap_or(u32::MAX));
+    if k >= total {
+        return None;
+    }
+    if starts.is_empty() {
+        return Some(Item::Row(k));
+    }
+    // The headers at or before `k`: header g is at starts[g] + g.
+    let (mut lo, mut hi) = (0usize, starts.len());
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if head_grid_of(starts, u32::try_from(mid).unwrap_or(u32::MAX)) <= k {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    let heads = u32::try_from(lo).unwrap_or(u32::MAX);
+    if let Some(g) = heads.checked_sub(1)
+        && head_grid_of(starts, g) == k
+    {
+        return Some(Item::Head(g));
+    }
+    Some(Item::Row(k - heads))
+}
+
+/// What a build makes: the rows `from..to` and the group headers `heads`, and `extra`, the
+/// current row, out of that range.
 #[derive(Clone, Copy, Debug)]
 struct Plan {
     from: u32,
     to: u32,
+    heads: (u32, u32),
     extra: Option<u32>,
     /// Focus goes to the current row once it's built.
     follow: bool,
@@ -446,19 +964,6 @@ pub(crate) fn sort_of(value: f32) -> Option<Order> {
     [Order::Ascending, Order::Descending]
         .into_iter()
         .find(|&o| sort_value(Some(o)).to_bits() == value.to_bits())
-}
-
-/// The rows to build for a view of `view` px at offset `off`, with rows of `rp` px: those in
-/// view, and half a view either side.
-fn range_of(rows: u32, off: i64, view: i64, rp: i64) -> (u32, u32) {
-    if rows == 0 || view <= 0 || rp <= 0 {
-        return (0, 0);
-    }
-    let start = off.saturating_sub(view / 2).max(0);
-    let end = off.saturating_add(view).saturating_add(view / 2);
-    let row = |px: i64| u32::try_from(px).unwrap_or(u32::MAX).min(rows);
-    let to = row(end.saturating_add(rp - 1) / rp);
-    (row(start / rp).min(to), to)
 }
 
 const fn justify_of(align: Align) -> Justify {
@@ -497,6 +1002,25 @@ const CURRENT: Look = Look {
     ..Look::PLAIN
 };
 
+/// A group header's parts under its row (TD-0009 A3.5 (10)): its one cell, and the label and
+/// count in it.
+const GROUP_CELL: Key = Key::name("dpro-ui.table.group.cell");
+const GROUP_LABEL: Key = Key::name("dpro-ui.table.group.label");
+const GROUP_COUNT: Key = Key::name("dpro-ui.table.group.count");
+/// A badge cell's badge.
+const BADGE: Key = Key::name("dpro-ui.table.badge");
+
+/// A two-line cell's second line, under a first line in `first`: caption text, regular, in the
+/// same proportion to the body text at any text size (A3.5 (10)).
+pub(crate) fn second_line(first: TextStyle) -> TextStyle {
+    TextStyle {
+        size: first.size * font::CAPTION / font::BODY,
+        weight: font::REGULAR,
+        mono: false,
+        wrap: false,
+    }
+}
+
 impl<M: Clone> Cx<'_, M> {
     /// A data table (TD-0009 A2.5): `el` (an [`Element::table`]) holding a header of `table`'s
     /// columns over a scroll viewport of its rows. `row(index, cells)` gives the row at an index
@@ -513,41 +1037,28 @@ impl<M: Clone> Cx<'_, M> {
         let header = cx.table_header(table);
         let body = cx.place(body_element(table.rows));
         let t = cx.ui.table_slot(grid, header, body);
-        let mut text = mem::take(&mut cx.ui.cell_text);
-        let mut ends = mem::take(&mut cx.ui.cell_ends);
-        text.clear();
-        ends.clear();
-        // The table's kept text, and the window's formats for what it hasn't kept.
-        let mut values = if t == NIL {
-            ValueCache::default()
-        } else {
-            mem::take(&mut cx.ui.tables[t as usize].values)
-        };
-        values.begin(cx.ui.formats_generation);
+        // The Ui's cell buffers, the table's kept text and the window's formats for what it
+        // hasn't kept.
+        let mut bufs = CellBufs::take(cx.ui, t);
         let formats = Rc::clone(&cx.ui.formats.0);
         let shown = Shown::of(table);
+        let two = table.lines == RowLines::Two;
         // A client's search, through the view's rows, reveals the row it finds (A2.5).
         if let Some(find) = (t != NIL)
             .then(|| cx.ui.tables[t as usize].find.take())
             .flatten()
         {
-            let mut cells = Cells::new(&mut text, &mut ends, &mut values, &*formats, shown.first);
+            let mut cells = bufs.cells(&*formats, shown.first, two);
             let found = search(&find, table.rows, shown.first, &mut cells, &mut row);
-            text.clear();
-            ends.clear();
+            bufs.clear();
             let st = &mut cx.ui.tables[t as usize];
             st.found = found;
-            st.reveal = found.or(st.reveal);
+            st.reveal = found.map(Item::Row).or(st.reveal);
         }
         // The current row first: whether its key changed says whether it's another row.
         let current = table.current.filter(|&c| c < table.rows);
-        let cur = current.map(|c| {
-            row(
-                c,
-                &mut Cells::new(&mut text, &mut ends, &mut values, &*formats, ALL),
-            )
-        });
-        let (kept_text, kept_ends) = (text.len(), ends.len());
+        let cur = current.map(|c| row(c, &mut bufs.cells(&*formats, ALL, two)));
+        let kept = bufs.lens();
         let plan = (t != NIL).then(|| {
             cx.ui
                 .table_plan(t, table, current, cur.map(|r| Key::index(r.key.0)))
@@ -559,42 +1070,33 @@ impl<M: Clone> Cx<'_, M> {
             {
                 let before = plan.extra.filter(|&c| c < plan.from);
                 let after = plan.extra.filter(|&c| c >= plan.to);
+                // The group headers in range, each built before its first row (A3.5 (10)).
+                let mut heads = plan.heads;
                 for at in before.into_iter().chain(plan.from..plan.to).chain(after) {
+                    if heads.0 < heads.1 {
+                        bx.group_headers(t, table, &mut heads, Some(at));
+                    }
                     // Each row's cells end where its own pushes did: the current row's before
-                    // `kept_ends`, so a row built after it can't lend it cells it didn't give.
-                    let (r, cell_ends, start) = if let Some(r) = cur
+                    // `kept`, so a row built after it can't lend it cells it didn't give.
+                    let (r, cells) = if let Some(r) = cur
                         && current == Some(at)
                     {
-                        (r, 0..kept_ends, 0)
+                        (r, bufs.text_of((0, 0, 0), kept))
                     } else {
-                        text.truncate(kept_text);
-                        ends.truncate(kept_ends);
-                        let r = row(
-                            at,
-                            &mut Cells::new(&mut text, &mut ends, &mut values, &*formats, ALL),
-                        );
-                        (r, kept_ends..ends.len(), kept_text)
-                    };
-                    let cells = CellText {
-                        text: &text,
-                        ends: &ends[cell_ends],
-                        start,
+                        bufs.truncate(kept);
+                        let r = row(at, &mut bufs.cells(&*formats, ALL, two));
+                        (r, bufs.text_of(kept, bufs.lens()))
                     };
                     let node = bx.table_row(table, shown, at, current == Some(at), r, &cells);
                     bx.ui.tables[t as usize].scratch.push((node, at));
                 }
+                bx.group_headers(t, table, &mut heads, None);
             } else if let Some(status) = &table.status {
                 bx.status(status);
             }
             bx.finish();
         }
-        text.clear();
-        ends.clear();
-        cx.ui.cell_text = text;
-        cx.ui.cell_ends = ends;
-        if t != NIL {
-            cx.ui.tables[t as usize].values = values;
-        }
+        bufs.give(cx.ui, t);
         if let Some(plan) = plan {
             cx.ui.table_built(t, plan);
         }
@@ -791,28 +1293,142 @@ impl<M: Clone> Cx<'_, M> {
         } else {
             font::REGULAR
         };
+        // Most rows have only one-line cells: they test nothing more (A3.5 (10)).
+        let plain = cells.marks.is_empty();
         for (j, col) in table.columns.iter().enumerate() {
             if shown.any_hidden && is_hidden(table, j) {
                 continue;
             }
-            rx.add(Element {
-                style: cell_style(col.align),
-                text_style: TextStyle {
-                    weight,
-                    mono: col.mono,
-                    ..TextStyle::default()
-                },
-                ..Element::new(
-                    Key::index(u64::from(col.id.0)),
-                    Role::Cell,
-                    cells.get(j),
-                    None,
-                )
-            });
+            let key = Key::index(u64::from(col.id.0));
+            let text_style = TextStyle {
+                weight,
+                mono: col.mono,
+                ..TextStyle::default()
+            };
+            match if plain { None } else { cells.mark(j) } {
+                None => {
+                    rx.add(Element {
+                        style: cell_style(col.align),
+                        text_style,
+                        ..Element::new(key, Role::Cell, cells.all(j), None)
+                    });
+                }
+                Some(mark) => rx.marked_cell(key, col.align, text_style, cells, j, mark),
+            }
             weight = font::REGULAR;
         }
         rx.finish();
         i
+    }
+
+    /// A cell that isn't one line of text (A3.5 (10)): a two-line cell, whose text is both lines
+    /// and whose value says where the first ends, or a badge cell, named by its word, holding the
+    /// badge that shows it.
+    #[inline(never)]
+    fn marked_cell(
+        &mut self,
+        key: Key,
+        align: Align,
+        text_style: TextStyle,
+        cells: &CellText<'_>,
+        j: usize,
+        mark: MarkKind,
+    ) {
+        let style = cell_style(align);
+        match mark {
+            MarkKind::Two(split) => {
+                self.add(Element {
+                    style,
+                    text_style,
+                    extra: Extra::Lines(split),
+                    ..Element::new(key, Role::Cell, cells.all(j), None)
+                });
+            }
+            MarkKind::Badge(tone) => {
+                let word = cells.all(j);
+                self.add_with(
+                    Element {
+                        style: Style {
+                            axis: Axis::Row,
+                            align: Align::Center,
+                            ..style
+                        },
+                        text_style,
+                        ..Element::new(key, Role::Cell, word, None)
+                    },
+                    |cx| {
+                        cx.add(Element::badge(BADGE, word, tone));
+                    },
+                );
+            }
+        }
+    }
+
+    /// Group `g`'s header row (TD-0009 A3.5 (10)): one cell across every column, named by the
+    /// group's words, holding its label at its start and its count at its end, in caption
+    /// secondary text. It isn't a row of the view, so nothing in it takes input. Returns its
+    /// node.
+    fn group_header(&mut self, table: &Table<'_, M>, g: u32) -> u32 {
+        let group = table.groups[g as usize];
+        let i = self.place(Element {
+            style: Style {
+                axis: Axis::Row,
+                ..Style::default()
+            },
+            ..Element::new(table_group(g), Role::Container, "", None)
+        });
+        let mut hx = self.child(i);
+        hx.add_with(
+            Element {
+                style: Style {
+                    axis: Axis::Row,
+                    align: Align::Center,
+                    justify: Justify::SpaceBetween,
+                    padding: Insets::xy(tok::CELL_PAD_X, 0.0),
+                    gap: tok::CELL_PAD_X,
+                    grow: 1.0,
+                    ..Style::default()
+                },
+                ..Element::new(GROUP_CELL, Role::Cell, group.name, None)
+            },
+            |cx| {
+                for (key, text, weight) in [
+                    (GROUP_LABEL, group.label, font::SEMIBOLD),
+                    (GROUP_COUNT, group.count, font::REGULAR),
+                ] {
+                    cx.add(Element {
+                        text_style: TextStyle {
+                            size: font::CAPTION,
+                            weight,
+                            ..TextStyle::default()
+                        },
+                        look: HEADER,
+                        ..Element::new(key, Role::Label, text, None)
+                    });
+                }
+            },
+        );
+        hx.finish();
+        i
+    }
+
+    /// Table slot `t`'s group headers from `heads.0` to `heads.1`, up to the one row `upto`
+    /// starts (to the last if `None`), each recorded for layout.
+    fn group_headers(
+        &mut self,
+        t: u32,
+        table: &Table<'_, M>,
+        heads: &mut (u32, u32),
+        upto: Option<u32>,
+    ) {
+        while heads.0 < heads.1
+            && upto.is_none_or(|at| self.ui.tables[t as usize].starts[heads.0 as usize] <= at)
+        {
+            let g = heads.0;
+            let node = self.group_header(table, g);
+            self.ui.tables[t as usize].heads_scratch.push((node, g));
+            heads.0 += 1;
+        }
     }
 }
 
@@ -832,6 +1448,7 @@ fn search<'r>(
         let named = CellText {
             text: cells.text,
             ends: cells.ends,
+            marks: &[],
             start: 0,
         };
         named.get(name) == find.name
@@ -931,16 +1548,31 @@ fn body_element<'s, M>(rows: u32) -> Element<'s, M> {
 }
 
 /// A row's cells' text in the Ui's cell buffer: cell `j` ends at `ends[j]`, and the first starts
-/// at `start`.
+/// at `start`. `marks` are its cells that aren't one line of text.
 struct CellText<'b> {
     text: &'b str,
     ends: &'b [usize],
+    marks: &'b [Mark],
     start: usize,
 }
 
 impl CellText<'_> {
-    /// Cell `j`'s text; empty if the view gave fewer.
+    /// Cell `j`'s text, a two-line cell's first line; empty if the view gave fewer.
     fn get(&self, j: usize) -> &str {
+        let all = self.all(j);
+        if self.marks.is_empty() {
+            return all;
+        }
+        match self.mark(j) {
+            Some(MarkKind::Two(split)) => all.get(..split as usize).unwrap_or(all),
+            _ => all,
+        }
+    }
+
+    /// Cell `j`'s whole text: both a two-line cell's lines.
+    // Out of line, as A2's was: inlined in a row's loop, it keeps `Cx::add` from being.
+    #[inline(never)]
+    fn all(&self, j: usize) -> &str {
         let Some(&end) = self.ends.get(j) else {
             return "";
         };
@@ -949,6 +1581,104 @@ impl CellText<'_> {
             None => self.start,
         };
         self.text.get(from..end).unwrap_or("")
+    }
+
+    /// What cell `j` is if it isn't one line of text.
+    fn mark(&self, j: usize) -> Option<MarkKind> {
+        self.marks
+            .iter()
+            .find(|m| m.cell as usize == j)
+            .map(|m| m.kind)
+    }
+}
+
+/// How much of each of [`CellBufs`]' buffers is filled: text, ends, marks.
+type Lens = (usize, usize, usize);
+
+/// The buffers a table's build fills with its rows' cells: the Ui's text and ends, and the
+/// table's marks and kept values, taken for the build and given back after it.
+struct CellBufs {
+    text: String,
+    ends: Vec<usize>,
+    marks: Vec<Mark>,
+    values: ValueCache,
+}
+
+impl CellBufs {
+    /// Table slot `t`'s buffers (fresh ones if it has none), emptied, its values for this
+    /// build's formats.
+    fn take<M>(ui: &mut Ui<M>, t: u32) -> Self {
+        let mut text = mem::take(&mut ui.cell_text);
+        let mut ends = mem::take(&mut ui.cell_ends);
+        text.clear();
+        ends.clear();
+        let (mut values, mut marks) = if t == NIL {
+            (ValueCache::default(), Vec::new())
+        } else {
+            let st = &mut ui.tables[t as usize];
+            (mem::take(&mut st.values), mem::take(&mut st.marks))
+        };
+        marks.clear();
+        values.begin(ui.formats_generation);
+        Self {
+            text,
+            ends,
+            marks,
+            values,
+        }
+    }
+
+    /// Gives the buffers back, emptied, for the next build.
+    fn give<M>(mut self, ui: &mut Ui<M>, t: u32) {
+        self.clear();
+        ui.cell_text = self.text;
+        ui.cell_ends = self.ends;
+        if t != NIL {
+            let st = &mut ui.tables[t as usize];
+            st.values = self.values;
+            st.marks = self.marks;
+        }
+    }
+
+    /// A row's cells to push into them.
+    #[inline]
+    fn cells<'b>(&'b mut self, formats: &'b dyn Formats, keep: usize, two: bool) -> Cells<'b> {
+        Cells::new(
+            &mut self.text,
+            &mut self.ends,
+            &mut self.marks,
+            &mut self.values,
+            formats,
+            keep,
+            two,
+        )
+    }
+
+    fn clear(&mut self) {
+        self.truncate((0, 0, 0));
+    }
+
+    #[inline]
+    fn lens(&self) -> Lens {
+        (self.text.len(), self.ends.len(), self.marks.len())
+    }
+
+    #[inline]
+    fn truncate(&mut self, (text, ends, marks): Lens) {
+        self.text.truncate(text);
+        self.ends.truncate(ends);
+        self.marks.truncate(marks);
+    }
+
+    /// The cells pushed from `from` to `to`.
+    #[inline]
+    fn text_of(&self, from: Lens, to: Lens) -> CellText<'_> {
+        CellText {
+            text: &self.text,
+            ends: &self.ends[from.1..to.1],
+            marks: &self.marks[from.2..to.2],
+            start: from.0,
+        }
     }
 }
 
@@ -966,35 +1696,47 @@ impl<M> Ui<M> {
             if s == NIL {
                 return false;
             }
-            if (st.reveal.is_some() && st.view_px > 0) || st.row_px != st.built_px {
+            if (st.reveal.is_some() && st.view_px > 0) || !st.built_measured() {
                 return true;
             }
             let off = self.scrolls[s as usize].offset[1];
-            st.range != range_of(st.rows, off, st.view_px, st.row_px)
+            st.span != st.geom().span_for(off, st.view_px)
         })
     }
 
-    /// Scrolls row `row` (an index in the view's order) of `table` into view and builds it, at
-    /// the next build ([`wants_build`](Self::wants_build) says so): a search result, or a client
-    /// asking for a row it can't see. Returns whether `table` is a table with that row.
+    /// Scrolls the row at `row`, a client's index, into view and builds it, at the next build
+    /// ([`wants_build`](Self::wants_build) says so): a search result, or a client asking for a
+    /// row it can't see. A client counts a grouped table's header rows (TD-0009 A3.10 item 5),
+    /// so an index can be a header's, which is revealed; without groups it's the row's index in
+    /// the view's order. Returns whether `table` is a table with that row.
     pub fn realize(&mut self, table: NodeId, row: u32) -> bool {
         let Some(t) = self.index(table).and_then(|i| self.table_of_grid(i)) else {
             return false;
         };
-        self.reveal_row(t, row)
+        let st = &mut self.tables[t as usize];
+        let Some(item) = item_of_grid(&st.starts, st.rows, row) else {
+            return false;
+        };
+        st.reveal = Some(item);
+        true
     }
 
-    /// Searches `table`'s rows after `after` (from the first if `None`), in the view's order, for
-    /// the first named `name` (its first shown column's text), at the next build, which also
-    /// [`realize`](Self::realize)s the row found: a client's search by name (TD-0009 A2.5).
-    /// [`take_found`](Self::take_found) then says which row it was. The search goes through the
-    /// view's rows, reading only that column. False if `table` isn't a table.
+    /// Searches `table`'s rows after `after` (a client's index, as [`realize`](Self::realize)
+    /// takes; from the first if `None`), in the view's order, for the first named `name` (its
+    /// first shown column's text), at the next build, which also realizes the row found: a
+    /// client's search by name (TD-0009 A2.5). [`take_found`](Self::take_found) then says which
+    /// row it was. The search goes through the view's rows, reading only that column; group
+    /// headers aren't searched. False if `table` isn't a table.
     pub fn find_row(&mut self, table: NodeId, after: Option<u32>, name: &str) -> bool {
         let Some(t) = self.index(table).and_then(|i| self.table_of_grid(i)) else {
             return false;
         };
-        let from = after.map_or(0, |at| at.saturating_add(1));
         let st = &mut self.tables[t as usize];
+        let from = after.map_or(0, |at| match item_of_grid(&st.starts, st.rows, at) {
+            Some(Item::Row(r)) => r.saturating_add(1),
+            Some(Item::Head(g)) => st.starts[g as usize],
+            None => st.rows,
+        });
         st.found = None;
         st.find = Some(Find {
             from,
@@ -1003,22 +1745,14 @@ impl<M> Ui<M> {
         true
     }
 
-    /// The row the last build's [`find_row`](Self::find_row) found in `table`, by index in the
-    /// view's order. A search no build ran (the view didn't build the table) is dropped.
+    /// The row the last build's [`find_row`](Self::find_row) found in `table`, by a client's
+    /// index. A search no build ran (the view didn't build the table) is dropped.
     pub fn take_found(&mut self, table: NodeId) -> Option<u32> {
         let t = self.index(table).and_then(|i| self.table_of_grid(i))?;
         let st = &mut self.tables[t as usize];
         st.find = None;
-        st.found.take()
-    }
-
-    fn reveal_row(&mut self, t: u32, row: u32) -> bool {
-        let st = &mut self.tables[t as usize];
-        if row >= st.rows {
-            return false;
-        }
-        st.reveal = Some(row);
-        true
+        let found = st.found.take()?;
+        Some(grid_of(&st.starts, found))
     }
 
     /// Scrolls `viewport` to `to`, physical pixels x then y, each clamped: where the host put it
@@ -1089,6 +1823,14 @@ impl<M> Ui<M> {
         fresh.built.clear();
         fresh.scratch = mem::take(&mut st.scratch);
         fresh.scratch.clear();
+        fresh.starts = mem::take(&mut st.starts);
+        fresh.starts.clear();
+        fresh.heads = mem::take(&mut st.heads);
+        fresh.heads.clear();
+        fresh.heads_scratch = mem::take(&mut st.heads_scratch);
+        fresh.heads_scratch.clear();
+        fresh.marks = mem::take(&mut st.marks);
+        fresh.marks.clear();
         *st = fresh;
         self.free_tables.push(t);
         // A drag on a table that went ends with it.
@@ -1116,31 +1858,45 @@ impl<M> Ui<M> {
             let f = &self.nodes[self.focus as usize];
             f.role == Role::Row && f.parent == body
         };
-        let guess = {
+        // Until layout has measured them, the heights are guessed from the text size.
+        let (row_guess, header_guess) = {
             let size = self.nodes[body as usize].text_style.size;
-            to_px(
-                (size * LINE_GUESS + 2.0 * tok::ROW_PAD_Y).max(tok::ROW),
-                self.scale,
+            let line = size * LINE_GUESS;
+            let row = if table.lines == RowLines::Two {
+                (line + tok::LINE_GAP + line * font::CAPTION / font::BODY + 2.0 * tok::ROW_PAD_Y)
+                    .max(tok::ROW_TWO)
+            } else {
+                (line + 2.0 * tok::ROW_PAD_Y).max(tok::ROW)
+            };
+            let group =
+                (line * font::CAPTION / font::BODY + 2.0 * tok::GROUP_PAD_Y).max(tok::GROUP);
+            (
+                to_px(row, self.scale).max(1),
+                to_px(group, self.scale).max(1),
             )
-            .max(1)
         };
         let st = &mut self.tables[t as usize];
         st.current = current;
         st.scratch.clear();
+        st.heads_scratch.clear();
         let mut follow = false;
         if st.current_key != key {
             st.current_key = key;
             if let Some(c) = current {
-                st.reveal = Some(c);
+                st.reveal = Some(Item::Row(c));
                 follow = focus_here;
             }
         }
-        let rp = if st.row_px > 0 { st.row_px } else { guess };
-        st.built_px = rp;
+        st.built_px = if st.row_px > 0 { st.row_px } else { row_guess };
+        st.built_gp = if st.group_px > 0 {
+            st.group_px
+        } else {
+            header_guess
+        };
         let view = st.view_px;
-        // The content is every row, exactly.
+        // The content is every row and header, exactly.
         if rows > 0 {
-            let content = i64::from(rows).saturating_mul(rp);
+            let content = st.geom().height();
             let sc = &mut self.scrolls[s as usize];
             if sc.content_px[1] != content {
                 sc.content_px[1] = content;
@@ -1153,26 +1909,21 @@ impl<M> Ui<M> {
             self.scroll_axis(s, 1, off);
         }
         if view > 0
-            && let Some(r) = self.tables[t as usize].reveal.take()
-            && r < rows
+            && let Some(item) = self.tables[t as usize].reveal.take()
         {
-            let top = i64::from(r) * rp;
             let off = self.scrolls[s as usize].offset[1];
-            let to = if top < off || rp > view {
-                top
-            } else if top + rp > off + view {
-                top + rp - view
-            } else {
-                off
-            };
-            self.scroll_axis(s, 1, to);
+            if let Some(to) = self.tables[t as usize].reveal_to(item, off) {
+                self.scroll_axis(s, 1, to);
+            }
         }
         let off = self.scrolls[s as usize].offset[1];
-        let (from, to) = range_of(rows, off, view, rp);
-        let base_row = from / BASE_ROWS * BASE_ROWS;
-        let base_px = i64::from(base_row) * rp;
         let st = &mut self.tables[t as usize];
-        st.range = (from, to);
+        let geom = st.geom();
+        let span = geom.span_for(off, view);
+        let (from, to) = span.rows;
+        let base_row = from / BASE_ROWS * BASE_ROWS;
+        let base_px = geom.item_top(base_row);
+        st.span = span;
         let rebased = st.base_row != base_row;
         if rebased || self.scrolls[s as usize].base[1] != base_px {
             st.base_row = base_row;
@@ -1184,18 +1935,31 @@ impl<M> Ui<M> {
         }
         if rebased {
             // A row can keep its place on the screen and change its index: a client learns it.
-            for k in 0..self.tables[t as usize].built.len() {
-                let (node, _) = self.tables[t as usize].built[k];
-                self.a11y_touch(node);
-                self.a11y_touch_children(node, 0);
-            }
+            self.touch_built(t);
         }
         Plan {
             from,
             to,
+            heads: span.heads,
             extra: current.filter(|&c| c < from || c >= to),
             follow,
             focused: focus_here,
+        }
+    }
+
+    /// Every row and group header built for slot `t`, and their cells, to send a client again:
+    /// their indices changed.
+    fn touch_built(&mut self, t: u32) {
+        let st = &self.tables[t as usize];
+        let (rows, heads) = (st.built.len(), st.heads.len());
+        for k in 0..rows + heads {
+            let st = &self.tables[t as usize];
+            let node = match k.checked_sub(rows) {
+                None => st.built[k].0,
+                Some(h) => st.heads[h].0,
+            };
+            self.a11y_touch(node);
+            self.a11y_touch_children(node, 0);
         }
     }
 
@@ -1221,6 +1985,9 @@ impl<M> Ui<M> {
             st.check_label.clear();
             st.check_label.push_str(label);
         }
+        let (reshaped, regrouped) = st.take_shape(table);
+        seen |= regrouped;
+        relayout |= reshaped || regrouped;
         let mut restated = false;
         for (kept, given) in st.sort_status.iter_mut().zip(table.sort_status) {
             if kept != given {
@@ -1293,6 +2060,13 @@ impl<M> Ui<M> {
             // The sorted header says its order in the new words.
             self.a11y_touch_children(header, 0);
         }
+        if regrouped {
+            // Every row and header moves, and a client counts them anew.
+            let body = self.tables[t as usize].body;
+            self.damage_view(body);
+            self.mark_dirty(body);
+            self.touch_built(t);
+        }
         if relayout {
             self.mark_dirty(grid);
         }
@@ -1305,9 +2079,11 @@ impl<M> Ui<M> {
     /// changed, and focus follows the current row if it should.
     fn table_built(&mut self, t: u32, plan: Plan) {
         let st = &mut self.tables[t as usize];
-        let changed = st.scratch != st.built;
+        let changed = st.scratch != st.built || st.heads_scratch != st.heads;
         mem::swap(&mut st.built, &mut st.scratch);
         st.scratch.clear();
+        mem::swap(&mut st.heads, &mut st.heads_scratch);
+        st.heads_scratch.clear();
         let body = st.body;
         if changed {
             self.mark_dirty(body);
@@ -1345,19 +2121,26 @@ impl<M> Ui<M> {
     /// lower than a row). `None` if it has no rows or hasn't been laid out.
     fn first_row_in_view(&self, t: u32) -> Option<u32> {
         let st = &self.tables[t as usize];
-        let (rows, rp, view) = (st.rows, st.built_px, st.view_px);
-        if rows == 0 || rp <= 0 || view <= 0 {
+        let (rows, view) = (st.rows, st.view_px);
+        let geom = Geom {
+            rp: st.built_px,
+            gp: st.built_gp,
+            ..st.geom()
+        };
+        if rows == 0 || geom.rp <= 0 || view <= 0 {
             return None;
         }
         let s = self.nodes[st.body as usize].scroll;
         let off = self.scrolls[s as usize].offset[1];
-        let whole = off.saturating_add(rp - 1) / rp;
-        let at = if whole.saturating_add(1).saturating_mul(rp) <= off.saturating_add(view) {
-            whole
-        } else {
-            off / rp
-        };
-        Some(u32::try_from(at).unwrap_or(u32::MAX).min(rows - 1))
+        let whole = geom.row_from(off);
+        if geom.row_top(whole).saturating_add(geom.rp) <= off.saturating_add(view) {
+            return Some(whole);
+        }
+        // A view lower than a row: the one at its top, or under the header there.
+        Some(match geom.at(off.clamp(0, geom.height() - 1)) {
+            Item::Row(r) => r,
+            Item::Head(g) => st.starts[g as usize],
+        })
     }
 
     /// Where Tab lands in table body `body`, either way: its current row, else its first row
@@ -1418,6 +2201,53 @@ impl<M> Ui<M> {
             .find(|&&(node, _)| node == i)?
             .1;
         Some((t, at))
+    }
+
+    /// Whether node `i` is a group's header row (TD-0009 A3.5 (10)): the only container a
+    /// table's rows' viewport holds.
+    pub(crate) fn is_group_header(&self, i: u32) -> bool {
+        let n = &self.nodes[i as usize];
+        n.role == Role::Container
+            && self
+                .nodes
+                .get(n.parent as usize)
+                .is_some_and(|p| p.key == TABLE_BODY && p.scroll != NIL)
+    }
+
+    /// Group header node `i`'s table slot and group; `None` if it isn't one.
+    pub(crate) fn group_place(&self, i: u32) -> Option<(u32, u32)> {
+        if !self.is_group_header(i) {
+            return None;
+        }
+        let t = self.table_of_body(self.nodes[i as usize].parent)?;
+        let g = self.tables[t as usize]
+            .heads
+            .iter()
+            .find(|&&(node, _)| node == i)?
+            .1;
+        Some((t, g))
+    }
+
+    /// A client's index of group header node `i` (its group's first row's, less the rows' own
+    /// headers), and its row's cells' span: every column. `None` if it isn't one.
+    pub(crate) fn group_row(&self, i: u32) -> Option<(usize, usize)> {
+        let (t, g) = self.group_place(i)?;
+        let st = &self.tables[t as usize];
+        Some((
+            head_grid_of(&st.starts, g) as usize,
+            st.columns.len() + usize::from(st.checks),
+        ))
+    }
+
+    /// A client's index of row `at` of table `t`, its group headers counted (A3.10 item 5).
+    pub(crate) fn grid_row(&self, t: u32, at: u32) -> usize {
+        grid_of(&self.tables[t as usize].starts, at) as usize
+    }
+
+    /// Table `t`'s rows as a client counts them, its group headers with them.
+    pub(crate) fn grid_rows(&self, t: u32) -> usize {
+        let st = &self.tables[t as usize];
+        st.rows as usize + st.starts.len()
     }
 
     /// Whether node `i` is a table's header.
@@ -1485,41 +2315,72 @@ impl<M> Ui<M> {
     pub(crate) fn row_rect_px(&self, i: u32) -> Option<[i64; 4]> {
         let (t, at) = self.row_place(i)?;
         let st = &self.tables[t as usize];
-        let rp = if st.row_px > 0 {
-            st.row_px
-        } else {
-            st.built_px
-        };
-        if rp <= 0 {
+        let geom = st.geom();
+        if geom.rp <= 0 {
             return None;
         }
         let body = self.nodes[st.body as usize].rect.snap(self.scale);
         let r = self.nodes[i as usize].rect.snap(self.scale);
-        let y0 = i64::from(body.y0) + (i64::from(at) - i64::from(st.base_row)) * rp;
-        Some([i64::from(r.x0), y0, i64::from(r.x1), y0 + rp])
+        let y0 = i64::from(body.y0) + geom.row_top(at) - geom.item_top(st.base_row);
+        Some([i64::from(r.x0), y0, i64::from(r.x1), y0 + geom.rp])
+    }
+
+    /// Table `t`'s rows' and group headers' height exactly, in physical pixels, once layout has
+    /// measured them; `None` before, or with no rows.
+    pub(crate) fn table_content_px(&self, t: u32) -> Option<i64> {
+        let st = &self.tables[t as usize];
+        (st.rows > 0 && st.row_px > 0).then(|| st.geom().height())
     }
 
     // ---- layout ------------------------------------------------------------------------------
 
-    /// Table `t`'s row height, logical and in whole physical pixels: its body text's line and the
-    /// row padding above and below, at least the row token.
-    fn row_height(&self, t: u32, text: &mut dyn TextSystem) -> (f32, i64) {
-        let body = self.tables[t as usize].body;
-        let style = self.nodes[body as usize].text_style;
+    /// Table `t`'s heights, measured from its body text. A row is its body text's line and the
+    /// row padding above and below, at least the row token; a two-line row both lines, the gap
+    /// between them and the padding, at least its token. A group header is a caption semibold
+    /// line and its padding, at least its token. The column header stays a one-line row high
+    /// over rows of two (A3.5 (10)).
+    fn row_heights(&self, t: u32, text: &mut dyn TextSystem) -> Heights {
+        let st = &self.tables[t as usize];
+        let style = self.nodes[st.body as usize].text_style;
         let line = text.measure("", &style, f32::INFINITY).height;
-        let row_h = (line + 2.0 * tok::ROW_PAD_Y).max(tok::ROW);
-        (row_h, to_px(row_h, self.scale).max(1))
+        let one = (line + 2.0 * tok::ROW_PAD_Y).max(tok::ROW);
+        let small = second_line(style);
+        // Caption lines are measured only for a table that shows them: most tables have neither
+        // two-line rows nor groups, and every layout measures (U1, the interact benches).
+        let row_h = if st.two {
+            let caption = text.measure("", &small, f32::INFINITY).height;
+            (line + tok::LINE_GAP + caption + 2.0 * tok::ROW_PAD_Y).max(tok::ROW_TWO)
+        } else {
+            one
+        };
+        let group_h = if st.starts.is_empty() {
+            tok::GROUP
+        } else {
+            let label = TextStyle {
+                weight: font::SEMIBOLD,
+                ..small
+            };
+            (text.measure("", &label, f32::INFINITY).height + 2.0 * tok::GROUP_PAD_Y)
+                .max(tok::GROUP)
+        };
+        let px = |h: f32| to_px(h, self.scale).max(1);
+        Heights {
+            row_h,
+            rp: px(row_h),
+            group_h,
+            gp: px(group_h),
+            head: px(one),
+        }
     }
 
-    /// A grid's natural size: its columns' least widths, and a row for the header and each row
-    /// (or the status line). `None` if it isn't a table.
+    /// A grid's natural size: its columns' least widths, and the header, each row and each group
+    /// header (or the status line). `None` if it isn't a table.
     pub(crate) fn grid_natural(&self, i: u32, text: &mut dyn TextSystem) -> Option<Size> {
         let t = self.table_of_grid(i)?;
         // Measured now, not the last layout's: after a text size change, the grid is measured
         // before it's arranged.
-        let (_, rp) = self.row_height(t, text);
+        let h = self.row_heights(t, text);
         let st = &self.tables[t as usize];
-        let row = to_logical(rp, self.scale);
         let w = if st.checks { tok::CHECK_COL } else { 0.0 }
             + st.columns
                 .iter()
@@ -1528,11 +2389,13 @@ impl<M> Ui<M> {
                     Track::Share(_) => c.min,
                 })
                 .sum::<f32>();
-        #[allow(
-            clippy::cast_precision_loss,
-            reason = "a natural height; past 2^24 rows it's huge either way"
-        )]
-        let h = row * (st.rows.max(1) as f32 + 1.0);
+        let rows = Geom {
+            rows: st.rows.max(1),
+            rp: h.rp,
+            gp: h.gp,
+            starts: &st.starts,
+        };
+        let h = to_logical(h.head.saturating_add(rows.height()), self.scale);
         Some(Size { w, h })
     }
 
@@ -1599,8 +2462,8 @@ impl<M> Ui<M> {
         true
     }
 
-    /// The grid: the row height from the rows' text, the columns' tracks, the header a row high
-    /// and the rows' viewport under it.
+    /// The grid: the row and group header heights from the rows' text, the columns' tracks, the
+    /// header a one-line row high and the rows' viewport under it.
     fn arrange_grid(&mut self, i: u32, t: u32, text: &mut dyn TextSystem, covered: bool) {
         let scale = self.scale;
         let inner = {
@@ -1611,13 +2474,15 @@ impl<M> Ui<M> {
             let st = &self.tables[t as usize];
             (st.header, st.body)
         };
-        let (row_h, rp) = self.row_height(t, text);
-        self.tables[t as usize].row_h = row_h;
-        let old = self.tables[t as usize].row_px;
-        if rp != old {
-            self.rows_resized(t, old, rp);
+        let h = self.row_heights(t, text);
+        let st = &mut self.tables[t as usize];
+        st.row_h = h.row_h;
+        st.group_h = h.group_h;
+        let old = (st.row_px, st.group_px);
+        if (h.rp, h.gp) != old {
+            self.rows_resized(t, old, (h.rp, h.gp));
         }
-        let row = to_logical(rp, scale);
+        let row = to_logical(h.head, scale);
         let head = Rect::new(inner.x, inner.y, inner.w, row.min(inner.h));
         let rows = Rect::new(
             inner.x,
@@ -1654,11 +2519,11 @@ impl<M> Ui<M> {
     fn table_settled(&self, t: u32) -> bool {
         let st = &self.tables[t as usize];
         let s = self.nodes[st.body as usize].scroll;
-        if s == NIL || st.view_px <= 0 || st.built_px != st.row_px || st.reveal.is_some() {
+        if s == NIL || st.view_px <= 0 || !st.built_measured() || st.reveal.is_some() {
             return false;
         }
         let off = self.scrolls[s as usize].offset[1];
-        st.range == range_of(st.rows, off, st.view_px, st.row_px)
+        st.span == st.geom().span_for(off, st.view_px)
     }
 
     /// Measures table `t`'s columns the view asks to fit: each at its header's text (and a
@@ -1672,6 +2537,24 @@ impl<M> Ui<M> {
         };
         let natural = |n: &Node<M>, text: &mut dyn TextSystem| {
             text.measure(&n.text, &n.text_style, f32::INFINITY).width + n.style.padding.horizontal()
+        };
+        // A two-line cell is its wider line; a badge cell, its badge.
+        let cell = |ui: &Self, n: &Node<M>, text: &mut dyn TextSystem| {
+            let pad = n.style.padding.horizontal();
+            if n.first != NIL {
+                return natural(&ui.nodes[n.first as usize], text) + pad;
+            }
+            match n.lines() {
+                Some(split) => {
+                    let (first, second) = lines_of(&n.text, split);
+                    let a = text.measure(first, &n.text_style, f32::INFINITY).width;
+                    let b = text
+                        .measure(second, &second_line(n.text_style), f32::INFINITY)
+                        .width;
+                    a.max(b) + pad
+                }
+                None => natural(n, text),
+            }
         };
         for k in 0..self.tables[t as usize].columns.len() {
             let c = self.tables[t as usize].columns[k];
@@ -1690,8 +2573,8 @@ impl<M> Ui<M> {
             }
             for b in 0..self.tables[t as usize].built.len() {
                 let (row, _) = self.tables[t as usize].built[b];
-                if let Some(cell) = self.nth_child(row, skip + k) {
-                    w = w.max(natural(&self.nodes[cell as usize], text));
+                if let Some(c) = self.nth_child(row, skip + k) {
+                    w = w.max(cell(self, &self.nodes[c as usize], text));
                 }
             }
             let st = &mut self.tables[t as usize];
@@ -1715,26 +2598,39 @@ impl<M> Ui<M> {
         (c != NIL).then_some(c)
     }
 
-    /// The row height became `new` pixels from `old` (a text size, measured for the first time):
-    /// the row at the top of the view stays there, as far into it as it was.
-    fn rows_resized(&mut self, t: u32, old: i64, new: i64) {
-        let st = &mut self.tables[t as usize];
-        st.row_px = new;
+    /// The row and group header heights became `new` pixels from `old` (a text size, measured
+    /// for the first time): the row or header at the top of the view stays there, as far into it
+    /// as it was.
+    fn rows_resized(&mut self, t: u32, old: (i64, i64), new: (i64, i64)) {
+        let st = &self.tables[t as usize];
         let (body, base_row) = (st.body, st.base_row);
         let s = self.nodes[body as usize].scroll;
+        let was = Geom {
+            rp: old.0,
+            gp: if old.1 > 0 { old.1 } else { new.1 },
+            ..st.geom()
+        };
+        let now = Geom {
+            rp: new.0,
+            gp: new.1,
+            ..was
+        };
+        let moved =
+            (s != NIL && old.0 > 0).then(|| was.rescaled(&now, self.scrolls[s as usize].offset[1]));
+        let base = now.item_top(base_row);
+        let st = &mut self.tables[t as usize];
+        (st.row_px, st.group_px) = new;
         if s == NIL {
             return;
         }
-        if old > 0 {
-            let sc = &mut self.scrolls[s as usize];
-            let off = sc.offset[1];
-            sc.offset[1] = off / old * new + off % old * new / old;
+        if let Some(y) = moved {
+            self.scrolls[s as usize].offset[1] = y;
             self.damage_view(body);
             self.a11y_touch(body);
             self.touch_grid(s);
             self.sync_follower(s);
         }
-        self.scrolls[s as usize].base[1] = i64::from(base_row) * new;
+        self.scrolls[s as usize].base[1] = base;
         // Every row moves: it's laid out again below.
         self.nodes[body as usize].dirty = true;
     }
@@ -1877,20 +2773,16 @@ impl<M> Ui<M> {
         self.scroll_laid_out(s, content, text);
     }
 
-    /// The rows: each at its index times the row height from the base, as wide as the columns or
-    /// the view, whichever is wider.
+    /// The rows and group headers: each where [`Geom`] puts it, from the base, as wide as the
+    /// columns or the view, whichever is wider.
     fn arrange_rows(&mut self, body: u32, slot: u32, text: &mut dyn TextSystem, covered: bool) {
         let (outer, _) = self.enter_viewport(body, Axis::Column);
         let view = self.nodes[body as usize].rect;
         let scale = f64::from(self.scale);
-        let (row_px, base, content_w) = {
+        let (base, content_h, content_w) = {
             let st = &self.tables[slot as usize];
-            let row_px = if st.row_px > 0 {
-                st.row_px
-            } else {
-                st.built_px
-            };
-            (row_px, i64::from(st.base_row), st.content_w)
+            let geom = st.geom();
+            (geom.item_top(st.base_row), geom.height(), st.content_w)
         };
         let width = content_w.max(view.w);
         // In f64 from the base, then once to f32: exact for a chunk of rows at any depth.
@@ -1900,41 +2792,67 @@ impl<M> Ui<M> {
             reason = "within a chunk of rows, f64 is exact and f32 keeps whole pixels"
         )]
         let at_px = |px: i64| (f64::from(view.y) + px as f64 / scale) as f32;
-        for k in 0..self.tables[slot as usize].built.len() {
-            let (node, at) = self.tables[slot as usize].built[k];
-            let top = (i64::from(at) - base) * row_px;
-            let (y0, y1) = (at_px(top), at_px(top + row_px));
+        let (rows, heads, rp, flat) = {
+            let st = &self.tables[slot as usize];
+            let rp = st.geom().rp;
+            (st.built.len(), st.heads.len(), rp, st.starts.is_empty())
+        };
+        for k in 0..rows + heads {
+            let (node, (top, bottom)) = {
+                let st = &self.tables[slot as usize];
+                match k.checked_sub(rows) {
+                    // Without groups, A2's arithmetic: every layout of most tables passes here.
+                    None if flat => {
+                        let (node, at) = st.built[k];
+                        let top = i64::from(at) * rp;
+                        (node, (top, top + rp))
+                    }
+                    None => {
+                        let (node, at) = st.built[k];
+                        (node, st.geom().extent(Item::Row(at)))
+                    }
+                    Some(h) => {
+                        let (node, g) = st.heads[h];
+                        (node, st.geom().extent(Item::Head(g)))
+                    }
+                }
+            };
+            let (y0, y1) = (at_px(top - base), at_px(bottom - base));
             self.arrange(node, Rect::new(view.x, y0, width, y1 - y0), text, covered);
         }
         self.shown = outer;
-        let rows = i64::from(self.tables[slot as usize].rows);
         let content = Size {
             w: content_w,
-            h: to_logical(rows.saturating_mul(row_px), self.scale),
+            h: to_logical(content_h, self.scale),
         };
         let s = self.nodes[body as usize].scroll;
         self.scroll_laid_out(s, content, text);
     }
 
-    /// The scale changed from `from`: slot `t`'s row height in the new pixels, and the offset
-    /// `offset` (old pixels) keeping its top row. Returns the new offset, base and content
-    /// height; 0 content if the rows aren't measured yet.
+    /// The scale changed from `from`: slot `t`'s row and group header heights in the new pixels,
+    /// and the offset `offset` (old pixels) keeping its top row or header. Returns the new
+    /// offset, base and content height; 0 content if the rows aren't measured yet.
     pub(crate) fn rescale_rows(&mut self, t: u32, offset: i64, from: f32) -> (i64, i64, i64) {
         let scale = self.scale;
-        let st = &mut self.tables[t as usize];
-        let old = st.row_px;
-        if old <= 0 {
+        let st = &self.tables[t as usize];
+        if st.row_px <= 0 {
             return (to_px(to_logical(offset, from), scale), 0, 0);
         }
-        let new = to_px(st.row_h, scale).max(1);
-        st.row_px = new;
-        let y = offset / old * new + offset % old * new / old;
-        let grid = st.grid;
+        let was = st.geom();
+        let now = Geom {
+            rp: to_px(st.row_h, scale).max(1),
+            gp: to_px(st.group_h, scale).max(1),
+            ..was
+        };
         let out = (
-            y,
-            i64::from(st.base_row) * new,
-            i64::from(st.rows).saturating_mul(new),
+            was.rescaled(&now, offset),
+            now.item_top(st.base_row),
+            now.height(),
         );
+        let (rp, gp) = (now.rp, now.gp);
+        let st = &mut self.tables[t as usize];
+        (st.row_px, st.group_px) = (rp, gp);
+        let grid = st.grid;
         // The rows are laid out again in the new pixels.
         if grid != NIL {
             self.mark_dirty(grid);
@@ -2221,13 +3139,21 @@ impl<M> Ui<M> {
         }
         let st = &self.tables[t as usize];
         let last = st.rows.saturating_sub(1);
-        let page = u32::try_from((st.view_px / st.row_px.max(1) - 1).max(1)).unwrap_or(1);
+        // A page is the view's rows less one, as pixels down the rows: the group headers in
+        // between count (A3.5 (10)). Without groups, that many rows.
+        let geom = st.geom();
+        let page = (st.view_px / geom.rp.max(1) - 1).max(1) * geom.rp.max(1);
         let (body, checks) = (st.body, st.checks);
         let to = match k.key {
             KeyCode::Up if !ctrl => at.saturating_sub(1),
             KeyCode::Down if !ctrl => at.saturating_add(1).min(last),
-            KeyCode::PageUp if !ctrl => at.saturating_sub(page),
-            KeyCode::PageDown if !ctrl => at.saturating_add(page).min(last),
+            KeyCode::PageUp if !ctrl => geom
+                .row_from(geom.row_top(at) - page)
+                .min(at.saturating_sub(1)),
+            KeyCode::PageDown if !ctrl => geom
+                .row_by(geom.row_top(at) + page)
+                .max(at.saturating_add(1))
+                .min(last),
             KeyCode::Home => 0,
             KeyCode::End => last,
             KeyCode::Space => {
@@ -2318,15 +3244,140 @@ impl<M> Ui<M> {
 mod tests {
     use super::*;
 
+    fn flat(rows: u32) -> Geom<'static> {
+        Geom {
+            rows,
+            rp: 36,
+            gp: 32,
+            starts: &[],
+        }
+    }
+
     #[test]
     fn the_range_is_the_view_and_half_a_view_either_side() {
         // 364 px of 36 px rows: 0 to 546 px is rows 0 to 15.
-        assert_eq!(range_of(1_000, 0, 364, 36), (0, 16));
-        assert_eq!(range_of(1_000, 324, 364, 36), (3, 25));
-        assert_eq!(range_of(10, 0, 364, 36), (0, 10));
-        assert_eq!(range_of(1_000, 0, 0, 36), (0, 0), "no view yet");
-        assert_eq!(range_of(0, 0, 364, 36), (0, 0));
-        assert_eq!(range_of(5, i64::MAX, 364, 36), (5, 5));
+        let rows = |g: Geom<'_>, off, view| g.span_for(off, view).rows;
+        assert_eq!(rows(flat(1_000), 0, 364), (0, 16));
+        assert_eq!(rows(flat(1_000), 324, 364), (3, 25));
+        assert_eq!(rows(flat(10), 0, 364), (0, 10));
+        assert_eq!(rows(flat(1_000), 0, 0), (0, 0), "no view yet");
+        assert_eq!(rows(flat(0), 0, 364), (0, 0));
+        assert_eq!(rows(flat(5), i64::MAX, 364), (5, 5));
+        // Its arithmetic without groups is the search's with them.
+        for (n, off, view) in [
+            (1_000, 0, 364),
+            (1_000, 324, 364),
+            (10, 0, 364),
+            (5, 400, 90),
+        ] {
+            let g = flat(n);
+            assert_eq!(
+                g.span_for(off, view),
+                g.span(off - view / 2, off + view + view / 2),
+                "{n} rows at {off}"
+            );
+        }
+    }
+
+    const STARTS: [u32; 4] = [0, 3, 10, 25];
+
+    fn grouped() -> Geom<'static> {
+        Geom {
+            rows: 40,
+            rp: 52,
+            gp: 32,
+            starts: &STARTS,
+        }
+    }
+
+    #[test]
+    fn grouped_rows_are_found_at_their_heights_and_spanned_with_their_headers() {
+        let g = grouped();
+        assert_eq!(g.height(), 40 * 52 + 4 * 32);
+        assert_eq!(
+            (g.at(0), g.at(31), g.at(32)),
+            (Item::Head(0), Item::Head(0), Item::Row(0))
+        );
+        // Group 1's header under rows 0 to 2: 32 + 156.
+        assert_eq!(g.head_top(1), 188);
+        assert_eq!((g.at(219), g.at(220)), (Item::Head(1), Item::Row(3)));
+        assert_eq!(g.row_top(3), 220);
+        assert_eq!(g.item_top(3), 188, "row 3 starts group 1");
+        assert_eq!(g.at(g.height() - 1), Item::Row(39));
+        // Row 9 (532) starts before 546; group 2's header (584) doesn't.
+        let span = g.span_for(0, 364);
+        assert_eq!((span.rows, span.heads), ((0, 10), (0, 2)));
+        // From 400 less half a view, 218, takes in the end of group 1's header; to 946, row 16
+        // (928).
+        let span = g.span_for(400, 364);
+        assert_eq!((span.rows, span.heads), ((3, 17), (1, 3)));
+        // Half a view above the end: rows 36 to 39.
+        assert_eq!(g.span_for(g.height(), 364).rows, (36, 40));
+        let past = g.span_for(i64::MAX, 364);
+        assert_eq!((past.rows, past.heads), ((40, 40), (4, 4)));
+    }
+
+    #[test]
+    fn grid_indices_count_the_headers_both_ways() {
+        let mut k = 0;
+        let mut g = 0u32;
+        for r in 0..40 {
+            while STARTS.get(g as usize).is_some_and(|&s| s <= r) {
+                assert_eq!(item_of_grid(&STARTS, 40, k), Some(Item::Head(g)));
+                assert_eq!(head_grid_of(&STARTS, g), k);
+                k += 1;
+                g += 1;
+            }
+            assert_eq!(grid_of(&STARTS, r), k);
+            assert_eq!(item_of_grid(&STARTS, 40, k), Some(Item::Row(r)));
+            k += 1;
+        }
+        assert_eq!(item_of_grid(&STARTS, 40, 44), None);
+        assert_eq!(item_of_grid(&[], 40, 7), Some(Item::Row(7)));
+        assert_eq!(grid_of(&[4], 3), 3, "before the first group");
+    }
+
+    #[test]
+    fn groups_are_kept_while_in_order_and_within_the_rows() {
+        let group = |start| RowGroup {
+            start,
+            label: "",
+            count: "",
+            name: "",
+        };
+        assert_eq!(valid_groups(&[group(0), group(3), group(9)], 10), 3);
+        assert_eq!(valid_groups(&[group(3), group(2), group(5)], 10), 1);
+        assert_eq!(valid_groups(&[group(3), group(3)], 10), 1, "empty");
+        assert_eq!(valid_groups(&[group(0), group(10)], 10), 1, "past the rows");
+    }
+
+    #[test]
+    fn a_new_height_keeps_the_row_at_the_top() {
+        let g = grouped();
+        let big = Geom {
+            rp: 83,
+            gp: 46,
+            ..g
+        };
+        // Row 12's top, then 13 px into it, 13 × 83 / 52 in the new.
+        assert_eq!(g.rescaled(&big, g.row_top(12)), big.row_top(12));
+        assert_eq!(
+            g.rescaled(&big, g.row_top(12) + 13),
+            big.row_top(12) + 13 * 83 / 52
+        );
+        assert_eq!(g.rescaled(&big, g.head_top(2) + 16), big.head_top(2) + 23);
+        // Without groups, A2's arithmetic.
+        let (a, b) = (
+            flat(100),
+            Geom {
+                rp: 45,
+                ..flat(100)
+            },
+        );
+        assert_eq!(
+            a.rescaled(&b, 1_000),
+            1_000 / 36 * 45 + 1_000 % 36 * 45 / 36
+        );
     }
 
     #[test]

@@ -1230,6 +1230,8 @@ mod tests {
         fn view(&self, cx: &mut Cx<'_, SizesMsg>) {
             let table = crate::Table {
                 rows: 1,
+                lines: crate::RowLines::One,
+                groups: &[],
                 columns: &SIZE_COLUMNS,
                 widths: &[],
                 hidden: &[],

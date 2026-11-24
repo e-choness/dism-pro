@@ -87,8 +87,8 @@ pub use popup::{Placement, Popup, PopupKind, place};
 pub use scroll::{Axes, ScrollBar, ScrollInfo};
 pub use style::{Align, Axis, Dim, Justify, Style};
 pub use table::{
-    COLUMN_FIT, COLUMN_FIT_ALL, COLUMN_RESET, Cells, Column, ColumnMenuLabels, Row, Status,
-    TABLE_BODY, TABLE_CHECK, TABLE_HEADER, Table, TableEvent, Track,
+    COLUMN_FIT, COLUMN_FIT_ALL, COLUMN_RESET, Cells, Column, ColumnMenuLabels, Row, RowGroup,
+    RowLines, Status, TABLE_BODY, TABLE_CHECK, TABLE_HEADER, Table, TableEvent, Track, table_group,
 };
 pub use text::{CaretStop, FakeText, GlyphSink, Icon, TextMetrics, TextStyle, TextSystem};
 pub use theme::{Color, Scheme, SysColors, Theme, Tone, tokens};

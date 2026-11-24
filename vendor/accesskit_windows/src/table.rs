@@ -203,13 +203,22 @@ pub(crate) fn is_header(node: &NodeRef) -> bool {
             .is_some_and(|first| first.role() == Role::ColumnHeader && !is_cell(&first))
 }
 
+/// Whether cell `node` covers `column`: from its column index across its span, 1 if not given.
+/// A grouped table's header row is one row header spanning every column (TD-0009 A3.10 item 5).
+fn covers(node: &NodeRef, column: usize) -> bool {
+    node.data().column_index().is_some_and(|first| {
+        let span = node.data().column_span().unwrap_or(1).max(1);
+        (first..first.saturating_add(span)).contains(&column)
+    })
+}
+
 /// The cell at `row` and `column` of `table`, if its row is in the tree.
 pub(crate) fn cell_at<'a>(table: &NodeRef<'a>, row: usize, column: usize) -> Option<NodeRef<'a>> {
     let mut found = None;
     walk(table, &mut |node| match node.role() {
         Role::Row if node.data().row_index() == Some(row) => {
             walk(&node, &mut |part| match part.role() {
-                role if is_cell_role(role) && part.data().column_index() == Some(column) => {
+                role if is_cell_role(role) && covers(&part, column) => {
                     found = Some(part);
                     Walk::Stop
                 }

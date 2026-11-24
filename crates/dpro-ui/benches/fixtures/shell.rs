@@ -493,6 +493,8 @@ impl Shell {
     fn table_of(&self) -> Table<'_, Msg> {
         Table {
             rows: u32::try_from(self.visible.len()).unwrap_or(u32::MAX),
+            lines: dpro_ui::RowLines::One,
+            groups: &[],
             columns: &COLUMNS,
             widths: self.columns.widths(),
             hidden: self.columns.hidden(),

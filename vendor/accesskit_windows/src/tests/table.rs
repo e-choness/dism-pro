@@ -164,6 +164,42 @@ fn a_grid_counts_its_rows_and_finds_a_cell_by_row_and_column() {
     }
 }
 
+/// A grouped table's header row (TD-0009 A3.10 item 5): one row header spanning every column is
+/// the cell at each of them.
+#[test]
+fn a_spanning_row_header_is_the_cell_at_every_column_it_spans() {
+    const GROUP_ROW: NodeId = NodeId(22);
+    const GROUP_CELL: NodeId = NodeId(36);
+    let requests = Requests::default();
+    let mut update = tree();
+    for (id, node) in &mut update.nodes {
+        if *id == BODY {
+            node.set_children(vec![ROW_0, ROW_1, GROUP_ROW]);
+        }
+    }
+    let mut group_row = Node::new(Role::Row);
+    group_row.set_row_index(2);
+    group_row.set_children(vec![GROUP_CELL]);
+    let mut group_cell = cell(Role::RowHeader, "Registry, 3 items", Some(2), 0);
+    group_cell.set_column_span(3);
+    update
+        .nodes
+        .extend([(GROUP_ROW, group_row), (GROUP_CELL, group_cell)]);
+    let context = providers::context(&requests, update);
+    let grid: IGridProvider = pattern(&element(&context, GRID), UIA_GridPatternId).expect("a grid");
+    for column in 0..3 {
+        let cell = unsafe { grid.GetItem(2, column) }.unwrap();
+        assert_eq!(name(&cell), "Registry, 3 items", "column {column}");
+        let item: IGridItemProvider = pattern(&cell, UIA_GridItemPatternId).expect("a grid item");
+        unsafe {
+            assert_eq!(
+                (item.Column().unwrap(), item.ColumnSpan().unwrap()),
+                (0, 3)
+            );
+        }
+    }
+}
+
 #[test]
 fn a_grid_s_header_is_a_header_of_header_items_that_aren_t_its_cells() {
     let requests = Requests::default();

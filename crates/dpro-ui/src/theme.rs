@@ -720,6 +720,19 @@ pub mod tokens {
         /// A column divider's strip in the header, centred on the column's right edge: where the
         /// pointer shows the left-right arrows and a press drags the column's width.
         pub const DIVIDER: f32 = 8.0;
+
+        // Grouped and two-line rows (TD-0009 A3.5 (10), A3.10 item 8; slice 6b).
+
+        /// A two-line row's least height: its two lines, the gap between them and the row
+        /// padding above and below, at least this.
+        pub const ROW_TWO: f32 = 52.0;
+        /// Between a two-line cell's first line and its second.
+        pub const LINE_GAP: f32 = 2.0;
+        /// A group header row's least height: its caption line and [`GROUP_PAD_Y`] above and
+        /// below, at least this.
+        pub const GROUP: f32 = 32.0;
+        /// Above and below a group header's caption line.
+        pub const GROUP_PAD_Y: f32 = 8.0;
     }
 
     // The composites' sizes (TD-0009 A3.10 item 8, decision #45; slice 6a). Component tokens, as

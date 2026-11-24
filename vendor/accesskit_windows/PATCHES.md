@@ -49,6 +49,9 @@ amendment).
        - Its rows are `Row`s at any depth with a `row_index`.
        - Its cells are a row's `Cell`, `GridCell`, `RowHeader` and `ColumnHeader` parts with a
          `column_index`, at the row's index unless they carry their own.
+       - A cell is at each column it spans: its `column_index` and the `column_span - 1` after
+         it (TD-0009 slice 6b). A grouped table's header row is one row header spanning every
+         column, so `GetItem` finds it at any of them.
        - A nested table's parts are its own.
      - `src/tests/table.rs`: tests that call the providers in process, so Wine runs them too (T2),
        with the helpers in `src/tests/providers.rs` (5).

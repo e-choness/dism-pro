@@ -30,6 +30,12 @@
 //!   the summary cards wrap two to a line (`cards_wrap_resize`). `a11y` adds the page's whole
 //!   tree (`a11y_tree.composites`). A3.7 names them `composite::batch_count` and so on; the bench
 //!   ids after the dot say which case.
+//! - `grouped` (TD-0009 A3.7 U18, slice 6b): the fling's table with its rows two lines each, in
+//!   1,000 groups of 100 under their header rows. The same 90 frames as `table::fling.frames`,
+//!   painted (`fling.frames`); and, frames ending at layout and damage, Down on a group's last
+//!   row, which passes its next group's header and scrolls (`event.row_down`), and a far row
+//!   realized for a client by its grid row, headers counted, with its update made
+//!   (`event.realize`).
 //!
 //! C1: `docker compose run --rm bench-gate`.
 
@@ -537,8 +543,78 @@ library_benchmark_group!(
     benchmarks = [batch_count, scan_size, cards_wrap_resize]
 );
 
+/// U18's benches (TD-0009 A3.7, slice 6b), in a module of their own: the group's `fling` and
+/// `event` are named as A3.7 names them, beside `table`'s and `interact`'s.
+mod grouped_rows {
+    use std::hint::black_box;
+
+    use dpro_ui::{Input, KeyCode, KeyEvent, Mods};
+    use gungraun::{library_benchmark, library_benchmark_group};
+
+    use super::fling_table::{GROUP_ROWS, Grouped, Step, grid_row};
+
+    /// U18's table at scale 1, its first frame painted, and the frames `table::fling.frames`
+    /// counts: the script's first 60 and 30 of its thumb drag.
+    fn fling_frames() -> (Box<Grouped>, Vec<f32>) {
+        let f = Grouped::new(1.0);
+        let script = f.script();
+        let mut frames: Vec<f32> = script.frames.iter().take(60).copied().collect();
+        frames.extend(script.frames.iter().skip(script.drag).take(30));
+        (Box::new(f), frames)
+    }
+
+    #[library_benchmark]
+    #[bench::frames(setup = fling_frames)]
+    fn fling((mut f, frames): (Box<Grouped>, Vec<f32>)) -> (Box<Grouped>, Vec<f32>) {
+        for &offset in &frames {
+            f.frame(black_box(offset));
+        }
+        (f, frames)
+    }
+
+    /// A key pressed, as the platform delivers it.
+    const fn key(key: KeyCode) -> Step {
+        Step::Input(Input::Key(KeyEvent {
+            key,
+            down: true,
+            mods: Mods {
+                shift: false,
+                ctrl: false,
+                alt: false,
+                win: false,
+            },
+        }))
+    }
+
+    /// U18's table warmed, frames ending at layout and damage, group 0's last row current and
+    /// focused at the view's bottom; then `step`.
+    fn group_end_with(step: Step) -> (Box<Grouped>, Step) {
+        let f = Grouped::new(1.0)
+            .unpainted()
+            .current_focused(GROUP_ROWS - 1);
+        (Box::new(f), step)
+    }
+
+    /// U18's table warmed with a client listening; then `step`, its update made in its frame.
+    fn accessible_with(step: Step) -> (Box<Grouped>, Step) {
+        (Box::new(Grouped::new(1.0).unpainted().accessible()), step)
+    }
+
+    #[library_benchmark]
+    #[bench::row_down(args = (key(KeyCode::Down)), setup = group_end_with)]
+    #[bench::realize(args = (Step::Realize(grid_row(50_000))), setup = accessible_with)]
+    fn event((mut f, step): (Box<Grouped>, Step)) -> Box<Grouped> {
+        f.step(black_box(step));
+        f
+    }
+
+    library_benchmark_group!(name = grouped, benchmarks = [fling, event]);
+}
+
+use grouped_rows::grouped;
+
 main!(
     // Instruction counts only: the cache simulation would slow every run for metrics nothing gates.
     config = LibraryBenchmarkConfig::default().tool(Callgrind::with_args(["--cache-sim=no"]));
-    library_benchmark_groups = interact, paint, popup, table, a11y, composite
+    library_benchmark_groups = interact, paint, popup, table, a11y, composite, grouped
 );
