@@ -126,6 +126,13 @@ raw-API baseline, measured in this job, so it holds on whatever machine the runn
       reports Ok(None) and the timer wakes its window heard through the modal loop, and afterwards
       the window is enabled and its tree answers again. Those are gates; Cancel to the answer is
       advisory (100 ms).
+  Composites: picker U19 (TD-0009 A3.5 (12), A3.7 U19, slice 6e): the picker probe
+      (examples/picker.rs) over a folder under %TEMP% holding one folder of 10,000 folders. Enter
+      on "Browse..." opens the Group "Choose a folder" (a region landmark), focus in its Edit
+      "Path", whose Value is the folder; its DataGrid lists the one folder; Enter on that row lists
+      all 10,000 (GridPattern's RowCount, within 10 s); Esc closes it and focus goes back to
+      "Browse...". Those are gates. Enter to the first screen of rows and to all 10,000 are
+      advisory (U19: the first screen <= 50 ms, U3), as the runner's NTFS is.
   Accessibility depth, notifications (TD-0009 A4.5, A4.7 U23, slice 7b): the shell with
       --job-ms 4000, whose drawer job runs 4 s from the drawer opening. A COM IUIAutomation5 client
       (managed UIA can't hear notifications) subscribes to the window's notifications, and Invoke on
@@ -2124,6 +2131,92 @@ foreach ($mode in @('folder', 'file')) {
 foreach ($k in $checks.Keys) { $lines += '{0,-62} {1}' -f $k, (Format-Verdict $checks[$k]) }
 $ok = $checks.Count -gt 0 -and -not ($checks.Values -contains $false)
 Publish 'Composites: picker dialog' $lines $ok
+if (-not $ok) { $failed++ }
+
+# Composites: picker (TD-0009 A3.5 (12), A3.7 U19, A3.9, slice 6e) ---------------------------------
+# G1's in-app picker check and U19's wall clock, on the picker probe (crates/dpro-ui/examples/picker.rs,
+# fixtures/picker.rs) over a real folder: %TEMP% gets a folder holding one folder of 10,000 empty
+# folders, listed by dpro_app::picker::FsLister's threads. Enter on "Browse..." opens the Group
+# "Choose a folder" (a region landmark) with focus in its Edit "Path", whose Value is the folder;
+# the DataGrid lists the one folder; Enter on its row opens it, and GridPattern's RowCount comes to
+# all 10,000; Esc closes the sheet, and focus goes back to "Browse...". Those are gates. Enter to the
+# first screen of rows (RowCount past the one row it had) and to all 10,000 are advisory (U19: the
+# first screen <= 50 ms, U3), as the runner's NTFS is.
+$pickerExe = Join-Path $Bin 'picker.exe'
+$browseName = "Browse$([char]0x2026)"
+$bigName = 'Ten thousand'
+$pickerTree = Join-Path ([IO.Path]::GetTempPath()) "dpro-u19-$PID"
+$lines = @("Picker on the picker probe at $Size over 10,000 folders under %TEMP% (the checks are gates; the times are advisory: U19, Enter to the first screen of rows in UIA <= 50 ms)")
+$checks = [ordered]@{}
+$p = $null
+$pickerHwnd = [IntPtr]::Zero
+try {
+    if (-not (Test-Path $pickerExe)) { throw "missing $pickerExe (docker compose run --rm t3-tools builds it)" }
+    $big = Join-Path $pickerTree $bigName
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    foreach ($n in 0..9999) { $null = [IO.Directory]::CreateDirectory((Join-Path $big ('Folder {0:D5}' -f $n))) }
+    $lines += 'made 10,000 folders in {0:N1} s' -f $sw.Elapsed.TotalSeconds
+    $p = Start-Process -FilePath $pickerExe -ArgumentList @('--start', ('"{0}"' -f $pickerTree), '--size', $Size) -PassThru
+    $null = $p.Handle
+    $shown = Wait-Until {
+        $script:pickerHwnd = [UiaGateWin32]::FindWindowW('dismpro.window', 'DISM Pro picker probe')
+        $script:pickerHwnd -ne [IntPtr]::Zero -and [UiaGateWin32]::IsWindowVisible($script:pickerHwnd)
+    } 30000
+    if (-not $shown) { throw "the picker probe showed no window in 30 s ($(if ($p.HasExited) { "exited with code $($p.ExitCode)" } else { 'still running' }))" }
+    $root = $ae::FromHandle($pickerHwnd)
+    $browse = $null
+    if (-not (Wait-Until { $script:browse = Find-First $root $types::Button $browseName; $null -ne $script:browse } 10000)) { throw "no Button `"$browseName`" in 10 s" }
+    [void][GlassGateWin32]::Activate($pickerHwnd)
+    $browse.SetFocus()
+    if (-not (Wait-Until { $browse.Current.HasKeyboardFocus } 2000)) { throw "`"$browseName`" took no focus in 2 s" }
+    Send-Key 0x0D
+    $sheet = $null
+    $checks['Enter on Browse opens the Group "Choose a folder"'] = Wait-Until { $script:sheet = Find-First $root $types::Group 'Choose a folder'; $null -ne $script:sheet } 2000
+    if ($null -eq $sheet) { throw 'no Group "Choose a folder" in 2 s' }
+    $path = Find-First $sheet $types::Edit 'Path'
+    if ($null -eq $path) { throw 'no Edit "Path" in the picker' }
+    $checks['focus starts in its Edit "Path"'] = Wait-Until { $path.Current.HasKeyboardFocus } 2000
+    $value = Get-Pattern $path ([Windows.Automation.ValuePattern]::Pattern)
+    $checks['the Edit''s Value is the folder'] = Wait-Until { $value.Current.Value -eq $pickerTree } 2000
+    $table = Find-First $sheet $types::DataGrid
+    if ($null -eq $table) { throw 'no DataGrid in the picker' }
+    $grid = Get-Pattern $table ([Windows.Automation.GridPattern]::Pattern)
+    $checks['the DataGrid lists the one folder'] = Wait-Until { $grid.Current.RowCount -eq 1 } 10000
+    $row = $null
+    if (-not (Wait-Until { $script:row = Find-First $table $types::DataItem $bigName; $null -ne $script:row } 2000)) { throw "no DataItem `"$bigName`" in 2 s" }
+    $row.SetFocus()
+    if (-not (Wait-Until { $row.Current.HasKeyboardFocus } 2000)) { throw "`"$bigName`" took no focus in 2 s" }
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    Send-Key 0x0D
+    $firstScreen = Wait-Until { $grid.Current.RowCount -gt 1 } 10000
+    $firstMs = $sw.Elapsed.TotalMilliseconds
+    $listed = $firstScreen -and (Wait-Until { $grid.Current.RowCount -eq 10000 } 10000)
+    $allMs = $sw.Elapsed.TotalMilliseconds
+    $checks['Enter on its row lists all 10,000 (within 10 s)'] = $listed
+    if ($firstScreen) { $lines += "first screen: Enter to RowCount past the old row in UIA, $(Format-Ms $firstMs 50) (U19)" }
+    if ($listed) { $lines += "all 10,000:   Enter to RowCount 10,000 in UIA, $(Format-Ms $allMs 1000)" }
+    $lines += 'RowCount at the end: {0:N0}' -f $grid.Current.RowCount
+    $path.SetFocus()
+    $null = Wait-Until { $path.Current.HasKeyboardFocus } 2000
+    Send-Key 0x1B
+    $checks['Esc closes it'] = Wait-Until { (Find-Elements $root $types::Group 'Choose a folder').Count -eq 0 } 2000
+    $checks['focus goes back to Browse'] = Wait-Until {
+        $back = Find-First $root $types::Button $browseName
+        $null -ne $back -and $back.Current.HasKeyboardFocus
+    } 2000
+} catch {
+    $lines += "picker FAILED: $($_.Exception.Message)"
+    $checks['client'] = $false
+} finally {
+    if ($null -ne $p -and -not $p.HasExited) {
+        if ($pickerHwnd -ne [IntPtr]::Zero) { [void][UiaGateWin32]::PostMessageW($pickerHwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) } # WM_CLOSE
+        if (-not $p.WaitForExit(5000)) { $p.Kill(); $lines += 'the picker probe did not close on WM_CLOSE'; $checks['closes'] = $false }
+    }
+    try { if (Test-Path $pickerTree) { [IO.Directory]::Delete($pickerTree, $true) } } catch { $lines += "cleanup of $pickerTree failed: $($_.Exception.Message)" }
+}
+foreach ($k in $checks.Keys) { $lines += '{0,-50} {1}' -f $k, (Format-Verdict $checks[$k]) }
+$ok = $checks.Count -gt 0 -and -not ($checks.Values -contains $false)
+Publish 'Composites: picker U19' $lines $ok
 if (-not $ok) { $failed++ }
 
 # Composites (TD-0009 A3.5, slice 6c) ---------------------------------------------------------------

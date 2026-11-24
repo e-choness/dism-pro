@@ -76,6 +76,31 @@ fn enter_in_path(run: &mut Run) {
     run.step(key(KeyCode::Enter, NONE));
 }
 
+/// Makes row `at` current and moves focus to the rows as a keyboard user does: opening put it in
+/// the path field, and Tab from there reaches the table, whose stop is the current row.
+fn focus_row(run: &mut Run, at: u32) {
+    run.step(Step::Update(Msg::Table(dpro_ui::TableEvent::Current(at))));
+    let field = run.part(PICKER_PATH).expect("the path field");
+    run.ui.set_focus(Some(field));
+    let table = run.part(PICKER_TABLE).expect("the rows");
+    let on_a_row = |run: &Run| {
+        run.ui.focus().is_some_and(|f| {
+            run.ui.info(f).is_some_and(|n| n.role == Role::Row) && run.is_under(f, table)
+        })
+    };
+    for _ in 0..4 {
+        if on_a_row(run) {
+            break;
+        }
+        run.step(key(KeyCode::Tab, NONE));
+    }
+    let focus = run.ui.focus().and_then(|f| run.ui.info(f)).map(|n| n.role);
+    assert!(
+        on_a_row(run),
+        "Tab never reached the rows: focus on {focus:?}"
+    );
+}
+
 /// The text of the first node keyed `key` under `part`.
 fn text_under(run: &Run, part: NodeId, key: dpro_ui::Key) -> String {
     let mut queue = std::collections::VecDeque::from([part]);
@@ -156,7 +181,6 @@ fn a_client_sees_a_group_named_by_its_title_and_its_parts() {
 }
 
 #[test]
-#[ignore = "slice 6e: lands with the code"]
 fn opening_moves_focus_to_the_path_field() {
     let mut run = Run::with(Model::new());
     open(&mut run);
@@ -164,7 +188,6 @@ fn opening_moves_focus_to_the_path_field() {
 }
 
 #[test]
-#[ignore = "slice 6e: lands with the code"]
 fn esc_closes_the_sheet_and_focus_goes_back_to_browse() {
     let mut run = Run::with(Model::new());
     open_listed(&mut run);
@@ -192,7 +215,6 @@ fn close_and_cancel_close_it_and_focus_goes_back_too() {
 }
 
 #[test]
-#[ignore = "slice 6e: lands with the code"]
 fn up_goes_to_the_parent_folder() {
     let mut run = Run::with(Model::new());
     open_listed(&mut run);
@@ -209,7 +231,6 @@ fn up_goes_to_the_parent_folder() {
 }
 
 #[test]
-#[ignore = "slice 6e: lands with the code"]
 fn alt_up_anywhere_and_backspace_in_the_table_go_up() {
     // Alt+Up from the path field.
     let mut run = Run::with(Model::new());
@@ -222,7 +243,7 @@ fn alt_up_anywhere_and_backspace_in_the_table_go_up() {
     // Backspace on a row.
     let mut run = Run::with(Model::new());
     open_listed(&mut run);
-    run.step(Step::Update(Msg::Table(dpro_ui::TableEvent::Current(0))));
+    focus_row(&mut run, 0);
     let focus = run.ui.focus().expect("a row");
     assert!(run.is_under(focus, run.part(PICKER_TABLE).expect("the rows")));
     run.step(key(KeyCode::Backspace, NONE));
@@ -238,11 +259,10 @@ fn alt_up_anywhere_and_backspace_in_the_table_go_up() {
 }
 
 #[test]
-#[ignore = "slice 6e: lands with the code"]
 fn enter_on_a_folder_opens_it() {
     let mut run = Run::with(Model::new());
     open_listed(&mut run);
-    run.step(Step::Update(Msg::Table(dpro_ui::TableEvent::Current(2))));
+    focus_row(&mut run, 2);
     run.step(key(KeyCode::Enter, NONE));
     let opened = start().join(entry_name(2));
     assert_eq!(run.model.folder.folder(), Some(opened.as_path()));
@@ -291,7 +311,6 @@ fn a_path_that_isn_t_there_or_isn_t_a_folder_is_reported() {
 }
 
 #[test]
-#[ignore = "slice 6e: lands with the code"]
 fn dot_dot_is_refused_before_anything_is_listed() {
     let mut run = Run::with(Model::new());
     open_listed(&mut run);
@@ -332,7 +351,6 @@ fn cancel_closes_the_picker_while_a_listing_hangs() {
 /// A3.7 U19's exact T1 test: while a listing never answers, the picker answers keys and Up, each
 /// a new listing at once; the UI thread never waits.
 #[test]
-#[ignore = "slice 6e: lands with the code"]
 fn up_and_keys_answer_while_a_listing_hangs() {
     let mut model = Model::new();
     model.lister.hang = true;

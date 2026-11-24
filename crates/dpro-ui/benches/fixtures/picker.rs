@@ -2,10 +2,12 @@
 //! its benches, tests and G1's probe.
 //!
 //! The page: a level-1 heading, "Browse…" (which opens the picker) and the path chosen. The picker
-//! is a sheet over the page, which leaves the window while it's open, listing [`START`]: a folder
+//! is a sheet over the page, which leaves the window while it's open, listing [`start`]: a folder
 //! of [`ENTRIES`] subfolders, through a scripted [`Lister`] whose batches come one per wake
 //! ([`Msg::Listed`]), as the platform's waker brings them. A folder ending in `missing` isn't
-//! there, one ending in `notes.txt` isn't a folder, and a lister set to hang never answers.
+//! there, one ending in `notes.txt` isn't a folder, and a lister set to hang never answers. The
+//! picker probe (`examples/picker.rs`) hosts the same page over the real lister and a real folder
+//! ([`Model::with_lister`]).
 //!
 //! [`Run`] hosts it as the platform does: a `Ui`, a `FakeText`, the clock, and, when asked,
 //! painting at a scale and an assistive technology listening.
@@ -21,8 +23,8 @@ use std::{
 };
 
 use dpro_app::picker::{
-    Activated, BATCH, Entry, FolderModel, ListBatch, ListError, ListRequest, Lister, Listing, Mode,
-    Refused,
+    Activated, BATCH, Entry, FolderModel, FsLister, ListBatch, ListError, ListRequest, Lister,
+    Listing, Mode, Refused,
 };
 use dpro_ui::{
     Align, Canvas, Cells, Column, ColumnId, Cx, Element, FakeText, Input, Insets, Key, KeyCode,
@@ -121,7 +123,7 @@ pub(crate) fn entry_name(i: usize) -> String {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Msg {
-    /// Browse…: the picker opens on [`start`].
+    /// Browse…: the picker opens on the model's start folder ([`start`] for the scripted one).
     Open,
     /// Close, Cancel and Esc.
     Close,
@@ -132,12 +134,21 @@ pub(crate) enum Msg {
     Up,
     Drives,
     Table(TableEvent),
-    /// A wake: the lister has one more batch ready.
+    /// A wake: take the batches the lister has (the scripted one has one more ready).
     Listed,
     Select,
     Details,
     Copy,
 }
+
+/// A lister the page runs: what a wake tells it before the page polls.
+pub(crate) trait Source: Lister {
+    /// The window woke: the platform's waker brought a batch.
+    fn woken(&mut self) {}
+}
+
+/// The real lister wakes the window itself once a batch is ready.
+impl Source for FsLister {}
 
 /// The scripted lister: each folder's subfolders in batches of [`BATCH`], one released per
 /// [`Msg::Listed`].
@@ -229,12 +240,20 @@ impl Lister for Scripted {
     }
 }
 
-/// The view-model.
+impl Source for Scripted {
+    fn woken(&mut self) {
+        self.release();
+    }
+}
+
+/// The view-model: the scripted lister's, unless the probe gives it the real one.
 #[derive(Debug)]
-pub(crate) struct Model {
+pub(crate) struct Model<L = Scripted> {
     pub(crate) open: bool,
     pub(crate) folder: FolderModel,
-    pub(crate) lister: Scripted,
+    pub(crate) lister: L,
+    /// The folder Browse… opens.
+    start: PathBuf,
     pub(crate) chosen: Option<PathBuf>,
     /// The chosen path's text, for the page.
     chosen_text: String,
@@ -244,8 +263,6 @@ pub(crate) struct Model {
     pub(crate) refused: Option<Refused>,
     /// The error panel's title, written when the error came: the view formats nothing.
     pub(crate) error_text: String,
-    /// The drive the drive list shows.
-    drive_text: String,
     pub(crate) last: Option<Msg>,
 }
 
@@ -256,17 +273,24 @@ impl Model {
     }
 
     pub(crate) fn with_entries(count: usize) -> Self {
+        Self::with_lister(Scripted::new(count), start())
+    }
+}
+
+impl<L: Source> Model<L> {
+    /// A folder picker over `lister`, Browse… opening `start`.
+    pub(crate) fn with_lister(lister: L, start: PathBuf) -> Self {
         Self {
             open: false,
             folder: FolderModel::new(Mode::Folder),
-            lister: Scripted::new(count),
+            lister,
+            start,
             chosen: None,
             chosen_text: String::new(),
             drives_open: false,
             details: false,
             refused: None,
             error_text: String::new(),
-            drive_text: root().to_string_lossy().into_owned(),
             last: None,
         }
     }
@@ -276,7 +300,7 @@ impl Model {
             Msg::Open => {
                 self.open = true;
                 self.refused = None;
-                if let Ok(request) = self.folder.open(&start()) {
+                if let Ok(request) = self.folder.open(&self.start) {
                     self.lister.start(request);
                 }
             }
@@ -312,11 +336,12 @@ impl Model {
             },
             Msg::Table(_) | Msg::Copy => {}
             Msg::Listed => {
-                self.lister.release();
+                self.lister.woken();
+                let mut took = false;
                 while let Some(batch) = self.lister.poll() {
-                    self.folder.accept(batch);
+                    took |= self.folder.accept(batch);
                 }
-                if let Listing::Failed(e) = self.folder.listing() {
+                if took && let Listing::Failed(e) = self.folder.listing() {
                     self.error_text = match e {
                         ListError::NotFound => format!("“{}” doesn't exist.", self.folder.path()),
                         ListError::NotFolder => {
@@ -345,7 +370,9 @@ impl Model {
         self.chosen = Some(path);
         self.open = false;
     }
+}
 
+impl<L> Model<L> {
     /// The error panel's title, if the panel shows.
     fn error(&self) -> Option<&str> {
         let failed = matches!(self.folder.listing(), Listing::Failed(_));
@@ -354,7 +381,7 @@ impl Model {
 }
 
 /// The page, or the picker over it as a sheet.
-pub(crate) fn view(m: &Model, cx: &mut Cx<'_, Msg>) {
+pub(crate) fn view<L>(m: &Model<L>, cx: &mut Cx<'_, Msg>) {
     cx.add_with(
         Element::stack(ROW).style(Style {
             grow: 1.0,
@@ -370,7 +397,7 @@ pub(crate) fn view(m: &Model, cx: &mut Cx<'_, Msg>) {
     );
 }
 
-fn page(m: &Model, cx: &mut Cx<'_, Msg>) {
+fn page<L>(m: &Model<L>, cx: &mut Cx<'_, Msg>) {
     cx.add_with(
         Element::stack(PAGE).style(Style {
             grow: 1.0,
@@ -409,7 +436,7 @@ fn page(m: &Model, cx: &mut Cx<'_, Msg>) {
     );
 }
 
-fn picker(m: &Model, cx: &mut Cx<'_, Msg>) {
+fn picker<L>(m: &Model<L>, cx: &mut Cx<'_, Msg>) {
     let folder = &m.folder;
     let status = match folder.listing() {
         _ if !folder.is_empty() => None,
@@ -444,7 +471,13 @@ fn picker(m: &Model, cx: &mut Cx<'_, Msg>) {
                 .is_some_and(|f| f.parent().is_some())
                 .then_some(Msg::Up),
         ),
-        drives: (DRIVES_LABEL, &m.drive_text, m.drives_open, Msg::Drives),
+        // The shown folder's drive or share.
+        drives: (
+            DRIVES_LABEL,
+            folder.root().and_then(Path::to_str).unwrap_or(""),
+            m.drives_open,
+            Msg::Drives,
+        ),
         error,
         table: Table {
             rows: folder.len(),
@@ -462,7 +495,7 @@ fn picker(m: &Model, cx: &mut Cx<'_, Msg>) {
             on: Msg::Table,
         },
         cancel: CANCEL,
-        select: (SELECT, folder.folder().is_some().then_some(Msg::Select)),
+        select: (SELECT, folder.can_choose().then_some(Msg::Select)),
         region: REGION,
     };
     cx.path_picker(PICKER, &p, |at, cells: &mut Cells<'_>| {
@@ -505,6 +538,21 @@ pub(crate) fn key(key: KeyCode, mods: Mods) -> Step {
         down: true,
         mods,
     }))
+}
+
+/// A point over the open picker's rows, at [`START_SIZE`].
+pub(crate) const ROW_POINT: Point = Point { x: 500.0, y: 400.0 };
+
+/// A click at `at`, as two steps: the press and the release.
+pub(crate) fn click(at: Point) -> [Step; 2] {
+    [
+        Step::Input(Input::Press {
+            at,
+            mods: Mods::default(),
+            double: false,
+        }),
+        Step::Input(Input::PointerUp(at)),
+    ]
 }
 
 /// A key let go, as a step.
@@ -714,13 +762,17 @@ impl Run {
             .unwrap_or(0)
     }
 
-    /// Steady frames on an open, listed picker (U8): the current row moved, a page down, the
-    /// end and back, a wheel notch, the pointer over the rows and gone, its hover faded. Nothing
-    /// is listed, so the model allocates nothing either.
+    /// Steady frames on an open, listed picker (U8): a click on a row (it's current, and the
+    /// keys go to the rows: opening the picker put focus in the path field), a move down, a page
+    /// down, the end and back, a wheel notch, the pointer over the rows and gone, its hover
+    /// faded. The end and back bring the rows to the top before each notch, so every round
+    /// builds the same rows. Nothing is listed, so the model allocates nothing either.
     pub(crate) fn steady() -> Vec<Step> {
         let none = Mods::default();
+        let [press, release] = click(ROW_POINT);
         vec![
-            Step::Update(Msg::Table(TableEvent::Current(0))),
+            press,
+            release,
             key(KeyCode::Down, none),
             key(KeyCode::PageDown, none),
             key(KeyCode::End, none),
@@ -744,8 +796,8 @@ impl Run {
         let none = Mods::default();
         let mut steps = vec![Step::Update(Msg::Open)];
         steps.extend((0..ENTRIES.div_ceil(BATCH)).map(|_| Step::Update(Msg::Listed)));
+        steps.extend(click(ROW_POINT));
         steps.extend([
-            Step::Update(Msg::Table(TableEvent::Current(0))),
             key(KeyCode::Down, none),
             key(KeyCode::PageDown, none),
             key(KeyCode::End, none),

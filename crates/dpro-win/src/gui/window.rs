@@ -2896,7 +2896,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "slice 6e: lands with the code"]
     fn a_waker_on_another_thread_sends_one_wake_until_it_is_heard() {
         let (window, events, _) = open(0);
         let hwnd = window.hwnd;

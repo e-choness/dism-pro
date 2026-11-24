@@ -117,7 +117,6 @@ fn batches_join_the_rows_until_the_last() {
 }
 
 #[test]
-#[ignore = "slice 6e: lands with the code"]
 fn folders_come_first_each_in_name_order_ignoring_case() {
     let types = Types::new(&["*.*"]);
     let mut m = FolderModel::new(Mode::File(types));
@@ -140,7 +139,6 @@ fn folders_come_first_each_in_name_order_ignoring_case() {
 }
 
 #[test]
-#[ignore = "slice 6e: lands with the code"]
 fn a_file_picker_shows_folders_and_the_allowed_types_only() {
     let types = Types::new(&["*.wim;*.esd", "*.swm"]);
     assert!(types.allows("install.wim"));
@@ -175,7 +173,6 @@ fn every_file_is_allowed_by_a_star() {
 }
 
 #[test]
-#[ignore = "slice 6e: lands with the code"]
 fn a_folder_picker_lists_no_files() {
     let mut m = FolderModel::new(Mode::Folder);
     let request = m.open(&root()).expect("a full path");
@@ -188,7 +185,6 @@ fn a_folder_picker_lists_no_files() {
 }
 
 #[test]
-#[ignore = "slice 6e: lands with the code"]
 fn dot_dot_and_relative_paths_are_refused_before_anything_is_listed() {
     let mut m = FolderModel::new(Mode::Folder);
     let shown = m.open(&root().join("shown")).expect("a full path");
@@ -212,7 +208,6 @@ fn dot_dot_and_relative_paths_are_refused_before_anything_is_listed() {
 }
 
 #[test]
-#[ignore = "slice 6e: lands with the code"]
 fn up_opens_the_parent_and_stops_at_a_root() {
     let mut m = FolderModel::new(Mode::Folder);
     assert_eq!(m.up(), None, "nothing opened");
@@ -230,7 +225,6 @@ fn up_opens_the_parent_and_stops_at_a_root() {
 }
 
 #[test]
-#[ignore = "slice 6e: lands with the code"]
 fn enter_on_a_folder_opens_it_and_on_a_file_chooses_it() {
     let mut m = FolderModel::new(Mode::File(Types::new(&["*.wim"])));
     let request = m.open(&root().join("images")).expect("a full path");
@@ -257,7 +251,6 @@ fn enter_on_a_folder_opens_it_and_on_a_file_chooses_it() {
 }
 
 #[test]
-#[ignore = "slice 6e: lands with the code"]
 fn select_chooses_the_folder_shown_or_the_current_file() {
     let mut m = FolderModel::new(Mode::Folder);
     assert_eq!(m.choice(), None, "nothing opened");
@@ -304,7 +297,6 @@ fn a_listing_ends_in_its_error() {
 /// all answer at once, each a new generation the lister is asked for; what the hung listing
 /// sends at last is dropped.
 #[test]
-#[ignore = "slice 6e: lands with the code"]
 fn a_listing_that_never_answers_leaves_the_model_answering() {
     let mut lister = Never::default();
     let mut m = FolderModel::new(Mode::Folder);
@@ -339,7 +331,6 @@ fn a_listing_that_never_answers_leaves_the_model_answering() {
 /// The real lister on a folder of `BATCH * 2 + 21` subfolders, each with a file inside: batches
 /// of at most [`BATCH`], one level, and a wake per batch.
 #[test]
-#[ignore = "slice 6e: lands with the code"]
 fn the_file_system_lister_sends_batches_of_one_level() {
     let dir = std::env::temp_dir().join(format!("dpro-picker-test-{}", std::process::id()));
     drop(std::fs::remove_dir_all(&dir));
@@ -380,7 +371,6 @@ fn the_file_system_lister_sends_batches_of_one_level() {
 }
 
 #[test]
-#[ignore = "slice 6e: lands with the code"]
 fn the_file_system_lister_says_not_found_and_not_folder() {
     let dir = std::env::temp_dir().join(format!("dpro-picker-errors-{}", std::process::id()));
     drop(std::fs::remove_dir_all(&dir));
