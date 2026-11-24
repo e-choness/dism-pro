@@ -101,6 +101,18 @@ raw-API baseline, measured in this job, so it holds on whatever machine the runn
       header's HeaderItems; Invoke on Name's twice sorts by it and then reverses, so GetItem(0, 1)
       is the last row's name. Each is read back through UIA within 2 s; GetItem's and the search's
       round trips are advisory (U3: 50 ms).
+  Composites (TD-0009 A3.5, slice 6c): the shell with --composites, slice 6c's page, through real
+      keys and clicks. Ctrl+K shows the palette in an owned popup that takes the activation, its
+      Edit "Search commands" focused; its List "Commands" has exactly one selected ListItem, and
+      Down selects the next while focus stays in the field; typing filters the results; Esc closes
+      it and the page is active again. Ctrl+J starts a job: its toast shows at the window's bottom
+      end without taking the activation (and isn't WS_EX_NOACTIVATE), and a click on it leaves the
+      activation; F6 gives it the keyboard (Dismiss focused), and F6 hands it back. Ctrl+E ends the
+      job, and the toast hides once SPI_GETMESSAGEDURATION has passed with the pointer and the
+      focus elsewhere. SPI_GETMESSAGEDURATION and SPI_GETCLIENTAREAANIMATION are reported for
+      A3.5's verifies. Each check reads back within 2 s; the palette's opening is advisory (U15:
+      100 ms from Ctrl+K to UIA seeing its field focused). Screenshots of the palette and the toast
+      go to -Out.
 
 The probe target is dpro-ui's `shell` example until roadmap 3.2 gives dismpro.exe its shell.
 Results go to annotations and the job summary; the raw reports and screenshots go to -Out, which
@@ -1854,6 +1866,137 @@ try {
 foreach ($k in $checks.Keys) { $lines += '{0,-50} {1}' -f $k, (Format-Verdict $checks[$k]) }
 $ok = $checks.Count -gt 0 -and -not ($checks.Values -contains $false)
 Publish 'Data table' $lines $ok
+if (-not $ok) { $failed++ }
+
+
+# Composites (TD-0009 A3.5, slice 6c) ---------------------------------------------------------------
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class CompositesGateWin32 {
+    [DllImport("user32.dll")]
+    static extern bool SystemParametersInfoW(uint action, uint param, ref uint value, uint ini);
+    // SPI_GETMESSAGEDURATION, in seconds; -1 if it couldn't be read.
+    public static long MessageDuration() { uint v = 0; return SystemParametersInfoW(0x2016, 0, ref v, 0) ? v : -1; }
+    // SPI_GETCLIENTAREAANIMATION, a BOOL; -1 if it couldn't be read.
+    public static long ClientAreaAnimation() { uint v = 0; return SystemParametersInfoW(0x1042, 0, ref v, 0) ? v : -1; }
+}
+'@
+$messageS = [CompositesGateWin32]::MessageDuration()
+$messageMs = if ($messageS -gt 0) { $messageS * 1000 } else { 5000 }
+$paletteField = 'Search commands'
+
+$lines = @("Composites: slice 6c's palette and toast on the composites page (shell --composites) at $Size (the checks are gates, each read back within 2 s; the palette's opening is advisory: <= 100 ms from Ctrl+K to UIA seeing its field focused, U15)")
+$lines += "Windows: SPI_GETMESSAGEDURATION $messageS s, SPI_GETCLIENTAREAANIMATION $([CompositesGateWin32]::ClientAreaAnimation())"
+$checks = [ordered]@{}
+$hwnd = [IntPtr]::Zero
+$p = Start-Process -FilePath $exe.shell -ArgumentList @('--size', $Size, '--composites') -PassThru
+$null = $p.Handle
+try {
+    $shown = Wait-Until {
+        $script:hwnd = [UiaGateWin32]::FindWindowW('dismpro.window', 'DISM Pro shell probe')
+        $script:hwnd -ne [IntPtr]::Zero -and [UiaGateWin32]::IsWindowVisible($script:hwnd)
+    } 30000
+    if (-not $shown) { throw "the composites page showed no window in 30 s ($(if ($p.HasExited) { "exited with code $($p.ExitCode)" } else { 'still running' }))" }
+    $root = $ae::FromHandle($hwnd)
+    $found = Wait-Until { (Find-Elements $root $types::Text 'Clean').Count -ge 1 } 10000
+    if (-not $found) { throw 'no heading "Clean" in 10 s' }
+    $checks['the window is active'] = [GlassGateWin32]::Activate($hwnd)
+    $m = [PopupGateWin32]::Rect($hwnd)
+    $center = @([int] (($m[0] + $m[2]) / 2), [int] (($m[1] + $m[3]) / 2))
+    [void][TextGateWin32]::MoveTo($center[0], $center[1])
+
+    # The palette (A3.5 (3)): Ctrl+K shows it in an owned popup that takes the activation, its
+    # field focused; Down moves the one selected result while focus stays in the field; typing
+    # filters; Esc closes it and the page is active again.
+    $palette = $null
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    [void][TextGateWin32]::Chord($ctrl, 0x4B) # Ctrl+K
+    $opened = Wait-Until {
+        $script:palette = Find-Popup $hwnd $types::Edit $paletteField
+        $null -ne $script:palette -and (Test-Focused $types::Edit $paletteField)
+    } 2000
+    $openMs = $sw.Elapsed.TotalMilliseconds
+    $checks['Ctrl+K: the palette, its field focused'] = $opened
+    if (-not $opened) { throw "Ctrl+K showed no palette with its field focused in 2 s ($((Get-Shown $hwnd).Count) popups shown)" }
+    $lines += "palette open: Ctrl+K to its field focused in UIA, $(Format-Ms $openMs)"
+    $lines += Save-Screen ([PopupGateWin32]::Rect($palette.Hwnd)) 'composites-palette.png'
+    $checks['it takes the activation'] = [PopupGateWin32]::GetForegroundWindow() -eq $palette.Hwnd
+    $paletteRoot = $ae::FromHandle($palette.Hwnd)
+    $options = { @(Find-Elements $paletteRoot $types::ListItem $null) }
+    $selected = { @(& $options | Where-Object { Test-Selected $_ } | ForEach-Object { $_.Current.Name }) }
+    $all = (& $options).Count
+    $first = & $selected
+    $lines += "  results: $all, selected: $($first -join ', ')"
+    $checks['a List "Commands", exactly one result selected'] = (Find-Elements $paletteRoot $types::List 'Commands').Count -eq 1 -and $all -gt 1 -and $first.Count -eq 1
+    Send-Key 0x28 # Down
+    $checks['Down moves the selection, focus stays in the field'] = Wait-Until {
+        $s = & $selected
+        $s.Count -eq 1 -and $s[0] -ne $first[0] -and (Test-Focused $types::Edit $paletteField)
+    } 2000
+    [void][TextGateWin32]::Type('set')
+    $checks['typing filters the results'] = Wait-Until {
+        $n = (& $options).Count
+        $value = (Get-Pattern $palette.Element ([Windows.Automation.ValuePattern]::Pattern)).Current.Value
+        $value -eq 'set' -and $n -ge 1 -and $n -lt $all
+    } 2000
+    Send-Key 0x1B # Esc
+    $checks['Esc closes it, the page active again'] = Wait-Until {
+        (Get-Shown $hwnd).Count -eq 0 -and [PopupGateWin32]::GetForegroundWindow() -eq $hwnd
+    } 2000
+
+    # The toast (A3.5 (7)): Ctrl+J starts a job, whose toast shows at the window's bottom end
+    # without the activation, and a click on it leaves the activation where it was. F6 gives it
+    # the keyboard (Dismiss focused), and F6 hands it back. Ctrl+E ends the job: the toast hides
+    # once Windows' message duration has passed with the pointer and the focus elsewhere.
+    [void][TextGateWin32]::Chord($ctrl, 0x4A) # Ctrl+J
+    $toast = $null
+    $toastShown = Wait-Until { $script:toast = Find-Popup $hwnd $types::Button 'Dismiss'; $null -ne $script:toast } 2000
+    $checks['Ctrl+J: a job''s toast shows'] = $toastShown
+    if (-not $toastShown) { throw "Ctrl+J showed no toast with Dismiss in 2 s ($((Get-Shown $hwnd).Count) popups shown)" }
+    Start-Sleep -Milliseconds 200
+    $t = [PopupGateWin32]::Rect($toast.Hwnd)
+    $m = [PopupGateWin32]::Rect($hwnd)
+    $lines += Save-Screen $t 'composites-toast.png'
+    $lines += "  toast at $($t -join ','), the window at $($m -join ',')"
+    $checks['it shows without the activation'] = [PopupGateWin32]::GetForegroundWindow() -eq $hwnd -and ([PopupGateWin32]::ExStyle($toast.Hwnd) -band 0x08000000) -eq 0 # not WS_EX_NOACTIVATE
+    $checks['at the window''s bottom end'] = ($m[2] - $t[2]) -ge 8 -and ($m[2] - $t[2]) -le 64 -and ($m[3] - $t[3]) -ge 8 -and ($m[3] - $t[3]) -le 64
+    # In its left padding, halfway down: on the toast, on none of its controls.
+    [void][TextGateWin32]::MoveTo($t[0] + 8, [int] (($t[1] + $t[3]) / 2))
+    [void][PopupGateWin32]::Click($false)
+    Start-Sleep -Milliseconds 300
+    $checks['a click on it leaves the activation'] = [PopupGateWin32]::GetForegroundWindow() -eq $hwnd -and (Get-Shown $hwnd).Count -eq 1
+    [void][TextGateWin32]::MoveTo($center[0], $center[1])
+    Send-Key 0x75 # F6
+    $checks['F6 gives it the keyboard, Dismiss focused'] = Wait-Until {
+        [PopupGateWin32]::GetForegroundWindow() -eq $toast.Hwnd -and (Test-Focused $types::Button 'Dismiss')
+    } 2000
+    Send-Key 0x75 # F6
+    $checks['F6 again hands it back'] = Wait-Until { [PopupGateWin32]::GetForegroundWindow() -eq $hwnd } 2000
+    Send-Key 0x75 # F6
+    $null = Wait-Until { [PopupGateWin32]::GetForegroundWindow() -eq $toast.Hwnd } 2000
+    Send-Key 0x1B # Esc
+    $checks['Esc in it hides it, the page active again'] = Wait-Until {
+        (Get-Shown $hwnd).Count -eq 0 -and [PopupGateWin32]::GetForegroundWindow() -eq $hwnd
+    } 2000
+    [void][TextGateWin32]::Chord($ctrl, 0x45) # Ctrl+E
+    $sw.Restart()
+    $ended = Wait-Until { $null -ne (Find-Popup $hwnd $types::Button 'View') } 2000
+    $hid = $ended -and (Wait-Until { (Get-Shown $hwnd).Count -eq 0 } ($messageMs + 3000))
+    $lines += 'ended toast: hid {0:N0} ms after the job ended (message duration {1} ms)' -f $sw.Elapsed.TotalMilliseconds, $messageMs
+    $checks['an ended toast hides after the message duration'] = $hid -and $sw.Elapsed.TotalMilliseconds -ge ($messageMs - 500)
+} catch {
+    $lines += "composites FAILED: $($_.Exception.Message)"
+    $checks['client'] = $false
+} finally {
+    if (-not $p.HasExited) {
+        if ($hwnd -ne [IntPtr]::Zero) { [void][UiaGateWin32]::PostMessageW($hwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) } # WM_CLOSE
+        if (-not $p.WaitForExit(5000)) { $p.Kill(); $lines += 'the composites page did not close on WM_CLOSE'; $checks['closes'] = $false }
+    }
+}
+foreach ($k in $checks.Keys) { $lines += '{0,-50} {1}' -f $k, (Format-Verdict $checks[$k]) }
+$ok = $checks.Count -gt 0 -and -not ($checks.Values -contains $false)
+Publish 'Composites' $lines $ok
 if (-not $ok) { $failed++ }
 
 exit $failed
