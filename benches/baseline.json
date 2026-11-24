@@ -74,6 +74,7 @@
     "crates/dpro-ui/benches/ir.rs paint::painted_event.wheel_notch": 2653026,
     "crates/dpro-ui/benches/ir.rs paint::painted_first_frame.shell": 3614471,
     "crates/dpro-ui/benches/ir.rs paint::painted_session.scripted": 76213426,
+    "crates/dpro-ui/benches/ir.rs paint::repaint_all.contrast_100": 3100616,
     "crates/dpro-ui/benches/ir.rs paint::repaint_all.dark_150": 5739397,
     "crates/dpro-ui/benches/ir.rs paint::repaint_all.light_100": 3262152,
     "crates/dpro-ui/benches/ir.rs paint::repaint_all.text_225": 2924839,

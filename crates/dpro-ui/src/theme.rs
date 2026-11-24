@@ -18,8 +18,11 @@
 //! **High contrast** ([`Theme::high_contrast`], TD-0009 §4.4) shows the system's colors only: no
 //! tints, no state layers. Text takes the color the system pairs with the fill under it
 //! ([`Theme::ink`]): `HighlightText` on the highlight fills (accent, danger, selection, the batch
-//! bar's primary action), `ButtonText` on `ButtonFace`, else `WindowText`, with `GrayText` for
-//! secondary text and `HotLight` for accent text. The focus ring is `Highlight`.
+//! bar's primary action, the picked tab), `ButtonText` on `ButtonFace`, else `WindowText`.
+//! Secondary and accent text are `WindowText` too; `GrayText` is disabled text's alone
+//! ([`Tone::TextDisabled`]), and `HotLight` waits for a link (TD-0009 A4.5). The focus ring is
+//! `Highlight`, and a transient surface's border is `stroke.contrast` wide
+//! ([`Tone::TransientBorder`]).
 
 /// An sRGB color with straight (not premultiplied) alpha.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -84,8 +87,9 @@ pub enum Tone {
     Border,
     /// `text.primary`, and the focus ring.
     Text,
-    /// `text.secondary`, and disabled text. Glass has its own, darker in light and lighter in
-    /// dark, for the white layers it stacks (§12 item 9).
+    /// `text.secondary`. Glass has its own, darker in light and lighter in dark, for the white
+    /// layers it stacks (§12 item 9). `WindowText` in high contrast: disabled text is
+    /// [`TextDisabled`](Self::TextDisabled).
     TextSecondary,
     /// `accent`: primary actions, the online target.
     Accent,
@@ -150,11 +154,23 @@ pub enum Tone {
     InverseAccent,
     /// Text on [`InverseAccent`](Self::InverseAccent).
     OnInverseAccent,
+    // The accessibility audits' tokens (TD-0009 A4.5, slice 7d).
+    /// `text.disabled`: a disabled control's text, glyphs and mark fill. `text.secondary` in light
+    /// and dark (glass's in glass); `GrayText` in high contrast, which nothing else uses.
+    TextDisabled,
+    /// A transient surface's border: a popup's, the drawer's, a dialog's or a toast's.
+    /// [`Border`](Self::Border) in light and dark; `WindowText` in high contrast, drawn
+    /// `stroke.contrast` wide ([`Theme::border_width`]), as Microsoft asks of flyouts.
+    TransientBorder,
+    /// The picked segment of segmented tabs ([`Look::TAB_SELECTED`](crate::Look::TAB_SELECTED)):
+    /// [`Surface`](Self::Surface) in light and dark, `Highlight` in high contrast, so the pick
+    /// shows by more than its weight.
+    Segment,
 }
 
 impl Tone {
     /// Every tone, in declaration order (the theme's table order).
-    pub const ALL: [Self; 36] = [
+    pub const ALL: [Self; 39] = [
         Self::App,
         Self::Surface,
         Self::Subtle,
@@ -191,14 +207,17 @@ impl Tone {
         Self::InverseText,
         Self::InverseAccent,
         Self::OnInverseAccent,
+        Self::TextDisabled,
+        Self::TransientBorder,
+        Self::Segment,
     ];
 
-    /// A fill high contrast shows as `Highlight`: accent, danger, the selection and the batch
-    /// bar's primary action. Text on it is `HighlightText`.
+    /// A fill high contrast shows as `Highlight`: accent, danger, the selection, the batch bar's
+    /// primary action and the picked tab. Text on it is `HighlightText`.
     const fn is_highlight(self) -> bool {
         matches!(
             self,
-            Self::Accent | Self::Danger | Self::Selected | Self::InverseAccent
+            Self::Accent | Self::Danger | Self::Selected | Self::InverseAccent | Self::Segment
         )
     }
 }
@@ -297,6 +316,11 @@ impl Theme {
                 Color::hex(0xE8_EAEE),
                 Color::hex(0x6E_A0FF),
                 Color::hex(0x0B_1630),
+                // `text.disabled`, a transient border and the picked segment (A4.5): as
+                // `text.secondary`, `border` and the surface.
+                Color::hex(0x5A_6270),
+                Color::hex(0xDD_E1E8),
+                surface,
             ],
             sys: None,
         }
@@ -353,16 +377,20 @@ impl Theme {
                 Color::hex(0x14_171C),
                 Color::hex(0x25_63EB),
                 Color::hex(0xFF_FFFF),
+                // `text.disabled`, a transient border and the picked segment (A4.5).
+                Color::hex(0x9A_A3B2),
+                Color::hex(0x2A_2F3A),
+                surface,
             ],
             sys: None,
         }
     };
 
     /// High contrast: the system's colors only. Fills map to `Window`, `ButtonFace` (quiet
-    /// fills) and `Highlight` (accent, danger, selection, the batch bar's primary action); borders
-    /// to `WindowText`; the state layers vanish. Badges, tints and the batch bar have no fill:
-    /// they're `Window`, with `WindowText` text and borders (A3.5 (1), (9), (11), (14)). Text goes
-    /// through [`ink`](Self::ink).
+    /// fills) and `Highlight` (accent, danger, selection, the batch bar's primary action, the
+    /// picked tab); borders to `WindowText`; the state layers vanish. Badges, tints and the
+    /// batch bar have no fill: they're `Window`, with `WindowText` text and borders (A3.5 (1),
+    /// (9), (11), (14)). Text goes through [`ink`](Self::ink).
     #[must_use]
     pub const fn high_contrast(sys: SysColors) -> Self {
         let none = Color {
@@ -379,7 +407,8 @@ impl Theme {
                 sys.btn_face,
                 sys.window_text,
                 sys.window_text,
-                sys.gray_text,
+                // `text.secondary` (A4.5): `GrayText` is disabled text's alone.
+                sys.window_text,
                 sys.highlight,
                 sys.highlight_text,
                 sys.window_text,
@@ -413,6 +442,10 @@ impl Theme {
                 sys.window_text,
                 sys.highlight,
                 sys.highlight_text,
+                // `text.disabled`, a transient border and the picked segment (A4.5).
+                sys.gray_text,
+                sys.window_text,
+                sys.highlight,
             ],
             sys: Some(sys),
         }
@@ -441,6 +474,11 @@ impl Theme {
         // `fill.selected` unflattened: accent at 13–14 % over whatever is under it.
         colors[Tone::Selected as usize] = self.color(Tone::Accent).alpha(selected);
         colors[Tone::TextSecondary as usize] = secondary;
+        // A4.5's: disabled text as secondary, a transient border as a hairline, the picked
+        // segment as a card.
+        colors[Tone::TextDisabled as usize] = secondary;
+        colors[Tone::TransientBorder as usize] = white.alpha(border);
+        colors[Tone::Segment as usize] = white.alpha(card);
         Self { colors, ..self }
     }
 
@@ -461,12 +499,14 @@ impl Theme {
         self.colors[tone as usize]
     }
 
-    /// The tone a fill of `tone` shows as. High contrast keeps `Highlight` for what can be used:
-    /// a disabled highlight fill (accent, danger, selected, the batch bar's primary action) shows
-    /// as the window, so its `GrayText` reads as disabled. Light and dark: `tone`.
+    /// The tone a fill of `tone` shows as. High contrast keeps `Highlight` and `ButtonFace` for
+    /// what can be used: a disabled highlight fill (accent, danger, selected, the batch bar's
+    /// primary action, the picked tab) or quiet fill shows as the window, so its `GrayText` is
+    /// the pair the system documents, and reads as disabled (TD-0009 A4.5). Light and dark:
+    /// `tone`.
     #[must_use]
     pub const fn fill(&self, tone: Tone, enabled: bool) -> Tone {
-        if self.sys.is_some() && !enabled && tone.is_highlight() {
+        if self.sys.is_some() && !enabled && (tone.is_highlight() || matches!(tone, Tone::Subtle)) {
             Tone::Surface
         } else {
             tone
@@ -511,31 +551,56 @@ impl Theme {
 
     /// `tone` as text or a glyph over a fill of `under`. Light and dark: the tone's own color,
     /// whose contrast on every fill it's used on is tested. High contrast: the color the system
-    /// pairs with that fill.
+    /// pairs with that fill, `HighlightText`, `ButtonText` or `WindowText`, whatever the tone:
+    /// secondary and accent text too (TD-0009 A4.5). Disabled text is `GrayText`, and a disabled
+    /// box's mark `Window` on its `GrayText` fill.
     #[must_use]
     pub const fn ink(&self, tone: Tone, under: Tone) -> Color {
         let Some(sys) = self.sys else {
             return self.color(tone);
         };
-        match under {
-            under if under.is_highlight() => sys.highlight_text,
-            Tone::Subtle => sys.btn_text,
+        match (tone, under) {
             // A disabled, checked box: GrayText's partner.
-            Tone::TextSecondary => sys.window,
-            _ => match tone {
-                Tone::TextSecondary => sys.gray_text,
-                Tone::Accent => sys.hot_light,
-                _ => sys.window_text,
-            },
+            (_, Tone::TextDisabled) => sys.window,
+            // A disabled fill shows as the window ([`fill`](Self::fill)).
+            (Tone::TextDisabled, _) => sys.gray_text,
+            (_, under) if under.is_highlight() => sys.highlight_text,
+            (_, Tone::Subtle) => sys.btn_text,
+            _ => sys.window_text,
         }
     }
 
-    /// The keyboard focus ring: text color, or `Highlight` in high contrast (TD-0009 §4.4).
+    /// The keyboard focus ring on a fill of `under`, as Windows 11 draws it inside the node: the
+    /// ring, then a 1 px line parting it from the node's own fill (TD-0009 §13, A4.5). Primary
+    /// text and the surface; on the batch bar's inverse fill, the bar's ink and the bar, where
+    /// primary text would vanish (A3.5 (11)). High contrast: `Highlight` and `Window`, or
+    /// `HighlightText` and `Highlight` on a highlight fill.
+    #[must_use]
+    pub const fn focus_on(&self, under: Tone) -> (Color, Color) {
+        match (self.sys, under) {
+            (Some(sys), under) if under.is_highlight() => (sys.highlight_text, sys.highlight),
+            (Some(sys), _) => (sys.highlight, sys.window),
+            (None, Tone::InverseFill) => {
+                (self.color(Tone::InverseText), self.color(Tone::InverseFill))
+            }
+            (None, _) => (self.color(Tone::Text), self.color(Tone::Surface)),
+        }
+    }
+
+    /// The keyboard focus ring on the surface: text color, or `Highlight` in high contrast
+    /// (TD-0009 §4.4). [`focus_on`](Self::focus_on) gives it on any fill.
     #[must_use]
     pub const fn focus(&self) -> Color {
-        match self.sys {
-            Some(sys) => sys.highlight,
-            None => self.color(Tone::Text),
+        self.focus_on(Tone::Surface).0
+    }
+
+    /// A border of `tone`'s width in logical pixels: a hairline, or `stroke.contrast` for a
+    /// transient surface's in high contrast (TD-0009 A4.4, A4.10 item 7).
+    #[must_use]
+    pub const fn border_width(&self, tone: Tone) -> f32 {
+        match (self.sys, tone) {
+            (Some(_), Tone::TransientBorder) => tokens::stroke::CONTRAST,
+            _ => tokens::stroke::HAIRLINE,
         }
     }
 }
@@ -576,6 +641,9 @@ pub mod tokens {
         pub const FOCUS: f32 = 2.0;
         /// A hairline drawn as a box: the dividers between settings rows (A3.5 (15)).
         pub const HAIRLINE: f32 = 1.0;
+        /// `stroke.contrast` (TD-0009 A4.4, A4.10 item 7): a transient surface's border in high
+        /// contrast, as Microsoft asks of flyouts and dialogs.
+        pub const CONTRAST: f32 = 2.0;
     }
 
     /// Menus, dropdown lists and tooltips (TD-0009 A1.10 item 1: the metrics of `WinUI`, until the
@@ -830,12 +898,13 @@ mod tests {
         assert_eq!(t.color(Subtle), sys.btn_face);
         assert_eq!(t.ink(Text, Subtle), sys.btn_text);
         assert_eq!(t.ink(Text, Surface), sys.window_text);
-        assert_eq!(t.ink(TextSecondary, App), sys.gray_text);
-        assert_eq!(t.ink(Accent, Surface), sys.hot_light);
-        // A disabled highlight fill shows as the window, so its gray text reads as disabled.
+        // Secondary and accent text are the fill's own pair; GrayText is disabled text's alone
+        // and HotLight waits for a link (A4.5).
+        assert_eq!(t.ink(TextSecondary, App), sys.window_text);
+        assert_eq!(t.ink(Accent, Surface), sys.window_text);
+        assert_eq!(t.ink(Accent, Subtle), sys.btn_text);
+        assert_eq!(t.ink(Tone::TextDisabled, App), sys.gray_text);
         assert_eq!(t.fill(Accent, true), Accent);
-        assert_eq!(t.fill(Accent, false), Surface);
-        assert_eq!(t.ink(TextSecondary, t.fill(Accent, false)), sys.gray_text);
         // Borders, focus and hover.
         assert_eq!(t.stroke(TextSecondary, true), sys.window_text);
         assert_eq!(t.stroke(Tone::Border, false), sys.gray_text);
@@ -880,9 +949,139 @@ mod tests {
         for theme in [Theme::LIGHT, Theme::DARK] {
             assert_eq!(theme.ink(Text, Accent), theme.color(Text));
             assert_eq!(theme.fill(Accent, false), Accent);
+            assert_eq!(theme.fill(Subtle, false), Subtle);
             assert_eq!(theme.stroke(Tone::Border, false), theme.color(Tone::Border));
             assert_eq!(theme.focus(), theme.color(Text));
             assert_eq!(theme.hover_outline(Surface), None);
+            assert_eq!(
+                theme.border_width(Tone::TransientBorder).to_bits(),
+                tokens::stroke::HAIRLINE.to_bits()
+            );
+        }
+    }
+
+    /// TD-0009 A4.5's high-contrast findings, fixed: `GrayText` only on disabled UI, on the window
+    /// (a disabled highlight or quiet fill shows as it, which makes the pair the system's); the
+    /// picked tab a highlight; a transient surface's border `stroke.contrast` wide; the focus ring
+    /// `HighlightText` where a highlight is around it.
+    #[test]
+    fn high_contrast_keeps_gray_for_disabled_and_highlight_for_picks() {
+        use Tone::{Accent, Segment, Selected, Subtle, Surface, Text, TextDisabled};
+        let sys = SysColors {
+            window: Color::hex(0x00_0001),
+            window_text: Color::hex(0x00_0002),
+            highlight: Color::hex(0x00_0003),
+            highlight_text: Color::hex(0x00_0004),
+            hot_light: Color::hex(0x00_0005),
+            gray_text: Color::hex(0x00_0006),
+            btn_face: Color::hex(0x00_0007),
+            btn_text: Color::hex(0x00_0008),
+        };
+        let t = Theme::high_contrast(sys);
+        for fill in [Accent, Subtle, Segment] {
+            assert_eq!(t.fill(fill, false), Surface, "{fill:?}");
+            assert_eq!(t.ink(TextDisabled, t.fill(fill, false)), sys.gray_text);
+        }
+        // A disabled checked box: its mark in the window's color on its gray fill.
+        assert_eq!(t.color(TextDisabled), sys.gray_text);
+        assert_eq!(t.ink(Text, TextDisabled), sys.window);
+        assert_eq!(t.color(Segment), sys.highlight);
+        assert_eq!(t.ink(Text, Segment), sys.highlight_text);
+        assert_eq!(t.color(Tone::TransientBorder), sys.window_text);
+        let width = |tone| t.border_width(tone).to_bits();
+        assert_eq!(
+            width(Tone::TransientBorder),
+            tokens::stroke::CONTRAST.to_bits()
+        );
+        assert_eq!(width(Tone::Border), tokens::stroke::HAIRLINE.to_bits());
+        assert_eq!(t.focus_on(Surface), (sys.highlight, sys.window));
+        assert_eq!(t.focus_on(Selected), (sys.highlight_text, sys.highlight));
+    }
+
+    /// TD-0009 A4.5's tokens: `text.disabled` is `text.secondary` (glass's in glass), a transient
+    /// border is `border` and the picked segment the surface, in light, dark and glass; only high
+    /// contrast tells them apart.
+    #[test]
+    fn the_audits_tokens_are_their_light_and_dark_twins() {
+        use Tone::{Border, Segment, Surface, TextDisabled, TextSecondary, TransientBorder};
+        for theme in [
+            Theme::LIGHT,
+            Theme::DARK,
+            Theme::LIGHT.glass(),
+            Theme::DARK.glass(),
+        ] {
+            for (token, twin) in [
+                (TextDisabled, TextSecondary),
+                (TransientBorder, Border),
+                (Segment, Surface),
+            ] {
+                assert_eq!(theme.color(token), theme.color(twin), "{token:?}");
+            }
+        }
+        assert_eq!(
+            [TextDisabled, TransientBorder, Segment].map(|t| Theme::LIGHT.color(t)),
+            [0x5A_6270, 0xDD_E1E8, 0xFF_FFFF].map(Color::hex)
+        );
+    }
+
+    /// The focus ring stands out from the fill around it, 3:1 or more (WCAG 2.2 1.4.11), on
+    /// every fill a focusable control sits on, in light, dark and high contrast. On the batch
+    /// bar's inverse fill primary text's ring was 1:1 (A3's as-built note; the keyboard audit's
+    /// rule 4).
+    #[test]
+    fn the_focus_ring_stands_out_on_every_fill() {
+        use Tone::{
+            App, ErrorFill, InfoFill, InverseFill, Segment, Selected, Subtle, Surface, WarnFill,
+        };
+        let fills = [
+            App,
+            Surface,
+            Subtle,
+            Selected,
+            Segment,
+            ErrorFill,
+            WarnFill,
+            InfoFill,
+            InverseFill,
+        ];
+        let black = SysColors {
+            window: Color::hex(0),
+            window_text: Color::hex(0xFF_FFFF),
+            highlight: Color::hex(0x1A_EBFF),
+            highlight_text: Color::hex(0),
+            hot_light: Color::hex(0xFF_FF00),
+            gray_text: Color::hex(0x3F_F23F),
+            btn_face: Color::hex(0),
+            btn_text: Color::hex(0xFF_FFFF),
+        };
+        let white = SysColors {
+            window: Color::hex(0xFF_FFFF),
+            window_text: Color::hex(0),
+            highlight: Color::hex(0x37_006E),
+            highlight_text: Color::hex(0xFF_FFFF),
+            hot_light: Color::hex(0x00_009F),
+            gray_text: Color::hex(0x60_0000),
+            btn_face: Color::hex(0xFF_FFFF),
+            btn_text: Color::hex(0),
+        };
+        for theme in [
+            Theme::LIGHT,
+            Theme::DARK,
+            Theme::high_contrast(black),
+            Theme::high_contrast(white),
+        ] {
+            for under in fills {
+                let (ring, inner) = theme.focus_on(under);
+                let around = flat(&theme, theme.color(App), &[under]);
+                let ratio = contrast(ring, around);
+                assert!(
+                    ratio >= 3.0,
+                    "{:?}: the ring on {under:?} is {ratio:.2}:1",
+                    theme.scheme()
+                );
+                // The inner line parts the ring from the control as well.
+                assert!(contrast(ring, inner) >= 3.0, "{under:?}'s inner line");
+            }
         }
     }
 
@@ -931,6 +1130,8 @@ mod tests {
                 layered(fg, stack);
             }
         }
+        // The picked tab's text on its segment, inside the tabs' quiet track (A4.5).
+        layered(Text, &[Surface, Hover, Tone::Segment]);
         // Danger text on the window and on a card is also the outlined danger button's
         // (`Look::DANGER_OUTLINE`), so hovered and pressed too.
         for stack in [&[App][..], &[Surface]] {
@@ -953,6 +1154,11 @@ mod tests {
         }
         for (fg, bg) in [(Danger, ErrorFill), (Warn, WarnFill), (Accent, InfoFill)] {
             pairs.push((fg, vec![bg]));
+        }
+        // Disabled text (A4.5): no state layer, as nothing disabled is lit. In high contrast a
+        // disabled quiet fill shows as the window (`Theme::fill`), so it's on the window there.
+        for stack in [&[App][..], &[Surface]] {
+            pairs.push((Tone::TextDisabled, stack.to_vec()));
         }
         // Each badge's pair (decision #45). Badges are static: no state layer.
         for (fg, bg) in [
@@ -1151,7 +1357,14 @@ mod tests {
                 // The layers, and glass's own secondary text (§12 item 9).
                 let glassy = matches!(
                     tone,
-                    App | Surface | Subtle | Border | Selected | Tone::TextSecondary
+                    App | Surface
+                        | Subtle
+                        | Border
+                        | Selected
+                        | Tone::TextSecondary
+                        | Tone::TextDisabled
+                        | Tone::TransientBorder
+                        | Tone::Segment
                 );
                 assert_eq!(glass.color(tone) == theme.color(tone), !glassy, "{tone:?}");
             }

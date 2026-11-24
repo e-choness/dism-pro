@@ -225,9 +225,10 @@ impl Look {
     };
 
     /// The picked tab: a surface in a hairline (the canvas's raised segment), in primary text.
-    /// Give it semibold text.
+    /// Give it semibold text. High contrast shows the pick as a highlight ([`Tone::Segment`],
+    /// TD-0009 A4.5).
     pub const TAB_SELECTED: Self = Self {
-        fill: Some(Tone::Surface),
+        fill: Some(Tone::Segment),
         border: Some(Tone::Border),
         radius: Radius::Control,
         ink: Tone::Text,
@@ -1191,11 +1192,12 @@ pub enum Landmark<'s> {
     Region { kind: &'s str },
 }
 
-/// A menu's and a list's look: the surface in a hairline. Under glass the surface is a
-/// translucent layer, so the window's acrylic shows through.
+/// A menu's, a list's and a tooltip's look: the surface in a hairline, which high contrast draws
+/// `stroke.contrast` wide ([`Tone::TransientBorder`], TD-0009 A4.4). Under glass the surface is
+/// a translucent layer, so the window's acrylic shows through.
 const POPUP: Look = Look {
     fill: Some(Tone::Surface),
-    border: Some(Tone::Border),
+    border: Some(Tone::TransientBorder),
     radius: Radius::None,
     ink: Tone::Text,
 };

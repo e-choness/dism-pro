@@ -135,6 +135,8 @@ impl<M> Ui<M> {
         if let Some(fill) = fill {
             p.canvas.rrect(rect, corner, p.theme.color(fill));
         }
+        // The fill around the node, which its focus ring must stand out from (A4.5).
+        let around = under;
         let under = fill.unwrap_or(under);
         let interactive = node.enabled && node.role.interactive();
         // A column header that doesn't sort takes focus only: no state layer.
@@ -152,8 +154,9 @@ impl<M> Ui<M> {
             p.state_layer(node, rect, corner, lit, under);
         }
         if let Some(border) = node.look.border {
+            let width = p.border_px(border);
             p.canvas
-                .ring(rect, corner, 1, p.theme.stroke(border, node.enabled));
+                .ring(rect, corner, width, p.theme.stroke(border, node.enabled));
         }
         if (interactive && button) || lit {
             p.outline(node, rect, corner, under, lit);
@@ -162,7 +165,7 @@ impl<M> Ui<M> {
             if node.enabled {
                 node.look.ink
             } else {
-                Tone::TextSecondary
+                Tone::TextDisabled
             },
             under,
         );
@@ -221,26 +224,46 @@ impl<M> Ui<M> {
         // A menu item's focus is its light, not a ring.
         if self.focus == i && self.focus_visible && node.role != Role::MenuItem {
             p.canvas.set_clip(visible);
-            p.focus_ring(rect, corner);
+            p.focus_ring(self.ring_rect(i, rect, p), corner, around);
+        }
+    }
+
+    /// Where node `i`'s focus ring goes: round its box `rect`, but for a table's row, which never
+    /// scrolls across (A2.4), round the part its viewports show where it's wider than its table,
+    /// so the ring stays whole (A4.5's rule 5). Not the part a repaint's region shows: the ring
+    /// stays where it is whatever is repainted.
+    fn ring_rect(&self, i: u32, rect: RectPx, p: &Painter<'_, '_>) -> RectPx {
+        if self.nodes[i as usize].role != Role::Row {
+            return rect;
+        }
+        let (shown, at) = (self.window_clip(i).snap(p.scale), p.canvas.placed(rect));
+        RectPx {
+            x0: rect.x0 + (shown.x0 - at.x0).max(0),
+            x1: rect.x1 - (at.x1 - shown.x1).max(0),
+            ..rect
         }
     }
 
     /// Node `i`'s children within `visible`, over the fill `under`. A viewport's show moved by
-    /// its offset, and its bars go over them, inside its hairline if it has one.
+    /// its offset, and its bars go over them, inside its border if it has one.
     fn paint_children(&self, i: u32, visible: RectPx, under: Tone, p: &mut Painter<'_, '_>) {
         let node = &self.nodes[i as usize];
         let origin = p.canvas.origin();
         let mut visible = visible;
         if node.scroll != NIL {
-            if node.look.border.is_some() {
-                // Content scrolls under the hairline (a pixel wide), not over it, as CSS clips
-                // to the padding box. No viewport is rounded, so the corners need no clip.
-                let r = p.canvas.placed(node.rect.snap(p.scale));
+            if let Some(border) = node.look.border {
+                // Content and bars scroll under the border, not over it, as CSS clips to the
+                // padding box: a hairline is a pixel, a transient surface's border in high
+                // contrast more (A4.4). No viewport is rounded, so the corners need no clip.
+                let (r, w) = (
+                    p.canvas.placed(node.rect.snap(p.scale)),
+                    p.border_px(border),
+                );
                 visible = visible.intersect(RectPx {
-                    x0: r.x0 + 1,
-                    y0: r.y0 + 1,
-                    x1: r.x1 - 1,
-                    y1: r.y1 - 1,
+                    x0: r.x0 + w,
+                    y0: r.y0 + w,
+                    x1: r.x1 - w,
+                    y1: r.y1 - w,
                 });
             }
             // A table's rows are laid out from their base.
@@ -301,7 +324,14 @@ impl<M> Ui<M> {
         }
         if node.text.is_empty() {
             if !field.placeholder.is_empty() {
-                let secondary = p.theme.ink(Tone::TextSecondary, under);
+                // Secondary text, which high contrast shows as the window's text: its GrayText
+                // is disabled text's alone (A4.5).
+                let tone = if node.enabled {
+                    Tone::TextSecondary
+                } else {
+                    Tone::TextDisabled
+                };
+                let secondary = p.theme.ink(tone, under);
                 p.line(&field.placeholder, node, line, secondary);
             }
         } else {
@@ -340,25 +370,33 @@ struct Painter<'p, 'c> {
 }
 
 impl Painter<'_, '_> {
-    /// Windows 11's focus visual inside `rect`: a ring in text color, [`stroke::FOCUS`] wide, then
-    /// one pixel of surface color inside it.
-    fn focus_ring(&mut self, rect: RectPx, corner: f32) {
+    /// Windows 11's focus visual inside `rect`, on the fill `around` the node: a ring
+    /// [`stroke::FOCUS`] wide, then one pixel inside it parting it from the node, in the colors
+    /// that stand out from that fill ([`Theme::focus_on`]).
+    fn focus_ring(&mut self, rect: RectPx, corner: f32, around: Tone) {
         // Whole pixels, at least one.
         let wide = (stroke::FOCUS * self.scale).round().max(1.0);
         let width = px_width(wide);
-        self.canvas.ring(rect, corner, width, self.theme.focus());
+        let (ring, inside) = self.theme.focus_on(around);
+        self.canvas.ring(rect, corner, width, ring);
         let inner = RectPx {
             x0: rect.x0 + width,
             y0: rect.y0 + width,
             x1: rect.x1 - width,
             y1: rect.y1 - width,
         };
-        self.canvas.ring(
-            inner,
-            (corner - wide).max(0.0),
-            1,
-            self.theme.color(Tone::Surface),
-        );
+        self.canvas.ring(inner, (corner - wide).max(0.0), 1, inside);
+    }
+
+    /// A border of `tone` in whole physical pixels: one for a hairline at any scale, and
+    /// `stroke.contrast` at the scale for a transient surface's in high contrast (A4.4).
+    fn border_px(&self, tone: Tone) -> i32 {
+        let w = self.theme.border_width(tone);
+        if w > stroke::HAIRLINE {
+            px_width((w * self.scale).round())
+        } else {
+            1
+        }
     }
 
     /// A scroll bar over its viewport, on the fill `under`: the track while `expanded`, then the
@@ -553,7 +591,7 @@ impl Painter<'_, '_> {
         let on = n.selected == Some(true);
         let fill = match (on, n.enabled) {
             (true, true) => Tone::Accent,
-            (true, false) => Tone::TextSecondary,
+            (true, false) => Tone::TextDisabled,
             (false, _) => Tone::Surface,
         };
         self.canvas.rrect(r, round, self.theme.color(fill));
@@ -616,7 +654,7 @@ impl Painter<'_, '_> {
         let on = n.check != Tri::Off;
         let fill = match (on, n.enabled) {
             (true, true) => Tone::Accent,
-            (true, false) => Tone::TextSecondary,
+            (true, false) => Tone::TextDisabled,
             (false, _) => Tone::Surface,
         };
         self.canvas.rrect(r, corner, self.theme.color(fill));
