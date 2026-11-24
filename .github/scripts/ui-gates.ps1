@@ -1856,4 +1856,97 @@ $ok = $checks.Count -gt 0 -and -not ($checks.Values -contains $false)
 Publish 'Data table' $lines $ok
 if (-not $ok) { $failed++ }
 
+# Composites: drawer (TD-0009 A3.5 (6), A3.9, slice 6d) ---------------------------------------------
+# G1's Drawer check, on the drawer probe (crates/dpro-ui/examples/drawer.rs, fixtures/drawer.rs):
+# Enter on "Review changes" opens the drawer, the Group "Preview" (a region landmark), and focus
+# moves to its first change; Esc closes it, and focus goes back to "Review changes". Those are gates.
+# The slide's frames are counted in a second run under --ui-probe idle, with the same Enter and Esc
+# sent inside its 5 s watch (3 s after the first frame): ceil(180 / 16) = 12 frame timers with
+# animations on (A3.7's U16), none with them off. The count is advisory, as the runner's timing is.
+$drawerExe = Join-Path $Bin 'drawer.exe'
+# Waits for the drawer probe `$Process`'s window and returns it with its UIA element.
+function Wait-DrawerWindow($Process) {
+    $found = [IntPtr]::Zero
+    $shown = Wait-Until {
+        $script:drawerHwnd = [UiaGateWin32]::FindWindowW('dismpro.window', 'DISM Pro drawer probe')
+        $script:drawerHwnd -ne [IntPtr]::Zero -and [UiaGateWin32]::IsWindowVisible($script:drawerHwnd)
+    } 30000
+    if (-not $shown) { throw "the drawer probe showed no window in 30 s ($(if ($Process.HasExited) { "exited with code $($Process.ExitCode)" } else { 'still running' }))" }
+    $found = $script:drawerHwnd
+    @{ Hwnd = $found; Root = $ae::FromHandle($found) }
+}
+# Focuses "Review changes" in `$Window`, active, and returns it.
+function Focus-Opener($Window) {
+    $opener = $null
+    $found = Wait-Until { $script:drawerOpener = Find-First $Window.Root $types::Button 'Review changes'; $null -ne $script:drawerOpener } 10000
+    if (-not $found) { throw 'no Button "Review changes" in 10 s' }
+    $opener = $script:drawerOpener
+    [void][GlassGateWin32]::Activate($Window.Hwnd)
+    $opener.SetFocus()
+    if (-not (Wait-Until { $opener.Current.HasKeyboardFocus } 2000)) { throw '"Review changes" took no focus in 2 s' }
+    $opener
+}
+
+$lines = @("Drawer on the drawer probe at $Size (the checks are gates; the slide's frame count is advisory)")
+$checks = [ordered]@{}
+$p = $null
+$window = $null
+try {
+    if (-not (Test-Path $drawerExe)) { throw "missing $drawerExe (docker compose run --rm t3-tools builds it)" }
+    $p = Start-Process -FilePath $drawerExe -ArgumentList @('--size', $Size) -PassThru
+    $null = $p.Handle
+    $window = Wait-DrawerWindow $p
+    $null = Focus-Opener $window
+    Send-Key 0x0D
+    $drawer = $null
+    $checks['Enter on Review changes opens the Group "Preview"'] = Wait-Until { $script:drawer = Find-First $window.Root $types::Group 'Preview'; $null -ne $script:drawer } 2000
+    if ($null -eq $drawer) { throw 'no Group "Preview" in 2 s' }
+    $first = Find-First $drawer $types::CheckBox 'Temporary files'
+    $checks['focus moves to its first change'] = ($null -ne $first) -and (Wait-Until { $first.Current.HasKeyboardFocus } 2000)
+    Send-Key 0x1B
+    $checks['Esc closes it'] = Wait-Until { (Find-Elements $window.Root $types::Group 'Preview').Count -eq 0 } 2000
+    $checks['focus goes back to Review changes'] = Wait-Until {
+        $back = Find-First $window.Root $types::Button 'Review changes'
+        $null -ne $back -and $back.Current.HasKeyboardFocus
+    } 2000
+} catch {
+    $lines += "drawer FAILED: $($_.Exception.Message)"
+    $checks['client'] = $false
+} finally {
+    if ($null -ne $p -and -not $p.HasExited) {
+        if ($null -ne $window) { [void][UiaGateWin32]::PostMessageW($window.Hwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) } # WM_CLOSE
+        if (-not $p.WaitForExit(5000)) { $p.Kill(); $lines += 'the drawer probe did not close on WM_CLOSE'; $checks['closes'] = $false }
+    }
+}
+# The slide's frames (advisory): the idle probe's frame timers, with the drawer opened and closed
+# inside its watch.
+try {
+    if (Test-Path $drawerExe) {
+        $report = Join-Path $Out 'drawer-idle.txt'
+        Remove-Item $report -ErrorAction SilentlyContinue
+        $q = Start-Process -FilePath $drawerExe -ArgumentList @('--size', $Size, '--ui-probe', 'idle', '--probe-out', $report) -PassThru
+        $null = $q.Handle
+        $idleWindow = Wait-DrawerWindow $q
+        Start-Sleep -Milliseconds 3500
+        $null = Focus-Opener $idleWindow
+        Send-Key 0x0D
+        Start-Sleep -Milliseconds 1000
+        Send-Key 0x1B
+        if (-not $q.WaitForExit(15000)) { $q.Kill(); throw 'the idle probe reported nothing in 15 s' }
+        $fields = @{}
+        foreach ($pair in ((Get-Content $report -Raw).Trim() -split '\s+')) {
+            $key, $value = $pair -split '=', 2
+            $fields[$key] = $value
+        }
+        $timers = [int] $fields.timers
+        $lines += 'slide: {0} frame timers and {1} paints in the watch, for an open and a close (12 timers with animations on, 0 off){2}' -f $timers, $fields.paints, $(if ($timers -ne 12 -and $timers -ne 0) { ' (advisory: not 12)' } else { '' })
+    }
+} catch {
+    $lines += "slide count (advisory) failed: $($_.Exception.Message)"
+}
+foreach ($k in $checks.Keys) { $lines += '{0,-50} {1}' -f $k, (Format-Verdict $checks[$k]) }
+$ok = $checks.Count -gt 0 -and -not ($checks.Values -contains $false)
+Publish 'Composites: drawer' $lines $ok
+if (-not $ok) { $failed++ }
+
 exit $failed

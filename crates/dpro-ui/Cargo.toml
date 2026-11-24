@@ -53,5 +53,10 @@ harness = false
 [[example]]
 name = "shell"
 
+# TD-0009 A3.9's G1 Drawer check and A3.7's U16: slice 6d's drawer page in a real window, driven
+# by `.github/scripts/ui-gates.ps1`.
+[[example]]
+name = "drawer"
+
 [lints]
 workspace = true

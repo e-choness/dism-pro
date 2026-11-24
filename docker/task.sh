@@ -135,6 +135,8 @@ case "${task}" in
     cargo xwin build --locked --release -p dpro-win --features gui --example bare_window \
       --target "${t}" "$@"
     cargo xwin build --locked --release -p dpro-ui --example shell --target "${t}" "$@"
+    # G1's Drawer probe: slice 6d's drawer page in a real window (TD-0009 A3.9).
+    cargo xwin build --locked --release -p dpro-ui --example drawer --target "${t}" "$@"
     # The unit-test binary of package $1: cargo prints "Executable unittests src/lib.rs (<path>)".
     test_exe() {
       cargo xwin test --color never --locked --no-run -p "$1" --target "${t}" "${@:2}" 2>&1 \
@@ -155,6 +157,7 @@ case "${task}" in
     cp "${broker_tests:?no dpro-broker test binary}" dist-t3/dpro-broker-tests.exe
     cp "${adapter_tests:?no accesskit_windows test binary}" dist-t3/accesskit-windows-tests.exe
     cp "${mcp_tests:?no dismpro-cli mcp test binary}" dist-t3/dismpro-cli-mcp-tests.exe
+    cp "target/${t}/release/examples/drawer.exe" dist-t3/
     ;;
   build)
     # Ship binaries only: xtask is a host tool, and dist/ starts empty so no stale exe lingers.
