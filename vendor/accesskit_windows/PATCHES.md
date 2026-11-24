@@ -203,8 +203,7 @@ amendment).
     - **`src/tests/mod.rs`:** the `mod landmarks;` and `mod menu_events;` lines.
 
 12. **MenuOpened and MenuClosed** (TD-0009 A4.5, slice 7c). UI Automation's Menu control type
-    must raise them, and upstream raises neither (#20). Narrator says a context menu opened and
-    closed from them.
+    must raise them, and upstream raises neither (its `TODO: handle other events (#20)`).
     - **`src/adapter.rs`:**
       - `open_close_events` gives a node's pair: MenuOpened and MenuClosed for `Role::Menu`, the
         only role that maps to the Menu control type. It gives none for a node the filter leaves

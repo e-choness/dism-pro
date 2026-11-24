@@ -42,7 +42,7 @@ fn focus_event(context: &Arc<Context>, node_id: FullNodeId) -> QueuedEvent {
 
 // dpro: MenuOpened and MenuClosed (PATCHES.md, 12), ToolTipOpened and ToolTipClosed (13;
 // TD-0009 A4.5). UI Automation's Menu and ToolTip control types "must raise" them, and upstream
-// raises neither (#20).
+// raises neither (its "TODO: handle other events (#20)", which ends its `TreeChangeHandler`).
 /// The events `node` raises as a client starts and stops seeing it, if it raises any: a menu's
 /// MenuOpened and MenuClosed, a tooltip's ToolTipOpened and ToolTipClosed. `None` for a node the
 /// client doesn't see (the filter leaves it out) and for every other role.
