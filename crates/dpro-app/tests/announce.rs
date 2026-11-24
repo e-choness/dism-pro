@@ -34,7 +34,6 @@ fn percent(said: Option<Announcement>, of: JobId) -> Option<u8> {
 }
 
 #[test]
-#[ignore = "slice 7b: lands with the code"]
 fn ten_percent_steps_two_seconds_per_job_and_one_second_overall() {
     let (a, b) = (job(1), job(2));
     let mut an = Announcer::new();
@@ -55,7 +54,6 @@ fn ten_percent_steps_two_seconds_per_job_and_one_second_overall() {
 }
 
 #[test]
-#[ignore = "slice 7b: lands with the code"]
 fn a_step_skipped_by_the_gap_is_said_with_the_next_event_as_the_current_step() {
     let a = job(1);
     let mut an = Announcer::new();
@@ -69,7 +67,6 @@ fn a_step_skipped_by_the_gap_is_said_with_the_next_event_as_the_current_step() {
 }
 
 #[test]
-#[ignore = "slice 7b: lands with the code"]
 fn silence_for_an_unknown_total_at_zero_and_at_one_hundred() {
     let a = job(1);
     let mut an = Announcer::new();
@@ -96,7 +93,6 @@ fn silence_for_an_unknown_total_at_zero_and_at_one_hundred() {
 }
 
 #[test]
-#[ignore = "slice 7b: lands with the code"]
 fn a_lower_step_is_a_new_phase_recorded_and_not_said() {
     let a = job(1);
     let mut an = Announcer::new();
@@ -111,7 +107,6 @@ fn a_lower_step_is_a_new_phase_recorded_and_not_said() {
 }
 
 #[test]
-#[ignore = "slice 7b: lands with the code"]
 fn eight_slots_a_ninth_job_is_silent_and_a_finished_one_frees_its_slot() {
     let mut an = Announcer::new();
     for n in 0..9 {
@@ -201,7 +196,6 @@ struct Seen {
 
 proptest! {
     #[test]
-    #[ignore = "slice 7b: lands with the code"]
     fn the_rate_rules_hold_over_any_monotonic_run(events in proptest::collection::vec(event(), 1..300)) {
         let mut an = Announcer::new();
         let mut seen = [Seen::default(); 10];

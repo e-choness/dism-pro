@@ -63,7 +63,6 @@ pub struct Announcer {
 
 /// One job's place, while it runs.
 #[derive(Clone, Copy, Debug, Default)]
-#[allow(dead_code, reason = "slice 7b: read once the announcer lands")]
 struct Slot {
     job: Option<JobId>,
     /// Its start, or its last notice.
@@ -86,19 +85,60 @@ impl Announcer {
         }
     }
 
-    /// `job` started at `now_ms`: it takes a free slot, if there is one.
+    /// `job` started at `now_ms`: it takes the first free slot, if there is one. A job already
+    /// running starts over in its own slot.
     pub fn started(&mut self, job: JobId, now_ms: u64) {
-        let _ = (job, now_ms, &mut self.jobs, self.last_any_ms);
+        let slot = match self.slot_of(job) {
+            Some(i) => Some(i),
+            None => self.jobs.iter().position(|s| s.job.is_none()),
+        };
+        if let Some(s) = slot.and_then(|i| self.jobs.get_mut(i)) {
+            *s = Slot {
+                job: Some(job),
+                last_ms: now_ms,
+                last_step: 0,
+            };
+        }
     }
 
-    /// What to say for `job`'s progress `p` at `now_ms`, if anything.
+    /// What to say for `job`'s progress `p` at `now_ms`, if anything: its current step, as a
+    /// percentage, when it's a new one past 0 and short of 100 and both gaps have passed. A lower
+    /// step is a new phase: it's recorded, and nothing is said. A held-back step waits for the
+    /// next event; nothing sets a timer for it.
     pub fn progress(&mut self, job: JobId, p: Progress, now_ms: u64) -> Option<Announcement> {
-        let _ = (job, p, now_ms);
-        None
+        let i = self.slot_of(job)?;
+        let step = u8::try_from(p.permille()? / 100).unwrap_or(10);
+        let last_any = self.last_any_ms;
+        let s = self.jobs.get_mut(i)?;
+        if step < s.last_step {
+            s.last_step = step;
+            return None;
+        }
+        let new = step > s.last_step && step < 10;
+        let job_gap = now_ms.saturating_sub(s.last_ms) >= JOB_GAP_MS;
+        let any_gap = last_any.is_none_or(|t| now_ms.saturating_sub(t) >= ANY_GAP_MS);
+        if !(new && job_gap && any_gap) {
+            return None;
+        }
+        s.last_step = step;
+        s.last_ms = now_ms;
+        self.last_any_ms = Some(now_ms);
+        Some(Announcement::Progress {
+            job,
+            slot: u8::try_from(i).unwrap_or(u8::MAX),
+            percent: step * 10,
+        })
     }
 
     /// `job` ended: its slot is free. Its completion is the toast's.
     pub fn finished(&mut self, job: JobId) {
-        let _ = job;
+        if let Some(s) = self.slot_of(job).and_then(|i| self.jobs.get_mut(i)) {
+            *s = Slot::default();
+        }
+    }
+
+    /// The slot `job` runs in.
+    fn slot_of(&self, job: JobId) -> Option<usize> {
+        self.jobs.iter().position(|s| s.job == Some(job))
     }
 }
