@@ -102,7 +102,8 @@ jobs:
       # T2 takes about 2 minutes. A hang stops it at 12, not at the job's 90. Anonymous API reads
       # get annotations but not logs, so when the output stops for 2 minutes a watchdog annotates
       # the last lines and the Windows programs running in the container (at most 3 times), and a
-      # failure annotates a test libtest flagged past 60 s, any failure, and the last lines.
+      # failure annotates a test libtest flagged past 60 s, any failure, a crash (Wine's line and
+      # the faulting frame: task.sh turns off the crash dialog), and the last lines.
       - name: Run docker compose run --rm test-win
         shell: bash
         run: |
@@ -139,7 +140,8 @@ jobs:
           kill "$watchdog" 2> /dev/null || true
           if [ "$status" -ne 0 ]; then
             flagged=$(sed 's/\x1b\[[0-9;]*m//g' "$log" |
-              grep -E 'has been running for over|panicked at|^test .* FAILED' | head -6 || true)
+              grep -E 'has been running for over|panicked at|^test .* FAILED|^wine: Unhandled|^=>0 ' |
+              cut -c1-300 | head -8 || true)
             annotate error "T2 exit $status" \
               "$(printf 'flagged:\n%s\nlast lines:\n%s' "${flagged:-none}" "$(tail_of 6)")"
           fi

@@ -27,6 +27,7 @@ use std::{
     ffi::c_void,
     hash::{DefaultHasher, Hash, Hasher},
     mem::ManuallyDrop,
+    sync::Once,
 };
 
 use windows::{
@@ -572,12 +573,34 @@ fn hit_x(layout: &IDWriteTextLayout, unit: usize, trailing: bool) -> f32 {
     if hit.is_ok() { x } else { 0.0 }
 }
 
+/// The shared factory's system font collection. The process's first call makes it alone and
+/// keeps one reference for good, so the collection lives as long as the process, as on Windows.
+///
+/// Wine 10's shared factory caches the collection without a reference of its own: it's freed
+/// when its last user lets go, and remade on the next call. Two threads making it at once leave
+/// it a reference short (the one that loses the race releases the winner's too), and the cache
+/// can empty between its check and its use. Tests make and drop a [`Text`] on many threads, so
+/// T2 crashed in `FindFamilyName` and `factory_get_system_collection` (spike run 45465531096).
+/// Made once and kept, the cache never empties and every later call takes Wine's plain path.
 fn system_fonts(factory: &IDWriteFactory2) -> windows::core::Result<IDWriteFontCollection> {
-    let base: &IDWriteFactory = factory;
-    let mut fonts = None;
-    // SAFETY: a live out-pointer; FALSE: don't check for updates.
-    unsafe { base.GetSystemFontCollection(&raw mut fonts, false) }?;
-    fonts.ok_or_else(windows::core::Error::empty)
+    static FIRST: Once = Once::new();
+    let get = || {
+        let base: &IDWriteFactory = factory;
+        let mut fonts = None;
+        // SAFETY: a live out-pointer; FALSE: don't check for updates.
+        unsafe { base.GetSystemFontCollection(&raw mut fonts, false) }?;
+        fonts.ok_or_else(windows::core::Error::empty)
+    };
+    let mut first = None;
+    // Other threads wait here until the first collection is made and kept.
+    FIRST.call_once(|| {
+        let fonts = get();
+        if let Ok(f) = &fonts {
+            std::mem::forget(f.clone());
+        }
+        first = Some(fonts);
+    });
+    first.unwrap_or_else(get)
 }
 
 /// The first of `candidates` installed, else the last (DirectWrite then falls back on its own).

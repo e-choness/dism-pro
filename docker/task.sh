@@ -82,6 +82,13 @@ case "${task}" in
       echo "test-win: couldn't select Wine's null display driver" >&2
       exit 1
     fi
+    # A crash prints winedbg's backtrace and ends the test binary. Wine's crash dialog would
+    # wait, unseen, for a click that never comes (spike run 45455408356 hung 40 minutes).
+    if ! wine reg add 'HKCU\Software\Wine\WineDbg' /v ShowCrashDialog /t REG_DWORD /d 0 /f \
+      > /dev/null 2>&1; then
+      echo "test-win: couldn't turn off Wine's crash dialog" >&2
+      exit 1
+    fi
     wineserver --wait
     # Then the vendored accessibility adapter, outside the workspace: its tests, less the
     # upstream ones that go through UI Automation's core, which Wine doesn't implement enough of
