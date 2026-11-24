@@ -59,7 +59,6 @@ fn tabbed(run: Run) -> Run {
 }
 
 #[test]
-#[ignore = "slice 7c: lands with the code"]
 fn a_keyboard_tip_stays_past_autopop_with_no_wake_until_a_key() {
     let mut run = tabbed(Run::with(Shell::new()));
     assert_eq!(run.wake(), None, "a keyboard tip asks for no wake");
@@ -72,7 +71,6 @@ fn a_keyboard_tip_stays_past_autopop_with_no_wake_until_a_key() {
 }
 
 #[test]
-#[ignore = "slice 7c: lands with the code"]
 fn esc_hides_a_keyboard_tip() {
     let mut run = tabbed(Run::with(Shell::new()));
     run.step(Step::Tick(shows_for()));
@@ -82,7 +80,6 @@ fn esc_hides_a_keyboard_tip() {
 }
 
 #[test]
-#[ignore = "slice 7c: lands with the code"]
 fn a_keyboard_tip_goes_when_the_focus_leaves_its_node_with_no_key() {
     let mut run = tabbed(Run::with(Shell::new()));
     // A client's SetFocus on a row: no key, so only the focus says the tip's node lost it.
@@ -107,7 +104,6 @@ fn the_window_going_inactive_hides_a_keyboard_tip() {
 }
 
 #[test]
-#[ignore = "slice 7c: lands with the code"]
 fn the_pointer_on_a_keyboard_tip_s_node_keeps_it_and_another_tip_replaces_it() {
     let mut run = tabbed(Run::with(Shell::new()).drawer_open());
     let drawer = id(&run, &Run::DRAWER_BUTTON);
@@ -133,7 +129,6 @@ fn the_pointer_on_a_keyboard_tip_s_node_keeps_it_and_another_tip_replaces_it() {
 }
 
 #[test]
-#[ignore = "slice 7c: lands with the code"]
 fn a_menu_item_s_keyboard_tip_stays_too() {
     let mut run = Run::with(Shell::new());
     let row = id(&run, &Run::row(4));

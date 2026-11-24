@@ -190,7 +190,6 @@ fn a_tooltip_is_one_wake_at_a_time_and_no_frames() {
 /// TD-0009 A4.4 (slice 7c): a tip the keyboard showed stays with no wake and no frames, past
 /// autopop: nothing but an event moves the focus or presses a key.
 #[test]
-#[ignore = "slice 7c: lands with the code"]
 fn a_keyboard_tip_stays_with_no_wake_and_no_frames() {
     let mut run = Run::accessible(Shell::new());
     run.step(key(KeyCode::Tab, true, Mods::default()));

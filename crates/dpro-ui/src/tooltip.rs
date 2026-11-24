@@ -7,9 +7,15 @@
 //! - **Hiding.** A press, any key, the pointer leaving (for a tip the pointer started), the window
 //!   going inactive, or ten delays passing (autopop). A tip hidden by a press, a key or autopop
 //!   while the pointer is on its node doesn't come back until the pointer leaves it.
+//! - **Keyboard tips stay** (TD-0009 A4.4, WCAG 2.2's 1.4.13 Content on Hover or Focus). A tip the
+//!   keyboard showed has no autopop: it stays until a key (Esc among them), a press, the window
+//!   going inactive, or the focus leaving its node by any means (a client's `SetFocus`, the app,
+//!   its node removed). The pointer resting on its node keeps it as it is; the pointer reaching
+//!   another node with a tip shows that one instead. Pointer tips keep Windows' autopop.
 //! - **Time.** Input carries no time, so input only records what changed, and
 //!   [`Ui::tooltip_timer`], which the platform runs after every event and on its wake, stamps it
-//!   with the clock. A pending tip costs one wake and no frames (U6).
+//!   with the clock. A pending tip costs one wake and no frames, and a keyboard tip that stays
+//!   costs neither (U6): only an event moves the focus, and the timer runs after every one.
 //!
 //! Only the active window shows tips, so a menu over the main window shows its own and the main
 //! window's stop.
@@ -41,9 +47,10 @@ pub(crate) enum TipState {
     Pending {
         due: u64,
     },
-    /// Showing, until `until` (autopop).
+    /// Showing, until `until` (autopop); a tip the keyboard showed has none (A4.4), and stays
+    /// while its node has the focus.
     Showing {
-        until: u64,
+        until: Option<u64>,
     },
 }
 
@@ -85,8 +92,11 @@ impl<M> Ui<M> {
     /// The tooltip showing, if any: its node, and its text.
     #[must_use]
     pub fn tooltip(&self) -> Option<(NodeId, &str)> {
-        if !matches!(self.tip.state, TipState::Showing { .. }) {
-            return None;
+        match self.tip.state {
+            // A keyboard tip whose node lost the focus is gone; the next timer forgets it.
+            TipState::Showing { until: None } if self.tip.node != self.focus => return None,
+            TipState::Showing { .. } => {}
+            _ => return None,
         }
         let id = self.id(self.tip.node)?;
         Some((id, self.shown_tip(self.tip.node)?))
@@ -99,9 +109,10 @@ impl<M> Ui<M> {
     }
 
     /// Advances the tooltip to `now_ms` on the monotonic clock: a pending tip that's due shows,
-    /// and one showing for ten delays hides. Returns how long until it needs to run again, if it
-    /// does; the platform runs it after every event and when that time comes (one shot, as the
-    /// caret's).
+    /// a pointer's tip showing for ten delays hides, and a keyboard tip whose node lost the focus
+    /// hides (A4.4). Returns how long until it needs to run again, if it does; the platform runs
+    /// it after every event and when that time comes (one shot, as the caret's). A keyboard tip
+    /// showing needs no wake.
     pub fn tooltip_timer(&mut self, now_ms: u64) -> Option<u64> {
         if std::mem::take(&mut self.tip.hid) {
             self.tip.hidden_at = Some(now_ms);
@@ -109,16 +120,12 @@ impl<M> Ui<M> {
         let delay = u64::from(self.tip.delay);
         let shows_for = delay * u64::from(popup::TIP_SHOWS_FOR);
         match self.tip.state {
-            TipState::Idle => None,
             TipState::Starting { now } => {
                 let reshow = self.tip.hidden_at.is_some_and(|t| {
                     now_ms.saturating_sub(t) < delay / u64::from(popup::TIP_RESHOW_DIV)
                 });
                 if now || reshow || delay == 0 {
-                    self.tip.state = TipState::Showing {
-                        until: now_ms.saturating_add(shows_for),
-                    };
-                    Some(shows_for.max(1))
+                    self.tip_show(now_ms, shows_for)
                 } else {
                     self.tip.state = TipState::Pending {
                         due: now_ms.saturating_add(delay),
@@ -126,21 +133,34 @@ impl<M> Ui<M> {
                     Some(delay)
                 }
             }
-            TipState::Pending { due } if now_ms >= due => {
-                self.tip.state = TipState::Showing {
-                    until: now_ms.saturating_add(shows_for),
-                };
-                Some(shows_for.max(1))
-            }
+            TipState::Pending { due } if now_ms >= due => self.tip_show(now_ms, shows_for),
             TipState::Pending { due } => Some(due - now_ms),
-            TipState::Showing { until } if now_ms >= until => {
+            TipState::Showing { until: Some(until) } if now_ms >= until => {
                 self.tip_cancel(true);
                 self.tip.hid = false;
                 self.tip.hidden_at = Some(now_ms);
                 None
             }
-            TipState::Showing { until } => Some(until - now_ms),
+            TipState::Showing { until: Some(until) } => Some(until - now_ms),
+            // The focus left a keyboard tip's node with no key (a client, the app): it goes.
+            TipState::Showing { until: None } if self.tip.node != self.focus => {
+                self.tip_cancel(false);
+                self.tip.hid = false;
+                self.tip.hidden_at = Some(now_ms);
+                None
+            }
+            // No tip, or a keyboard tip on its node: nothing to wait for (U6).
+            TipState::Idle | TipState::Showing { until: None } => None,
         }
+    }
+
+    /// The tip starts showing at `now_ms`: a pointer's for `shows_for` (autopop), the keyboard's
+    /// until the focus moves on, with no wake (A4.4, WCAG 1.4.13). Returns the timer's next run.
+    fn tip_show(&mut self, now_ms: u64, shows_for: u64) -> Option<u64> {
+        let until =
+            (self.tip.source == TipSource::Pointer).then(|| now_ms.saturating_add(shows_for));
+        self.tip.state = TipState::Showing { until };
+        until.map(|_| shows_for.max(1))
     }
 
     /// The tip of node `i`, if it has one: its tooltip's text or its
@@ -171,11 +191,14 @@ impl<M> Ui<M> {
         if over != self.tip.spent {
             self.tip.spent = NIL;
         }
+        // The pointer resting on a keyboard tip's node keeps that tip as it is (A4.4): restarted
+        // for the pointer, it would autopop.
+        let keyboard_tip = self.tip.source == TipSource::Focus && over == self.tip.node;
         if over == NIL {
             if self.tip.source == TipSource::Pointer {
                 self.tip_cancel(false);
             }
-        } else if self.active && over != self.tip.spent {
+        } else if self.active && over != self.tip.spent && !keyboard_tip {
             self.tip_start(over, TipSource::Pointer);
         }
     }
