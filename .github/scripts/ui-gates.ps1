@@ -125,6 +125,16 @@ raw-API baseline, measured in this job, so it holds on whatever machine the runn
       Review changes opens the drawer. Gates: exactly one progress notification over the job, at
       2 s or later, saying "Apply 20 changes: N0 percent", kind Other, processing MostRecent,
       activity DismPro.Progress.0. Its delivery after the step was due is advisory (U23: 100 ms).
+  Accessibility depth, menus (TD-0009 A4.5, A4.4, slice 7c): the shell, and a COM IUIAutomation
+      client on the desktop's subtree for MenuOpened, MenuClosed, ToolTipOpened and ToolTipClosed
+      (the adapter's PATCHES.md 12 and 13). Each popup opens once first, since the first open
+      activates its window's adapter with no opened event. Gates, each heard within 2 s: Esc
+      closing a row's menu raises MenuClosed; Shift+F10 again raises MenuOpened on the Menu
+      "Row"; Esc again raises MenuClosed, exactly one of each for that open. The pointer leaving
+      Review changes raises ToolTipClosed, resting on it again ToolTipOpened with the tip's text,
+      and leaving again ToolTipClosed. Shift+Tab back onto Review changes raises ToolTipOpened;
+      that keyboard tip stays past ten double-click times with no ToolTipClosed (A4.4), and Esc
+      raises it. The events' times are advisory (100 ms).
 
 The probe target is dpro-ui's `shell` example until roadmap 3.2 gives dismpro.exe its shell.
 Results go to annotations and the job summary; the raw reports and screenshots go to -Out, which
@@ -2396,6 +2406,258 @@ try {
 foreach ($k in $checks.Keys) { $lines += '{0,-62} {1}' -f $k, (Format-Verdict $checks[$k]) }
 $ok = $checks.Count -gt 0 -and -not ($checks.Values -contains $false)
 Publish 'Accessibility depth: focus' $lines $ok
+if (-not $ok) { $failed++ }
+
+# Accessibility depth: menus (TD-0009 A4.5, A4.4, slice 7c) ----------------------------------------
+# The adapter's PATCHES.md 12 and 13: MenuOpened and MenuClosed, ToolTipOpened and ToolTipClosed.
+# As for notifications, a COM IUIAutomation client hears them. It reads each sender in its handler
+# (a closed popup's node may be gone by then) and stamps the event with the Stopwatch clock this
+# script reads. It's declared flat below: IUIAutomation's first 31 methods (GetRootElement the 3rd,
+# AddAutomationEventHandler the 30th) and IUIAutomationElement's first 21 (ProcessId, ControlType
+# and Name the 18th, 19th and 21st). A popup is a top-level window of its own, so the client listens
+# on the desktop's subtree, on an MTA thread of its own.
+Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Concurrent;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Threading;
+
+[ComImport, Guid("146C3C17-F12E-4E22-8C27-F894B9B79C69"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IMenuGateHandler {
+    [PreserveSig] int HandleAutomationEvent(IntPtr sender, int eventId);
+}
+
+[ComImport, Guid("D22108AA-8AC5-49A5-837B-37BBB3D7591E"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IMenuGateElement {
+    void M01(); void M02(); void M03(); void M04(); void M05(); void M06(); void M07(); void M08();
+    void M09(); void M10(); void M11(); void M12(); void M13(); void M14(); void M15(); void M16();
+    void M17();
+    [PreserveSig] int get_CurrentProcessId(out int pid);
+    [PreserveSig] int get_CurrentControlType(out int type);
+    void M20();
+    [PreserveSig] int get_CurrentName([MarshalAs(UnmanagedType.BStr)] out string name);
+}
+
+[ComImport, Guid("30CBE57D-D9D0-452A-AB13-7AC5AC4825EE"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IMenuGateAutomation {
+    void M01(); void M02();
+    [PreserveSig] int GetRootElement(out IntPtr root);
+    void M04(); void M05(); void M06(); void M07(); void M08(); void M09(); void M10(); void M11();
+    void M12(); void M13(); void M14(); void M15(); void M16(); void M17(); void M18(); void M19();
+    void M20(); void M21(); void M22(); void M23(); void M24(); void M25(); void M26(); void M27();
+    void M28(); void M29();
+    [PreserveSig] int AddAutomationEventHandler(int eventId, IntPtr element, int scope, IntPtr cacheRequest, IMenuGateHandler handler);
+    [PreserveSig] int RemoveAutomationEventHandler(int eventId, IntPtr element, IMenuGateHandler handler);
+}
+
+[ComVisible(true), ClassInterface(ClassInterfaceType.None)]
+public sealed class MenuGateSink : IMenuGateHandler {
+    public readonly ConcurrentQueue<string> Seen = new ConcurrentQueue<string>();
+    // Each event as "timestamp|event id|process id|control type|name"; -1, 0 and "" for what the
+    // sender couldn't say.
+    public int HandleAutomationEvent(IntPtr sender, int eventId) {
+        long at = Stopwatch.GetTimestamp();
+        int pid = -1, type = 0;
+        string name = null;
+        try {
+            var e = (IMenuGateElement) Marshal.GetObjectForIUnknown(sender);
+            int got;
+            if (e.get_CurrentProcessId(out got) == 0) { pid = got; }
+            if (e.get_CurrentControlType(out got) == 0) { type = got; }
+            string n;
+            if (e.get_CurrentName(out n) == 0) { name = n; }
+            Marshal.ReleaseComObject(e);
+        } catch (Exception) { }
+        Seen.Enqueue(string.Format("{0}|{1}|{2}|{3}|{4}", at, eventId, pid, type, name ?? ""));
+        return 0;
+    }
+}
+
+public static class MenuGate {
+    // MenuOpened, MenuClosed, ToolTipOpened, ToolTipClosed.
+    static readonly int[] Events = { 20003, 20007, 20000, 20001 };
+    public static MenuGateSink Sink;
+    static Thread worker;
+    static ManualResetEventSlim stop;
+    static int hr;
+    // Subscribes to the four events on the desktop (TreeScope_Subtree) and returns the HRESULT, 0
+    // once subscribed to all four. Stop unsubscribes.
+    public static int Start() {
+        Sink = new MenuGateSink();
+        stop = new ManualResetEventSlim(false);
+        var ready = new ManualResetEventSlim(false);
+        hr = unchecked((int) 0x80004005);
+        worker = new Thread(() => {
+            IntPtr root = IntPtr.Zero;
+            try {
+                object o = Activator.CreateInstance(Type.GetTypeFromCLSID(new Guid("E22AD333-B25F-460C-83D0-0581107395C9")));
+                var uia = (IMenuGateAutomation) o;
+                hr = uia.GetRootElement(out root);
+                int added = 0;
+                while (hr == 0 && added < Events.Length) {
+                    hr = uia.AddAutomationEventHandler(Events[added], root, 7, IntPtr.Zero, Sink);
+                    if (hr == 0) { added++; }
+                }
+                ready.Set();
+                if (hr == 0) { stop.Wait(); }
+                for (int k = 0; k < added; k++) { uia.RemoveAutomationEventHandler(Events[k], root, Sink); }
+            } catch (Exception e) {
+                hr = e.HResult;
+            } finally {
+                ready.Set();
+                if (root != IntPtr.Zero) { Marshal.Release(root); }
+            }
+        });
+        worker.SetApartmentState(ApartmentState.MTA);
+        worker.IsBackground = true;
+        worker.Start();
+        if (!ready.Wait(10000)) { return unchecked((int) 0x80004005); }
+        return hr;
+    }
+    public static void Stop() {
+        if (stop != null) { stop.Set(); }
+        if (worker != null) { worker.Join(5000); worker = null; }
+    }
+}
+'@
+
+# The events heard from `$ProcessId` since the Stopwatch timestamp `$From`, in order. A sender
+# that couldn't say its process (-1) counts: a closed popup's node may be gone by then.
+function Get-Heard([int] $ProcessId, [long] $From) {
+    @([MenuGate]::Sink.Seen.ToArray() | ForEach-Object {
+        $f = $_ -split '\|', 5
+        [pscustomobject]@{ At = [long] $f[0]; Id = [int] $f[1]; Pid = [int] $f[2]; Type = [int] $f[3]; Name = $f[4] }
+    } | Where-Object { $_.At -ge $From -and ($_.Pid -eq $ProcessId -or $_.Pid -eq -1) })
+}
+# The first event `$Id` heard from `$ProcessId` since `$From` (named `$Name` if given), waiting up
+# to `$Ms`; $null if none.
+function Wait-Heard([int] $ProcessId, [long] $From, [int] $Id, [string] $Name, [int] $Ms = 2000) {
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    do {
+        $e = @(Get-Heard $ProcessId $From | Where-Object { $_.Id -eq $Id -and (-not $Name -or $_.Name -eq $Name) })
+        if ($e.Count -gt 0) { return $e[0] }
+        Start-Sleep -Milliseconds 10
+    } while ($sw.ElapsedMilliseconds -lt $Ms)
+    $null
+}
+function Get-Ms([long] $From, [long] $At) { ($At - $From) * 1000.0 / [Diagnostics.Stopwatch]::Frequency }
+$eventName = @{ 20003 = 'MenuOpened'; 20007 = 'MenuClosed'; 20000 = 'ToolTipOpened'; 20001 = 'ToolTipClosed' }
+
+# A popup's first open activates its window's adapter, whose answer to UIA's first ask is the open
+# popup: no opened event then (PATCHES.md 12). So each kind is opened once first, and the gates are
+# the close after it, the next open and its close. The keyboard's tip (A4.4) stays past autopop,
+# ten delays, until a key: Esc.
+$lines = @("Accessibility depth, menus: the shell at $Size, through a COM IUIAutomation client on the desktop (the events are gates, each heard within 2 s; their times are advisory, 100 ms)")
+$checks = [ordered]@{}
+$hwnd = [IntPtr]::Zero
+$p = Start-Process -FilePath $exe.shell -ArgumentList @('--size', $Size) -PassThru
+$null = $p.Handle
+try {
+    $shown = Wait-Until {
+        $script:hwnd = [UiaGateWin32]::FindWindowW('dismpro.window', 'DISM Pro shell probe')
+        $script:hwnd -ne [IntPtr]::Zero -and [UiaGateWin32]::IsWindowVisible($script:hwnd)
+    } 30000
+    if (-not $shown) { throw "the shell showed no window in 30 s ($(if ($p.HasExited) { "exited with code $($p.ExitCode)" } else { 'still running' }))" }
+    $root = $ae::FromHandle($hwnd)
+    $rows = @()
+    $found = Wait-Until { $script:rows = @(Get-Rows $root); $script:rows.Count -gt 4 } 10000
+    if (-not $found) { throw 'no table rows in 10 s' }
+    $row = $rows[3]
+    $checks['the window is active'] = [GlassGateWin32]::Activate($hwnd)
+    $hr = [MenuGate]::Start()
+    $checks['the client subscribes to the 4 events'] = $hr -eq 0
+    if ($hr -ne 0) { throw ('AddAutomationEventHandler failed: 0x{0:X8}' -f $hr) }
+    $shellPid = $p.Id
+    $t0 = [Diagnostics.Stopwatch]::GetTimestamp()
+
+    # A row's menu: Shift+F10 on the focused row opens it, Esc closes it.
+    $row.SetFocus()
+    $focused = Wait-Until { $row.Current.HasKeyboardFocus } 2000
+    [void][TextGateWin32]::Chord($shift, 0x79) # Shift+F10
+    $first = $focused -and (Wait-Until { $null -ne (Find-Popup $hwnd $types::MenuItem 'Uninstall') } 2000)
+    if (-not $first) { throw "Shift+F10 on '$($row.Current.Name)' showed no menu in 2 s (row focused: $focused)" }
+    $t = [Diagnostics.Stopwatch]::GetTimestamp()
+    Send-Key 0x1B # Esc
+    $e = Wait-Heard $shellPid $t 20007
+    $checks['Esc: MenuClosed'] = $null -ne $e
+    if ($e) { $lines += "MenuClosed:    $(Format-Ms (Get-Ms $t $e.At)) after Esc" }
+    [void](Wait-Until { (Get-Shown $hwnd).Count -eq 0 } 2000)
+    $again = [Diagnostics.Stopwatch]::GetTimestamp()
+    [void][TextGateWin32]::Chord($shift, 0x79)
+    $e = Wait-Heard $shellPid $again 20003
+    $checks['Shift+F10 again: MenuOpened on the Menu "Row"'] = $null -ne $e -and $e.Name -eq 'Row' -and $e.Type -eq 50009 # UIA_MenuControlTypeId
+    if ($e) { $lines += "MenuOpened:    $(Format-Ms (Get-Ms $again $e.At)) after Shift+F10" }
+    $reopened = Wait-Until { $null -ne (Find-Popup $hwnd $types::MenuItem 'Uninstall') } 2000
+    $t = [Diagnostics.Stopwatch]::GetTimestamp()
+    Send-Key 0x1B
+    $e = Wait-Heard $shellPid $t 20007
+    $checks['Esc again: MenuClosed'] = $reopened -and $null -ne $e
+    Start-Sleep -Milliseconds 200 # a second event of either would be heard by now
+    $menus = @(Get-Heard $shellPid $again | Where-Object { $_.Id -eq 20003 -or $_.Id -eq 20007 } | ForEach-Object { $_.Id })
+    $checks['that open: one MenuOpened, then one MenuClosed'] = ($menus -join ',') -eq '20003,20007'
+
+    # The tip on Review changes: the pointer resting on it, then leaving it.
+    $delay = [int] [PopupGateWin32]::GetDoubleClickTime()
+    $review = Find-First $root $types::Button 'Review changes'
+    $b = $review.Current.BoundingRectangle
+    $a = (Find-First $root $types::Text 'DISM Pro').Current.BoundingRectangle
+    $on = @([int] ($b.X + $b.Width / 2), [int] ($b.Y + $b.Height / 2))
+    $off = @([int] ($a.X + $a.Width / 2), [int] ($a.Y + $a.Height / 2))
+    [void][TextGateWin32]::MoveTo($on[0], $on[1])
+    $first = Wait-Until { $null -ne (Find-Popup $hwnd $types::ToolTip $tipText) } ($delay + 2000)
+    if (-not $first) { throw "the pointer on Review changes showed no tip in $($delay + 2000) ms" }
+    $t = [Diagnostics.Stopwatch]::GetTimestamp()
+    [void][TextGateWin32]::MoveTo($off[0], $off[1])
+    $e = Wait-Heard $shellPid $t 20001
+    $checks['the pointer leaving: ToolTipClosed'] = $null -ne $e
+    if ($e) { $lines += "ToolTipClosed: $(Format-Ms (Get-Ms $t $e.At)) after the pointer left" }
+    [void](Wait-Until { $null -eq (Find-Popup $hwnd $types::ToolTip $tipText) } 2000)
+    $t = [Diagnostics.Stopwatch]::GetTimestamp()
+    [void][TextGateWin32]::MoveTo($on[0], $on[1])
+    $e = Wait-Heard $shellPid $t 20000 '' ($delay + 2000)
+    $checks['resting on it again: ToolTipOpened, the tip''s text'] = $null -ne $e -and $e.Name -eq $tipText -and $e.Type -eq 50022 # UIA_ToolTipControlTypeId
+    if ($e) { $lines += "ToolTipOpened: $(Format-Ms (Get-Ms $t $e.At) ($delay + 100)) after the pointer came back (the delay: $delay ms; a tip just hidden shows again at once)" }
+    $t = [Diagnostics.Stopwatch]::GetTimestamp()
+    [void][TextGateWin32]::MoveTo($off[0], $off[1])
+    $checks['leaving again: ToolTipClosed'] = $null -ne (Wait-Heard $shellPid $t 20001)
+
+    # The keyboard's tip: UIA focuses Review changes (a client's focus shows no tip), then Tab and
+    # Shift+Tab bring the keyboard's focus back to it, which shows its tip at once.
+    [void][GlassGateWin32]::Activate($hwnd)
+    $review.SetFocus()
+    [void](Wait-Until { $review.Current.HasKeyboardFocus } 2000)
+    Send-Key 0x09 # Tab
+    $t = [Diagnostics.Stopwatch]::GetTimestamp()
+    [void][TextGateWin32]::Chord($shift, 0x09) # Shift+Tab
+    $e = Wait-Heard $shellPid $t 20000 $tipText
+    $byKey = $null -ne $e -and $review.Current.HasKeyboardFocus
+    $checks['Shift+Tab back to Review changes: ToolTipOpened'] = $byKey
+    if ($byKey) {
+        Start-Sleep -Milliseconds (10 * $delay + 1000)
+        $early = @(Get-Heard $shellPid $e.At | Where-Object { $_.Id -eq 20001 }).Count
+        $kept = $null -ne (Find-Popup $hwnd $types::ToolTip $tipText)
+        $checks['it stays past autopop (10 delays): no ToolTipClosed'] = $kept -and $early -eq 0
+        $t = [Diagnostics.Stopwatch]::GetTimestamp()
+        Send-Key 0x1B # Esc
+        $checks['Esc: ToolTipClosed'] = $null -ne (Wait-Heard $shellPid $t 20001)
+    }
+    foreach ($h in (Get-Heard $shellPid $t0)) {
+        $lines += '  {0,8:N1} ms: {1}, control type {2}, process {3}, "{4}"' -f (Get-Ms $t0 $h.At), $eventName[$h.Id], $h.Type, $h.Pid, $h.Name
+    }
+} catch {
+    $lines += "menus FAILED: $($_.Exception.Message)"
+    $checks['client'] = $false
+} finally {
+    [MenuGate]::Stop()
+    if (-not $p.HasExited) {
+        if ($hwnd -ne [IntPtr]::Zero) { [void][UiaGateWin32]::PostMessageW($hwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) } # WM_CLOSE
+        if (-not $p.WaitForExit(5000)) { $p.Kill(); $lines += 'the shell did not close on WM_CLOSE'; $checks['closes'] = $false }
+    }
+}
+foreach ($k in $checks.Keys) { $lines += '{0,-50} {1}' -f $k, (Format-Verdict $checks[$k]) }
+$ok = $checks.Count -gt 0 -and -not ($checks.Values -contains $false)
+Publish 'Accessibility depth: menus' $lines $ok
 if (-not $ok) { $failed++ }
 
 exit $failed

@@ -1401,7 +1401,9 @@ impl Run {
 
     /// Opens, rebuilds or hides the popup to match the shell's, as the platform does: a new one
     /// takes the activation from the main window, focuses its first item if the keyboard opened
-    /// it (a list, its picked option, either way), and is sized to its content.
+    /// it (a list, its picked option, either way), and is sized to its content. A hidden one
+    /// drops what it showed, so its next open is new nodes (TD-0009 A4.5: a client hears each
+    /// open and close).
     fn sync_popup(&mut self) {
         let Some(open) = self.shell.popup() else {
             if std::mem::take(&mut self.popup_open) {
@@ -1410,6 +1412,7 @@ impl Run {
                 self.popup.dispatch(Input::PointerLeave, &mut none);
                 self.popup.set_focus(None);
                 self.popup.set_active(false);
+                self.popup.build(|_| {});
                 // The activation comes back to the main window, its focus on the anchor.
                 self.ui.set_active(true);
             }
