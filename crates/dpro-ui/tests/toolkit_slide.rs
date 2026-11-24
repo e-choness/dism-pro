@@ -86,7 +86,6 @@ fn motion_gives_the_drawers_duration_or_none() {
 }
 
 #[test]
-#[ignore = "slice 6d: lands with the code"]
 fn a_node_slides_in_from_the_end_over_its_frames_and_then_asks_for_nothing() {
     let mut ui = ui(Motion::STANDARD);
     build(&mut ui, true, Edge::End);
@@ -119,7 +118,6 @@ fn a_node_slides_in_from_the_end_over_its_frames_and_then_asks_for_nothing() {
 }
 
 #[test]
-#[ignore = "slice 6d: lands with the code"]
 fn a_node_slides_in_from_the_start() {
     let mut ui = ui(Motion::STANDARD);
     build(&mut ui, true, Edge::Start);
@@ -152,7 +150,6 @@ fn with_animations_off_nothing_slides() {
 }
 
 #[test]
-#[ignore = "slice 6d: lands with the code"]
 fn a_node_slides_once_however_often_the_view_asks() {
     let mut ui = ui(Motion::STANDARD);
     build(&mut ui, true, Edge::End);
@@ -168,7 +165,6 @@ fn a_node_slides_once_however_often_the_view_asks() {
 }
 
 #[test]
-#[ignore = "slice 6d: lands with the code"]
 fn animations_turned_off_mid_slide_end_it_at_the_next_frame() {
     let mut ui = ui(Motion::STANDARD);
     build(&mut ui, true, Edge::End);
@@ -181,7 +177,6 @@ fn animations_turned_off_mid_slide_end_it_at_the_next_frame() {
 }
 
 #[test]
-#[ignore = "slice 6d: lands with the code"]
 fn a_node_gone_mid_slide_asks_for_no_more_frames() {
     let mut ui = ui(Motion::STANDARD);
     build(&mut ui, true, Edge::End);

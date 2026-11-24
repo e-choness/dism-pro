@@ -148,6 +148,7 @@ impl<M: Clone> Cx<'_, M> {
                 ..Style::default()
             }
         };
+        let (mut close, mut viewport) = (NIL, NIL);
         let id = self.add_with(
             Element::scope(key)
                 .on_escape(d.close)
@@ -156,24 +157,31 @@ impl<M: Clone> Cx<'_, M> {
                 .name(d.title)
                 .landmark(Landmark::Region { kind: d.region }),
             |cx| {
-                header(cx, d);
-                cx.add_with(
-                    Element::scroll(DRAWER_BODY, Axes::Y).style(Style {
-                        grow: 1.0,
-                        gap: drawer::GAP,
-                        padding: Insets {
-                            left: drawer::PAD_X,
-                            top: 0.0,
-                            right: drawer::PAD_X,
-                            bottom: drawer::GAP,
-                        },
-                        ..Style::default()
-                    }),
-                    body,
-                );
+                close = header(cx, d);
+                viewport = cx
+                    .add_with(
+                        Element::scroll(DRAWER_BODY, Axes::Y).style(Style {
+                            grow: 1.0,
+                            gap: drawer::GAP,
+                            padding: Insets {
+                                left: drawer::PAD_X,
+                                top: 0.0,
+                                right: drawer::PAD_X,
+                                bottom: drawer::GAP,
+                            },
+                            ..Style::default()
+                        }),
+                        body,
+                    )
+                    .index;
                 footer(cx, &d.footer);
             },
         );
+        // Opening moves focus to the body's first control, or to Close if it has none.
+        if self.ui.scope_opened(id.index) {
+            let first = self.ui.first_stop_below(viewport);
+            self.ui.move_focus(if first == NIL { close } else { first });
+        }
         self.slide_in(id, Edge::End);
         id
     }

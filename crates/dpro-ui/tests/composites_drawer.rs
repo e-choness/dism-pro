@@ -60,7 +60,6 @@ fn first_change(run: &Run) -> NodeId {
 }
 
 #[test]
-#[ignore = "slice 6d: lands with the code"]
 fn esc_closes_the_drawer_and_focus_goes_back_to_its_opener() {
     let mut run = Run::with(Model::new());
     open(&mut run);
@@ -79,7 +78,6 @@ fn esc_closes_the_drawer_and_focus_goes_back_to_its_opener() {
 }
 
 #[test]
-#[ignore = "slice 6d: lands with the code"]
 fn close_and_cancel_close_it_and_focus_goes_back_too() {
     for (part, msg) in [(DRAWER_CLOSE, Msg::Close), (DRAWER_CANCEL, Msg::Cancel)] {
         let mut run = Run::with(Model::new());
@@ -94,7 +92,6 @@ fn close_and_cancel_close_it_and_focus_goes_back_too() {
 }
 
 #[test]
-#[ignore = "slice 6d: lands with the code"]
 fn esc_with_focus_on_the_page_closes_the_drawer_and_leaves_focus_there() {
     let mut run = Run::with(Model::new());
     open(&mut run);
@@ -120,7 +117,6 @@ fn focus_moved_out_of_the_drawer_stays_where_it_went_when_it_closes() {
 }
 
 #[test]
-#[ignore = "slice 6d: lands with the code"]
 fn opening_focuses_the_bodys_first_control_or_close() {
     let mut run = Run::with(Model::new());
     open(&mut run);
@@ -139,7 +135,6 @@ fn opening_focuses_the_bodys_first_control_or_close() {
 }
 
 #[test]
-#[ignore = "slice 6d: lands with the code"]
 fn the_slide_takes_its_frames_lays_out_once_and_then_asks_for_nothing() {
     let mut run = Run::with(Model::new()).warmed();
     let layouts = run.layouts;
@@ -194,7 +189,6 @@ fn the_slide_takes_its_frames_lays_out_once_and_then_asks_for_nothing() {
 }
 
 #[test]
-#[ignore = "slice 6d: lands with the code"]
 fn closing_mid_slide_stops_its_frames() {
     let mut run = Run::with(Model::new()).warmed();
     run.step(Step::Update(Msg::Open));
@@ -223,7 +217,6 @@ fn with_animations_off_the_drawer_opens_and_closes_in_one_frame() {
 }
 
 #[test]
-#[ignore = "slice 6d: lands with the code"]
 fn the_slide_paints_the_drawer_moved_toward_the_end() {
     let mut run = Run::painted(Model::new(), Theme::LIGHT).warmed();
     let argb = |tone: Tone| {

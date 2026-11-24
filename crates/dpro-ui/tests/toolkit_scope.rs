@@ -105,7 +105,6 @@ fn without_a_scope_esc_passes_on() {
 }
 
 #[test]
-#[ignore = "slice 6d: lands with the code"]
 fn esc_goes_to_the_nearest_scope_with_an_escape() {
     for (escapes, want) in [(true, Msg::Escape(2)), (false, Msg::Escape(1))] {
         let mut ui = ui();
@@ -121,7 +120,6 @@ fn esc_goes_to_the_nearest_scope_with_an_escape() {
 }
 
 #[test]
-#[ignore = "slice 6d: lands with the code"]
 fn with_focus_outside_esc_goes_to_the_open_scope() {
     let mut ui = ui();
     build(
@@ -139,7 +137,6 @@ fn with_focus_outside_esc_goes_to_the_open_scope() {
 }
 
 #[test]
-#[ignore = "slice 6d: lands with the code"]
 fn the_esc_a_field_doesnt_use_reaches_its_scope() {
     let mut ui = ui();
     build(
@@ -155,7 +152,6 @@ fn the_esc_a_field_doesnt_use_reaches_its_scope() {
 }
 
 #[test]
-#[ignore = "slice 6d: lands with the code"]
 fn a_scope_that_goes_gives_focus_back() {
     let mut ui = ui();
     let closed = View {
@@ -182,7 +178,6 @@ fn a_scope_that_goes_gives_focus_back() {
 }
 
 #[test]
-#[ignore = "slice 6d: lands with the code"]
 fn when_that_node_is_gone_focus_goes_to_the_scopes_parent() {
     let mut ui = ui();
     build(
@@ -234,7 +229,6 @@ fn focus_moved_out_of_a_scope_stays_where_it_went() {
 }
 
 #[test]
-#[ignore = "slice 6d: lands with the code"]
 fn an_inner_scope_that_goes_alone_gives_focus_back_inside_the_outer() {
     let mut ui = ui();
     // The outer scope, its button focused; then the inner one appears and takes focus.

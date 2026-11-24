@@ -39,6 +39,8 @@ impl<M> Ui<M> {
         };
         view(&mut cx);
         cx.finish();
+        // Focus a scope took with it comes back (A3.5 addition 10, slice 6d).
+        self.give_focus_back();
     }
 }
 
@@ -335,10 +337,16 @@ impl<M> Ui<M> {
             Extra::None | Extra::Field { .. } | Extra::Combo { .. } | Extra::Live(_) => {
                 (None, 0.0, None)
             }
+            // A scope's escape (addition 10) is read below.
+            Extra::Scope { .. } => (None, 0.0, None),
         };
         let politeness = match extra {
             Extra::Live(live) => live,
             _ => Live::Off,
+        };
+        let (scope, on_escape) = match extra {
+            Extra::Scope { on_escape } => (true, on_escape),
+            _ => (false, None),
         };
         let n = &mut self.nodes[i as usize];
         // The group sets a client's role (a tab list, a radio group, a list).
@@ -352,6 +360,7 @@ impl<M> Ui<M> {
         n.politeness = politeness;
         n.special = group.is_some() || invoke.is_some() || value.to_bits() != 0;
         n.special |= politeness != Live::Off;
+        n.special |= scope;
         // A menu item became or stopped being a check item: every label in its menu moves past
         // the checks' gutter or back, so the menu is laid out again.
         let rechecked = revalued && n.role == Role::MenuItem;
@@ -359,6 +368,9 @@ impl<M> Ui<M> {
         let represented = revalued && n.role == Role::Container;
         if n.hold || invoke.is_some() {
             self.update_hold(i, invoke);
+        }
+        if scope || !self.scopes.is_empty() {
+            self.update_scope(i, scope, on_escape);
         }
         if rechecked {
             self.mark_dirty(i);

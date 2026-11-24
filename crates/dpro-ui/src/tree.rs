@@ -383,6 +383,11 @@ pub(crate) enum Extra<'s, M> {
     /// A container whose children are [presentational](Element::presentation): its node's value
     /// ([`PRESENTATION`]).
     Presentation,
+
+    /// A [scope](Element::scope) and what Esc sends to it (A3.5 addition 10, slice 6d).
+    Scope {
+        on_escape: Option<fn() -> M>,
+    },
 }
 
 /// A check item's value ([`Element::menu_check`]): its node's `value`, as a column header's sort
