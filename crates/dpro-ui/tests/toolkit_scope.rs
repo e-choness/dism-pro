@@ -29,6 +29,10 @@ const FIELD: Key = Key::name("field");
 
 /// What one build shows.
 #[derive(Clone, Copy, Default)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent parts of a test view"
+)]
 struct View {
     /// The scope is there.
     open: bool,
@@ -38,6 +42,8 @@ struct View {
     field: bool,
     /// The button outside the scope is there.
     outside: bool,
+    /// The button in the scope has a tooltip.
+    tip: bool,
 }
 
 fn ui() -> Ui<Msg> {
@@ -71,7 +77,8 @@ fn build(ui: &mut Ui<Msg>, v: View) {
                         cx.add(Element::field(FIELD, "", |_: TextEdit| Msg::Edit));
                     }
                     None => {
-                        cx.add(Element::button(BUTTON, "In", Msg::Press(1)));
+                        let button = Element::button(BUTTON, "In", Msg::Press(1));
+                        cx.add(if v.tip { button.tooltip("Tip") } else { button });
                     }
                 },
             );
@@ -91,6 +98,17 @@ fn esc(ui: &mut Ui<Msg>) -> (bool, Vec<Msg>) {
         &mut out,
     );
     (used, out)
+}
+
+fn key(ui: &mut Ui<Msg>, key: KeyCode) {
+    ui.dispatch(
+        Input::Key(KeyEvent {
+            key,
+            down: true,
+            mods: Mods::default(),
+        }),
+        &mut Vec::new(),
+    );
 }
 
 fn find(ui: &Ui<Msg>, path: &[Key]) -> NodeId {
@@ -133,6 +151,29 @@ fn with_focus_outside_esc_goes_to_the_open_scope() {
     assert_eq!(esc(&mut ui), (true, vec![Msg::Escape(1)]));
     // And with nothing focused.
     ui.set_focus(None);
+    assert_eq!(esc(&mut ui), (true, vec![Msg::Escape(1)]));
+}
+
+#[test]
+fn an_esc_that_hides_a_tooltip_goes_no_further() {
+    let mut ui = ui();
+    build(
+        &mut ui,
+        View {
+            open: true,
+            tip: true,
+            ..View::default()
+        },
+    );
+    // Tab to the scope's button: focus the keyboard moved shows its tip at once.
+    ui.set_focus(Some(find(&ui, &[OTHER])));
+    key(&mut ui, KeyCode::Tab);
+    assert_eq!(ui.focus(), Some(find(&ui, &[SCOPE, BUTTON])));
+    ui.tooltip_timer(0);
+    assert!(ui.tooltip().is_some(), "its tip shows");
+    // The topmost popup first (§4.3): the tip goes, the scope stays.
+    assert_eq!(esc(&mut ui), (false, vec![]));
+    assert!(ui.tooltip().is_none());
     assert_eq!(esc(&mut ui), (true, vec![Msg::Escape(1)]));
 }
 

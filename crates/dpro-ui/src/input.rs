@@ -189,6 +189,8 @@ impl<M: Clone> Ui<M> {
                     return true;
                 }
                 let before = self.focus;
+                // An Esc that hides a tooltip goes no further than that popup (§4.3).
+                let tip_shown = k.key == KeyCode::Escape && self.tooltip().is_some();
                 if k.down {
                     // Any key hides a tooltip.
                     self.tip_cancel(true);
@@ -201,7 +203,8 @@ impl<M: Clone> Ui<M> {
                     self.key(k, out)
                 };
                 // An Esc nothing used goes to its scope (A3.5 addition 10).
-                let used = used || (k.down && k.key == KeyCode::Escape && self.scope_escape(out));
+                let used = used
+                    || (k.down && k.key == KeyCode::Escape && !tip_shown && self.scope_escape(out));
                 // Focus the keyboard moved shows its tip at once.
                 if self.focus != before && self.focus_visible {
                     self.tip_focus(self.focus);
@@ -533,9 +536,10 @@ enum Rove {
 }
 
 impl<M: Clone> Ui<M> {
-    /// Advances animations and the hold to `now_ms` on the monotonic clock, damaging what they
-    /// change. An animation or a hold started since the last tick starts now. A hold that comes
-    /// to its end pushes its button's message to `out`.
+    /// Advances animations, the hold and slides to `now_ms` on the monotonic clock, damaging what
+    /// they change. An animation or a hold started since the last tick starts now; a slide, a
+    /// frame before (`slide.rs`). A hold that comes to its end pushes its button's message to
+    /// `out`.
     pub fn tick(&mut self, now_ms: u64, out: &mut Vec<M>) {
         self.tick_hold(now_ms, out);
         self.tick_animations(now_ms);

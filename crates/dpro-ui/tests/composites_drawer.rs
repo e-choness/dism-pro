@@ -296,6 +296,20 @@ fn a_sheet_takes_the_page_out_of_the_tree() {
 }
 
 #[test]
+fn a_sheet_that_closes_gives_focus_to_the_page_built_again() {
+    let mut run = Run::with(Model::new());
+    run.step(Step::Resize(NARROW));
+    open(&mut run);
+    assert!(run.opener().is_none(), "the sheet took the page away");
+    assert_eq!(run.ui.focus(), Some(first_change(&run)));
+    run.step(key(KeyCode::Escape, NONE));
+    assert!(run.drawer().is_none());
+    // The opener is a new node: the row's first control, Review changes again.
+    assert!(run.opener().is_some());
+    assert_eq!(run.ui.focus(), run.opener());
+}
+
+#[test]
 fn the_footer_stays_put_while_the_body_scrolls() {
     let mut run = Run::with(Model::new());
     open(&mut run);
