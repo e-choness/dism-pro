@@ -3,7 +3,8 @@
 //! two live views of one job never coexist. A progress event damages only the two bars (U17). Esc
 //! or Dismiss hides it; an ended toast hides after Windows' message duration, which costs exactly
 //! one wake, and the pointer over it holds it. That the toast window never takes activation on
-//! show or click, and F6 does, is the host's: the platform's T2 tests check it.
+//! show or click, and F6 does, is the host's: dpro-win's T2 tests check the first two (Wine's
+//! null driver keeps the activation, so F6's is printed there), and G1's "Composites" all three.
 
 #![expect(
     clippy::expect_used,

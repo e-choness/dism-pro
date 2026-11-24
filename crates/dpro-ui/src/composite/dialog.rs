@@ -41,7 +41,7 @@ pub struct DialogFrame<'s, M> {
 
 impl<M: Clone> Cx<'_, M> {
     /// A dialog frame around `body`: the title, the body in a vertical viewport, and the footer's
-    /// buttons (at most three), the first of them where focus starts.
+    /// buttons (at most three), focus starting on the `initial` one.
     pub fn dialog_frame(
         &mut self,
         key: Key,

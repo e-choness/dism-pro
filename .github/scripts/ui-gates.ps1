@@ -107,9 +107,10 @@ raw-API baseline, measured in this job, so it holds on whatever machine the runn
       Down selects the next while focus stays in the field; typing filters the results; Esc closes
       it and the page is active again. Ctrl+J starts a job: its toast shows at the window's bottom
       end without taking the activation (and isn't WS_EX_NOACTIVATE), and a click on it leaves the
-      activation; F6 gives it the keyboard (Dismiss focused), and F6 hands it back. Ctrl+E ends the
-      job, and the toast hides once SPI_GETMESSAGEDURATION has passed with the pointer and the
-      focus elsewhere. SPI_GETMESSAGEDURATION and SPI_GETCLIENTAREAANIMATION are reported for
+      activation; F6 gives it the keyboard (Dismiss focused), and F6 hands it back; Esc in it
+      hides it, and the page is active again. Ctrl+E ends the job, which shows its toast again,
+      and the toast hides once SPI_GETMESSAGEDURATION has passed (not before) with the pointer and
+      the focus elsewhere. SPI_GETMESSAGEDURATION and SPI_GETCLIENTAREAANIMATION are reported for
       A3.5's verifies. Each check reads back within 2 s; the palette's opening is advisory (U15:
       100 ms from Ctrl+K to UIA seeing its field focused). Screenshots of the palette and the toast
       go to -Out.

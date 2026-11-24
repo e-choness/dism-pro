@@ -82,6 +82,9 @@ pub struct Toast<'s, M> {
 impl<M: Clone> Cx<'_, M> {
     /// A job's toast: a card holding its glyph, title and Dismiss, its line, its bar while it
     /// has progress, and its actions. One per window: the `Ui` keeps its Dismiss and its hide.
+    ///
+    /// Build each job's toast under a key of its own (`Key::index` of the job): a newer job's
+    /// toast is then a new node, whose hide waits afresh even when it replaces an ended one.
     pub fn toast(&mut self, key: Key, t: &Toast<'_, M>) -> NodeId {
         let id = self.add_with(
             Element::stack(key)
