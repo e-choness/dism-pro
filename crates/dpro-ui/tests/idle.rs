@@ -15,7 +15,8 @@
 //! time over 5 s.
 //!
 //! Popups (TD-0009 A1.7): a pending tooltip is one wake and no frames, a showing one the wake that
-//! hides it; an open menu asks for nothing.
+//! hides it; an open menu asks for nothing. A tip the keyboard showed asks for nothing either: it
+//! stays until the focus moves or a key (A4.4, slice 7c).
 //!
 //! Scrolling (A2, slice 5a): a scroll is done when its event is, with no smooth scrolling and no
 //! fading bar, so a wheel notch, a thumb drag and its release each settle like any other input.
@@ -184,6 +185,27 @@ fn a_tooltip_is_one_wake_at_a_time_and_no_frames() {
     assert!(run.ui.tooltip().is_none());
     assert_eq!(run.wake(), None, "hidden, it asks for nothing");
     assert_idle(&mut run, "the tip came and went");
+}
+
+/// TD-0009 A4.4 (slice 7c): a tip the keyboard showed stays with no wake and no frames, past
+/// autopop: nothing but an event moves the focus or presses a key.
+#[test]
+#[ignore = "slice 7c: lands with the code"]
+fn a_keyboard_tip_stays_with_no_wake_and_no_frames() {
+    let mut run = Run::accessible(Shell::new());
+    run.step(key(KeyCode::Tab, true, Mods::default()));
+    run.step(key(KeyCode::Tab, false, Mods::default()));
+    settle(&mut run, "Tab", max_ticks());
+    assert!(
+        run.ui.tooltip().is_some(),
+        "Tab to the drawer button shows its tip"
+    );
+    assert_eq!(run.wake(), None, "a keyboard tip asks for no wake");
+    let autopop = u64::from(TIP_DELAY_MS) * u64::from(TIP_SHOWS_FOR);
+    run.step(Step::Tick(2 * autopop));
+    assert!(run.ui.tooltip().is_some(), "it stays past autopop");
+    assert_eq!(run.wake(), None);
+    assert_idle(&mut run, "a keyboard tip showing");
 }
 
 /// TD-0009 A1.7: an open menu asks for no frames and no wakes, in either window.
