@@ -99,7 +99,25 @@ jobs:
       - run: docker compose run --rm test
       # Doc 04 §3's deterministic gate: instruction counts vs benches/baseline.json.
       - run: docker compose run --rm bench-gate
-      - run: docker compose run --rm test-win
+      # T2 takes about 2 minutes. A hang stops it at 20, not at the job's 90, and the annotations
+      # name it: a test libtest flagged past 60 s, a failure, and the binary and line it stopped at.
+      # Anonymous API reads get annotations but not logs.
+      - name: Run docker compose run --rm test-win
+        shell: bash
+        run: |
+          set -o pipefail
+          log="$RUNNER_TEMP/t2.log"
+          status=0
+          timeout --kill-after=1m 20m docker compose run --rm test-win 2>&1 | tee "$log" || status=$?
+          if [ "$status" -ne 0 ]; then
+            sed -i 's/\x1b\[[0-9;]*m//g; s/\r$//' "$log"
+            grep -E 'has been running for over|panicked at|^test .* FAILED' "$log" | head -6 |
+              sed 's/%/%25/g; s/^/::error title=T2::/'
+            last=$(grep -E '^ *Running ' "$log" | tail -1 | sed 's/^ *//; s/%/%25/g')
+            end=$(grep -v '^ *$' "$log" | tail -1 | sed 's/%/%25/g')
+            echo "::error title=T2 exit ${status}::stopped in: ${last:-no test binary}; last line: ${end}"
+          fi
+          exit "$status"
       - run: docker compose run --rm deny
       - run: docker compose run --rm build
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
