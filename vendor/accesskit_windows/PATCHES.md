@@ -49,6 +49,9 @@ amendment).
        - Its rows are `Row`s at any depth with a `row_index`.
        - Its cells are a row's `Cell`, `GridCell`, `RowHeader` and `ColumnHeader` parts with a
          `column_index`, at the row's index unless they carry their own.
+       - A cell is at each column it spans: its `column_index` and the `column_span - 1` after
+         it (TD-0009 slice 6b). A grouped table's header row is one row header spanning every
+         column, so `GetItem` finds it at any of them.
        - A nested table's parts are its own.
      - `src/tests/table.rs`: tests that call the providers in process, so Wine runs them too (T2),
        with the helpers in `src/tests/providers.rs` (5).
@@ -132,8 +135,33 @@ amendment).
          `S_OK`, as UI Automation's documentation asks.
    - **`src/lib.rs`, `src/tests/mod.rs`:** the `mod realize;` lines and the re-exports.
 
-TD-0009 A4.5 numbers its patches 7–13. Item 7, notifications, comes with slice 7b, so the list
-goes on at 8.
+7. **Notifications** (TD-0009 A4.5, slice 7b). Narrator speaks a job's progress steps, "Copied."
+   and counts without a focus move through UI Automation notifications, which upstream doesn't
+   raise.
+   - **`src/adapter.rs`:**
+     - `Adapter::notify(kind, processing, text, activity) -> Option<QueuedEvents>` queues a
+       notification on the tree's root, with the text and activity as BSTRs. It returns `None`
+       while no client has asked for the tree (the adapter isn't active), and where the function
+       is missing. The design's `node` argument is left out: DISM Pro raises every notice on the
+       main window's root (A4.5), and `accesskit_consumer` exposes no way to find a node by its
+       local id. `notify_if` takes whether the function exists, so a test can take the path where
+       it doesn't.
+     - `UiaRaiseNotificationEvent` (Windows 10 1709) is looked up once with `GetProcAddress` on
+       the loaded `uiautomationcore.dll`, cached in a `OnceLock`, and transmuted to its
+       documented signature under `// SAFETY:`. It's never a static import, so the exe still
+       starts on a WinPE older than 1709, where notices are dropped.
+     - `QueuedEvents::raise` raises a notification with it, freeing the BSTRs after the call. A
+       refusal is counted as item 11's are. `raise_with`'s signature doesn't change.
+   - **`src/util.rs`:** `QueuedEvent::Notification`.
+   - **New file:** `src/tests/notify.rs`: nothing is queued before a client asks; once one has,
+     a notification is queued exactly when the function exists, and raised without a panic; with
+     the function forced missing, nothing is queued. The tests run on the window's own thread
+     with no client, so Wine runs them too (T2), and print which path it takes. Measured in T2:
+     the image's Wine exports the function and accepts the raise. They activate the adapter
+     through `handle_wm_getobject` without handing its answer on, because Wine faults in
+     `UiaReturnRawElementProvider` from the harness's window (why T2 skips `tests::simple`).
+     `cargo xtask pe-compat --exe` checks that G1's shell probe doesn't import the function.
+   - **`src/tests/mod.rs`:** the `mod notify;` line.
 
 8. **HeadingLevel** (TD-0009 A4.5, slice 6a). Narrator's scan mode jumps by heading (H, and 1–9
    by level) through UI Automation's HeadingLevel, which upstream doesn't report: it sends a
@@ -174,5 +202,5 @@ goes on at 8.
       Items 12–13's tests join the file.
     - **`src/tests/mod.rs`:** the `mod landmarks;` and `mod menu_events;` lines.
 
-**Planned** (TD-0009 A4.5): 7, notifications (slice 7b); 12, MenuOpened and MenuClosed, and 13,
-ToolTipOpened and ToolTipClosed (slice 7c).
+**Planned** (TD-0009 A4.5): 12, MenuOpened and MenuClosed, and 13, ToolTipOpened and
+ToolTipClosed (slice 7c).

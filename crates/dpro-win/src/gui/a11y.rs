@@ -6,6 +6,7 @@
 use std::{
     cell::RefMut,
     ffi::c_void,
+    fmt::Write as _,
     sync::{
         Arc, Mutex, MutexGuard, PoisonError,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -14,6 +15,12 @@ use std::{
 
 use accesskit::{ActionHandler, ActionRequest, ActivationHandler, TreeUpdate};
 use accesskit_windows::{Realize, Realized, Realizer};
+use windows::Win32::UI::Accessibility::{
+    NotificationKind, NotificationKind_ActionAborted, NotificationKind_ActionCompleted,
+    NotificationKind_ItemAdded, NotificationKind_ItemRemoved, NotificationKind_Other,
+    NotificationProcessing, NotificationProcessing_All, NotificationProcessing_ImportantAll,
+    NotificationProcessing_ImportantMostRecent, NotificationProcessing_MostRecent,
+};
 use windows_sys::Win32::{
     Foundation::HWND,
     System::Threading::GetCurrentThreadId,
@@ -220,6 +227,82 @@ impl ActivationHandler for Initial<'_> {
     }
 }
 
+// ---- notices (TD-0009 A4.5, slice 7b) ----------------------------------------------------------
+
+/// A notice for a screen reader to speak without a focus move, as a UI Automation notification
+/// on the main window's root: the toolkit's notice, as the window carries it. Its text is
+/// sanitized and capped by the toolkit before it gets here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Notice {
+    pub text: String,
+    pub kind: NoticeKind,
+    /// Spoken even over other speech (`Important…` processing).
+    pub important: bool,
+    /// Supersedes earlier notices of its activity (`…MostRecent`), rather than queuing behind
+    /// them (`…All`).
+    pub replace: bool,
+    pub activity: Activity,
+}
+
+/// What happened, as UI Automation's `NotificationKind` names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NoticeKind {
+    ItemAdded,
+    ItemRemoved,
+    ActionCompleted,
+    ActionAborted,
+    Other,
+}
+
+/// Which notices supersede each other: UI Automation's activity id.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Activity {
+    /// A job's progress, by its announcer slot.
+    Progress(u32),
+    Copy,
+    Count,
+    Hold,
+}
+
+impl Notice {
+    /// UI Automation's `NotificationKind`.
+    pub(super) const fn uia_kind(&self) -> NotificationKind {
+        match self.kind {
+            NoticeKind::ItemAdded => NotificationKind_ItemAdded,
+            NoticeKind::ItemRemoved => NotificationKind_ItemRemoved,
+            NoticeKind::ActionCompleted => NotificationKind_ActionCompleted,
+            NoticeKind::ActionAborted => NotificationKind_ActionAborted,
+            NoticeKind::Other => NotificationKind_Other,
+        }
+    }
+
+    /// UI Automation's `NotificationProcessing`, from (important, replace) as A4.5 maps it. Never
+    /// `CurrentThenMostRecent`, and never the processing only build 26100 has.
+    pub(super) const fn processing(&self) -> NotificationProcessing {
+        match (self.important, self.replace) {
+            (true, true) => NotificationProcessing_ImportantMostRecent,
+            (true, false) => NotificationProcessing_ImportantAll,
+            (false, true) => NotificationProcessing_MostRecent,
+            (false, false) => NotificationProcessing_All,
+        }
+    }
+
+    /// Its activity id into `out`: `DismPro.Progress.<n>`, `DismPro.Copy`, `DismPro.Count` or
+    /// `DismPro.Hold`.
+    pub(super) fn activity_id(&self, out: &mut String) {
+        out.clear();
+        out.push_str(match self.activity {
+            Activity::Progress(_) => "DismPro.Progress.",
+            Activity::Copy => "DismPro.Copy",
+            Activity::Count => "DismPro.Count",
+            Activity::Hold => "DismPro.Hold",
+        });
+        if let Activity::Progress(n) = self.activity {
+            let _ = write!(out, "{n}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use accesskit::{Action, NodeId, TreeId};
@@ -257,5 +340,39 @@ mod tests {
         // Nothing could be posted, so the flag is down for the next request to try again.
         assert!(!requests.woken.load(Ordering::SeqCst));
         assert_eq!(requests.drain(), vec![click(1)]);
+    }
+
+    /// TD-0009 A4.5: (important, replace) is UI Automation's processing, never
+    /// `CurrentThenMostRecent` (4) or build 26100's (5); each activity has its id.
+    #[test]
+    fn a_notice_maps_to_ui_automation_s_kind_processing_and_activity() {
+        let notice = |important, replace, activity| Notice {
+            text: "Copied.".into(),
+            kind: NoticeKind::ActionAborted,
+            important,
+            replace,
+            activity,
+        };
+        let processing = [
+            (true, true, 1),
+            (true, false, 0),
+            (false, true, 3),
+            (false, false, 2),
+        ];
+        for (important, replace, want) in processing {
+            let n = notice(important, replace, Activity::Copy);
+            assert_eq!(n.processing().0, want, "({important}, {replace})");
+        }
+        assert_eq!(notice(true, true, Activity::Hold).uia_kind().0, 3);
+        let mut id = String::from("old");
+        for (activity, want) in [
+            (Activity::Progress(7), "DismPro.Progress.7"),
+            (Activity::Copy, "DismPro.Copy"),
+            (Activity::Count, "DismPro.Count"),
+            (Activity::Hold, "DismPro.Hold"),
+        ] {
+            notice(false, true, activity).activity_id(&mut id);
+            assert_eq!(id, want);
+        }
     }
 }

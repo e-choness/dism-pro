@@ -1,4 +1,5 @@
-//! Minimal PE reader: the DLL names in the import and delay-import tables (doc 04 §4).
+//! Minimal PE reader: the DLL names in the import and delay-import tables (doc 04 §4), and the
+//! functions each imports by name (TD-0009 A4.9).
 //! Parses untrusted bytes, so every read is bounds-checked and errors instead of panicking.
 
 /// One DLL an executable imports.
@@ -6,6 +7,8 @@
 pub(crate) struct Import {
     pub(crate) dll: String,
     pub(crate) delay_loaded: bool,
+    /// The functions it imports by name, from its lookup table; those by ordinal aren't named.
+    pub(crate) functions: Vec<String>,
 }
 
 const IMPORT_DIR: usize = 1;
@@ -14,6 +17,10 @@ const IMPORT_DESCRIPTOR_LEN: usize = 20;
 const DELAY_DESCRIPTOR_LEN: usize = 32;
 /// Guards against a malformed table without a terminator.
 const MAX_DESCRIPTORS: usize = 4096;
+/// The same, for one DLL's lookup table.
+const MAX_THUNKS: usize = 65_536;
+/// A lookup-table entry with this bit set imports by ordinal (bit 63 in PE32+, 31 in PE32).
+const BY_ORDINAL: u32 = 0x8000_0000;
 
 #[derive(Debug)]
 struct Section {
@@ -35,9 +42,9 @@ pub(crate) fn imports(bytes: &[u8]) -> Result<Vec<Import>, String> {
     let section_count = usize::from(read_u16(bytes, coff + 2)?);
     let optional = coff + 20;
     let optional_len = usize::from(read_u16(bytes, coff + 16)?);
-    let dirs = match read_u16(bytes, optional)? {
-        0x10b => optional + 96,  // PE32
-        0x20b => optional + 112, // PE32+
+    let (dirs, wide) = match read_u16(bytes, optional)? {
+        0x10b => (optional + 96, false), // PE32
+        0x20b => (optional + 112, true), // PE32+
         magic => return Err(format!("unknown optional header magic {magic:#x}")),
     };
     let dir_count = usize_at(read_u32(bytes, dirs - 4)?)?;
@@ -77,7 +84,31 @@ pub(crate) fn imports(bytes: &[u8]) -> Result<Vec<Import>, String> {
                 break;
             }
             let dll = file.c_string(name_rva)?;
-            out.push(Import { dll, delay_loaded });
+            // The lookup table: an import descriptor's OriginalFirstThunk, or its FirstThunk if
+            // there's none; a delay descriptor's ImportNameTableRVA, when its attributes say it
+            // holds RVAs (every linker since VC 7 sets that bit).
+            let lookup_rva = if delay_loaded {
+                if read_u32(bytes, descriptor)? & 1 == 0 {
+                    0
+                } else {
+                    read_u32(bytes, descriptor + 16)?
+                }
+            } else {
+                match read_u32(bytes, descriptor)? {
+                    0 => read_u32(bytes, descriptor + 16)?,
+                    rva => rva,
+                }
+            };
+            let functions = if lookup_rva == 0 {
+                Vec::new()
+            } else {
+                file.functions(lookup_rva, wide)?
+            };
+            out.push(Import {
+                dll,
+                delay_loaded,
+                functions,
+            });
         }
     }
     Ok(out)
@@ -114,9 +145,39 @@ impl File<'_> {
             .ok_or("unterminated name")?;
         let name = &rest[..len];
         if !name.is_ascii() {
-            return Err(format!("non-ASCII DLL name at RVA {rva:#x}"));
+            return Err(format!("non-ASCII name at RVA {rva:#x}"));
         }
         Ok(String::from_utf8_lossy(name).into_owned())
+    }
+
+    /// The names in the lookup table at `rva`, up to its zero entry: each entry not by ordinal
+    /// points at a 2-byte hint and the name. `wide`: PE32+'s 8-byte entries, else 4-byte.
+    fn functions(&self, rva: u32, wide: bool) -> Result<Vec<String>, String> {
+        let table = self.offset(rva)?;
+        let width = if wide { 8 } else { 4 };
+        let mut out = Vec::new();
+        for i in 0..MAX_THUNKS {
+            let entry = table + i * width;
+            let low = read_u32(self.bytes, entry)?;
+            let high = if wide {
+                read_u32(self.bytes, entry + 4)?
+            } else {
+                0
+            };
+            if low == 0 && high == 0 {
+                return Ok(out);
+            }
+            let flags = if wide { high } else { low };
+            if flags & BY_ORDINAL != 0 {
+                continue;
+            }
+            let hint = low & !BY_ORDINAL;
+            let name = hint
+                .checked_add(2)
+                .ok_or_else(|| format!("hint/name RVA {hint:#x} overflows"))?;
+            out.push(self.c_string(name)?);
+        }
+        Err(format!("lookup table at RVA {rva:#x} has no terminator"))
     }
 }
 
@@ -151,8 +212,20 @@ pub(crate) mod tests {
     }
 
     /// A PE32+ image with one section (RVA 0x1000 ↔ file offset 0x200) holding an import
-    /// table for `imports` and a delay-import table for `delayed`.
+    /// table for `imports` and a delay-import table for `delayed`, with no lookup tables.
     pub(crate) fn synthetic_pe(imports: &[&str], delayed: &[&str]) -> Vec<u8> {
+        let none: &[&str] = &[];
+        let imports: Vec<_> = imports.iter().map(|d| (*d, none)).collect();
+        let delayed: Vec<_> = delayed.iter().map(|d| (*d, none)).collect();
+        synthetic_pe_with(&imports, &delayed)
+    }
+
+    /// The same, each DLL with the functions it imports (`#n`: one by ordinal n) in a lookup
+    /// table of 8-byte entries; a delay descriptor with functions is marked as holding RVAs.
+    pub(crate) fn synthetic_pe_with(
+        imports: &[(&str, &[&str])],
+        delayed: &[(&str, &[&str])],
+    ) -> Vec<u8> {
         let mut b = vec![0_u8; 0x1000];
         b[..2].copy_from_slice(b"MZ");
         put_u32(&mut b, 0x3c, 0x80);
@@ -172,16 +245,37 @@ pub(crate) mod tests {
 
         let rva = |off: usize| u32::try_from(off - 0x200 + 0x1000).unwrap();
         let mut name_at = 0x800;
+        let mut thunk_at = 0x500;
         let mut table = 0x200;
-        for (dir, list, len, field) in [(1, imports, 20, 12), (13, delayed, 32, 4)] {
+        // (directory, DLLs, descriptor length, name field, lookup-table field)
+        for (dir, list, len, field, lookup) in [(1, imports, 20, 12, 0), (13, delayed, 32, 4, 16)] {
             if list.is_empty() {
                 continue;
             }
             put_u32(&mut b, dirs + dir * 8, rva(table));
-            for name in list {
+            for (name, functions) in list {
                 b[name_at..name_at + name.len()].copy_from_slice(name.as_bytes());
                 put_u32(&mut b, table + field, rva(name_at));
                 name_at += name.len() + 1;
+                if !functions.is_empty() {
+                    if dir == 13 {
+                        put_u32(&mut b, table, 1); // its tables hold RVAs
+                    }
+                    put_u32(&mut b, table + lookup, rva(thunk_at));
+                    for f in *functions {
+                        if let Some(ordinal) = f.strip_prefix('#') {
+                            put_u32(&mut b, thunk_at, ordinal.parse().unwrap());
+                            put_u32(&mut b, thunk_at + 4, 0x8000_0000);
+                        } else {
+                            // A zero hint, then the name.
+                            put_u32(&mut b, thunk_at, rva(name_at));
+                            b[name_at + 2..name_at + 2 + f.len()].copy_from_slice(f.as_bytes());
+                            name_at += 2 + f.len() + 1;
+                        }
+                        thunk_at += 8;
+                    }
+                    thunk_at += 8; // zeroed terminator
+                }
                 table += len;
             }
             table += len; // zeroed terminator
@@ -216,6 +310,42 @@ pub(crate) mod tests {
     fn bad_rva_is_an_error_not_a_panic() {
         let mut pe = synthetic_pe(&["kernel32.dll"], &[]);
         put_u32(&mut pe, 0x200 + 12, 0xdead_beef);
+        assert!(imports(&pe).is_err());
+    }
+
+    #[test]
+    fn functions_imported_by_name_are_read_and_ordinals_skipped() {
+        let pe = synthetic_pe_with(
+            &[
+                (
+                    "KERNEL32.dll",
+                    &["GetModuleHandleW", "#5", "GetProcAddress"],
+                ),
+                ("ntdll.dll", &[]),
+            ],
+            &[("UIAutomationCore.dll", &["UiaRaiseNotificationEvent"])],
+        );
+        let found = imports(&pe).unwrap();
+        let functions: Vec<(&str, Vec<&str>)> = found
+            .iter()
+            .map(|i| {
+                let f = i.functions.iter().map(String::as_str).collect();
+                (i.dll.as_str(), f)
+            })
+            .collect();
+        let expected = [
+            ("KERNEL32.dll", vec!["GetModuleHandleW", "GetProcAddress"]),
+            ("ntdll.dll", vec![]),
+            ("UIAutomationCore.dll", vec!["UiaRaiseNotificationEvent"]),
+        ];
+        assert_eq!(functions, expected);
+    }
+
+    #[test]
+    fn a_bad_lookup_entry_is_an_error_not_a_panic() {
+        let mut pe = synthetic_pe_with(&[("KERNEL32.dll", &["GetProcAddress"])], &[]);
+        // The first lookup entry, at file offset 0x500.
+        put_u32(&mut pe, 0x500, 0x7fff_fff0);
         assert!(imports(&pe).is_err());
     }
 }

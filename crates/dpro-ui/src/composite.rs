@@ -26,6 +26,14 @@ mod card;
 mod error_panel;
 mod info_bar;
 mod settings_row;
+// Slice 6c.
+mod dialog;
+mod job_card;
+mod palette;
+mod toast;
+
+// Slice 6d: the drawer frame (A3.5 (6)).
+mod drawer;
 
 pub use badge::{BadgeSpec, BadgeTone};
 pub use batch_bar::{BATCH_CLEAR, BATCH_COUNT, BATCH_HIDDEN, BATCH_NOTE, BatchBar};
@@ -42,13 +50,27 @@ pub use info_bar::{
     INFO_ACTION, INFO_DISMISS, INFO_GLYPH, INFO_MESSAGE, INFO_TITLE, InfoBar, InfoTone,
 };
 pub use settings_row::{SETTINGS_DESCRIPTION, SETTINGS_HEADING, SETTINGS_LABEL, SettingsRow};
+// Slice 6c.
+pub use dialog::{DIALOG_BODY, DIALOG_FOOTER, DIALOG_TITLE, DialogFrame};
+pub use job_card::{JOB_BAR, JOB_CANCEL, JOB_ELAPSED, JOB_LINE, JOB_TITLE, JobCard};
+pub use palette::{PALETTE_FIELD, PALETTE_LIST, PALETTE_STATUS, PaletteRow, PaletteView};
+pub(crate) use toast::Expiry;
+pub use toast::{
+    TOAST_ACTIONS, TOAST_BAR, TOAST_DISMISS, TOAST_LINE, TOAST_TITLE, Toast, ToastTone,
+};
+
+pub use drawer::{
+    CALLOUT_TEXT, CALLOUT_TITLE, CODE_COPY, CODE_TEXT, Callout, DRAWER_BADGES, DRAWER_BODY,
+    DRAWER_CANCEL, DRAWER_CLOSE, DRAWER_FOOTER, DRAWER_HEADER, DRAWER_PRIMARY, DRAWER_SUMMARY,
+    DRAWER_TITLE, DrawerFooter, DrawerFrame, DrawerPrimary, SECTION_TITLE, drawer_is_sheet,
+};
 
 use crate::{
     Look, Radius, TextStyle, Tone,
     tokens::font::{BODY, CAPTION, SEMIBOLD},
 };
 
-/// How an action button stands out (A3.5 (11)). The dialog frame adds `Danger` in slice 6c.
+/// How an action button stands out (A3.5 (11), (13)).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Emphasis {
     /// The page's main action: the accent.
@@ -56,6 +78,9 @@ pub enum Emphasis {
     /// Any other.
     #[default]
     Normal,
+    /// An action that can't be taken back, in a dialog (slice 6c): the danger fill. The batch
+    /// bar shows it as [`Normal`](Self::Normal).
+    Danger,
 }
 
 /// A card's look: the surface in a hairline (`layer.card` under glass), rounded as a card.
@@ -88,16 +113,13 @@ const SECONDARY: Look = Look {
     ..Look::PLAIN
 };
 
-/// A button's look for `emphasis`, on the page. (The batch bar has its own: it's the inverse of
-/// the page.)
-#[allow(
-    dead_code,
-    reason = "slice 6c's dialog frame lays out buttons by emphasis on the page"
-)]
+/// A button's look for `emphasis`, on the page: the dialog frame's buttons. (The batch bar has
+/// its own: it's the inverse of the page.)
 const fn button_look(emphasis: Emphasis) -> Look {
     match emphasis {
         Emphasis::Primary => Look::PRIMARY,
         Emphasis::Normal => Look::SECONDARY,
+        Emphasis::Danger => Look::DANGER,
     }
 }
 

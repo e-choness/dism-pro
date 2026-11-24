@@ -225,9 +225,10 @@ impl Look {
     };
 
     /// The picked tab: a surface in a hairline (the canvas's raised segment), in primary text.
-    /// Give it semibold text.
+    /// Give it semibold text. High contrast shows the pick as a highlight ([`Tone::Segment`],
+    /// TD-0009 A4.5).
     pub const TAB_SELECTED: Self = Self {
-        fill: Some(Tone::Surface),
+        fill: Some(Tone::Segment),
         border: Some(Tone::Border),
         radius: Radius::Control,
         ink: Tone::Text,
@@ -383,7 +384,21 @@ pub(crate) enum Extra<'s, M> {
     /// A container whose children are [presentational](Element::presentation): its node's value
     /// ([`PRESENTATION`]).
     Presentation,
+
+    /// A two-line table cell's first line's length in its text (TD-0009 A3.5 (10), slice 6b): its
+    /// node's value ([`lines_value`](crate::table::lines_value)).
+    Lines(u32),
+    /// A [scope](Element::scope) and what Esc sends to it (A3.5 addition 10, slice 6d).
+    Scope {
+        on_escape: Option<fn() -> M>,
+    },
+    /// A [dialog](Element::dialog) (TD-0009 A3.5 addition 12): its node's value ([`DIALOG`]).
+    Dialog,
 }
+
+/// A [dialog](Element::dialog)'s value, as a presentation container's is: a container has no
+/// other.
+pub(crate) const DIALOG: f32 = 2.0;
 
 /// A check item's value ([`Element::menu_check`]): its node's `value`, as a column header's sort
 /// is its.
@@ -1037,6 +1052,22 @@ impl<M> Element<'_, M> {
     }
 }
 
+/// Slice 6c's dialogs (A3.5 addition 12).
+impl<'s, M> Element<'s, M> {
+    /// A dialog named `name`: a container a client sees as a window that is a dialog (UI
+    /// Automation's Window with `IsDialog`), whose adapter raises `WindowOpened` when it
+    /// appears. The command palette and the dialog frame are one; give it a
+    /// [description](Self::describe) for what a screen reader reads with its name.
+    #[must_use]
+    pub fn dialog(key: Key, name: &'s str) -> Self {
+        Self {
+            extra: Extra::Dialog,
+            ..Self::stack(key)
+        }
+        .name(name)
+    }
+}
+
 /// [`Element::a11y`]: A4.5's properties that few elements have, in one byte beside
 /// [`Element::a11y_text`]. A heading's level or a landmark, and what that text is; zero for
 /// none, so building a node tests this byte with its [`rare`] flags. The node keeps a copy in
@@ -1191,11 +1222,12 @@ pub enum Landmark<'s> {
     Region { kind: &'s str },
 }
 
-/// A menu's and a list's look: the surface in a hairline. Under glass the surface is a
-/// translucent layer, so the window's acrylic shows through.
+/// A menu's, a list's and a tooltip's look: the surface in a hairline, which high contrast draws
+/// `stroke.contrast` wide ([`Tone::TransientBorder`], TD-0009 A4.4). Under glass the surface is
+/// a translucent layer, so the window's acrylic shows through.
 const POPUP: Look = Look {
     fill: Some(Tone::Surface),
-    border: Some(Tone::Border),
+    border: Some(Tone::TransientBorder),
     radius: Radius::None,
     ink: Tone::Text,
 };
@@ -1378,6 +1410,11 @@ impl<M> Node<M> {
         self.role == Role::Container && self.value.to_bits() == PRESENTATION.to_bits()
     }
 
+    /// A [dialog](Element::dialog) (TD-0009 A3.5 addition 12).
+    pub(crate) fn is_dialog(&self) -> bool {
+        self.role == Role::Container && self.value.to_bits() == DIALOG.to_bits()
+    }
+
     /// A [glyph](Element::glyph)'s icon; `None` for every other node.
     pub(crate) fn glyph(&self) -> Option<Icon> {
         if !self.is_glyph() {
@@ -1391,6 +1428,18 @@ impl<M> Node<M> {
     /// A [glyph](Element::glyph): a label with a value, which is its icon's.
     pub(crate) fn is_glyph(&self) -> bool {
         self.role == Role::Label && self.value.to_bits() != 0
+    }
+
+    /// A two-line table cell's first line's length in its text, the rest its second (TD-0009
+    /// A3.5 (10), slice 6b); `None` for every other node.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a cell's value is a whole length below 2^24, or 0"
+    )]
+    pub(crate) fn lines(&self) -> Option<usize> {
+        (self.role == Role::Cell && self.value.to_bits() != 0)
+            .then(|| (self.value as usize).saturating_sub(1).min(self.text.len()))
     }
 
     /// The arrow keys can bring focus to it: an interactive node, or a disabled menu item, which

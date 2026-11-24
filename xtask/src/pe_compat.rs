@@ -2,6 +2,11 @@
 //! delay-loads) a DLL outside the `WinPE` allowlist in `xtask/data/winpe-dlls.txt`.
 //! The substitute for a `WinPE` VM (doc 04 §4). With `--winpe-files <dir>` it checks the allowlist
 //! itself against the DLLs base `WinPE` ships.
+//!
+//! Every exe it checks must also not import, by name, a function newer than the oldest Windows it
+//! runs on (`RUNTIME_ONLY`): those are looked up at run time, so the exe still starts where
+//! they're missing. `--exe <path>…` checks only that, on probes that aren't shipped (G1's shell
+//! example, TD-0009 A4.9).
 
 use std::{
     env, fs,
@@ -15,11 +20,23 @@ use crate::{
 
 const ALLOWLIST: &str = include_str!("../data/winpe-dlls.txt");
 
+/// Functions no checked exe may import, with where they're looked up instead.
+const RUNTIME_ONLY: &[(&str, &str)] = &[(
+    "UiaRaiseNotificationEvent",
+    "Windows 10 1709 and later: the vendored accesskit_windows looks it up with GetProcAddress \
+     (TD-0009 A4.5, its PATCHES.md item 7)",
+)];
+
 pub(crate) fn run(root: &Path, args: &[String]) -> Result<()> {
     if let [flag, dir] = args
         && flag == "--winpe-files"
     {
         return verify_allowlist(Path::new(dir), &parse_allowlist(ALLOWLIST));
+    }
+    if let [flag, exes @ ..] = args
+        && flag == "--exe"
+    {
+        return check_runtime_only(exes);
     }
     let targets = parse_targets(args)?;
     let target_dir =
@@ -37,18 +54,22 @@ pub(crate) fn run(root: &Path, args: &[String]) -> Result<()> {
             };
             let imports = pe::imports(&bytes).map_err(|e| format!("{label}: {e}"))?;
             let outside = rejected(&imports, &allowlist);
+            let early = imported_runtime_only(&imports);
             checked += 1;
-            if outside.is_empty() {
+            if outside.is_empty() && early.is_empty() {
                 println!("pe-compat: ok   {label} ({} DLLs)", imports.len());
                 continue;
             }
             failures += 1;
-            println!("pe-compat: FAIL {label} imports DLLs outside the WinPE allowlist:");
-            for dll in &outside {
-                println!("    {dll}");
+            if !outside.is_empty() {
+                println!("pe-compat: FAIL {label} imports DLLs outside the WinPE allowlist:");
+                for dll in &outside {
+                    println!("    {dll}");
+                }
+                let all: Vec<&str> = imports.iter().map(|i| i.dll.as_str()).collect();
+                println!("  all imports: {}", all.join(", "));
             }
-            let all: Vec<&str> = imports.iter().map(|i| i.dll.as_str()).collect();
-            println!("  all imports: {}", all.join(", "));
+            report_runtime_only(&label, &early);
         }
     }
     if checked == 0 {
@@ -59,6 +80,62 @@ pub(crate) fn run(root: &Path, args: &[String]) -> Result<()> {
         return Err(format!("{failures} executable(s) not WinPE-compatible; {hint}").into());
     }
     Ok(())
+}
+
+/// `pe-compat --exe <path>…`: each exe imports no [`RUNTIME_ONLY`] function.
+fn check_runtime_only(exes: &[String]) -> Result<()> {
+    if exes.is_empty() {
+        return Err("pe-compat: --exe needs at least one path".into());
+    }
+    let mut failures = 0_usize;
+    for exe in exes {
+        let bytes = fs::read(exe).map_err(|e| format!("pe-compat: {exe}: {e}"))?;
+        let imports = pe::imports(&bytes).map_err(|e| format!("{exe}: {e}"))?;
+        let early = imported_runtime_only(&imports);
+        if early.is_empty() {
+            let functions: usize = imports.iter().map(|i| i.functions.len()).sum();
+            println!(
+                "pe-compat: ok   {exe} ({} DLLs, {functions} functions by name; none run-time only)",
+                imports.len()
+            );
+            continue;
+        }
+        failures += 1;
+        report_runtime_only(exe, &early);
+    }
+    if failures > 0 {
+        return Err(format!("{failures} executable(s) import a run-time-only function").into());
+    }
+    Ok(())
+}
+
+/// The [`RUNTIME_ONLY`] functions among `imports`, as `function (dll): why`.
+fn imported_runtime_only(imports: &[pe::Import]) -> Vec<String> {
+    imports
+        .iter()
+        .flat_map(|i| {
+            i.functions.iter().filter_map(move |f| {
+                RUNTIME_ONLY
+                    .iter()
+                    .find(|(name, _)| name == f)
+                    .map(|(_, why)| format!("{f} ({}): {why}", i.dll))
+            })
+        })
+        .collect()
+}
+
+fn report_runtime_only(label: &str, early: &[String]) {
+    if early.is_empty() {
+        return;
+    }
+    println!("pe-compat: FAIL {label} imports functions it must look up at run time:");
+    for f in early {
+        println!("    {f}");
+    }
+    crate::annotate(
+        "run-time-only import",
+        &format!("{label}: {}", early.join("; ")),
+    );
 }
 
 fn parse_allowlist(text: &str) -> Vec<String> {
@@ -206,5 +283,35 @@ mod tests {
         let list = parse_allowlist("kernel32.dll");
         let expected = ["VCRUNTIME140.dll", "d3d11.dll (delay-load)"];
         assert_eq!(rejected(&imports, &list), expected);
+    }
+
+    #[test]
+    fn a_run_time_only_function_imported_by_name_is_reported() {
+        let looked_up = pe::tests::synthetic_pe_with(
+            &[("KERNEL32.dll", &["GetModuleHandleW", "GetProcAddress"])],
+            &[],
+        );
+        let imports = pe::imports(&looked_up).unwrap();
+        assert_eq!(imported_runtime_only(&imports), Vec::<String>::new());
+
+        for (imports, delayed) in [
+            (
+                vec![("UIAutomationCore.dll", ["UiaRaiseNotificationEvent"])],
+                vec![],
+            ),
+            (
+                vec![],
+                vec![("UIAutomationCore.dll", ["UiaRaiseNotificationEvent"])],
+            ),
+        ] {
+            let imports: Vec<(&str, &[&str])> =
+                imports.iter().map(|(d, f)| (*d, f.as_slice())).collect();
+            let delayed: Vec<(&str, &[&str])> =
+                delayed.iter().map(|(d, f)| (*d, f.as_slice())).collect();
+            let bytes = pe::tests::synthetic_pe_with(&imports, &delayed);
+            let found = imported_runtime_only(&pe::imports(&bytes).unwrap());
+            assert_eq!(found.len(), 1, "{found:?}");
+            assert!(found[0].starts_with("UiaRaiseNotificationEvent (UIAutomationCore.dll): "));
+        }
     }
 }

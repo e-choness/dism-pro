@@ -13,6 +13,8 @@ dpro-core.workspace = true
 [dev-dependencies]
 criterion.workspace = true
 gungraun.workspace = true
+# The announcer's rate rules over generated runs (TD-0009 A4.9, slice 7b).
+proptest.workspace = true
 
 # TD-0009 §7 U10 and U11: written before the implementation (measure-first).
 [[bench]]

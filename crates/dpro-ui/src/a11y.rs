@@ -89,7 +89,7 @@ use accesskit::{
 use dpro_app::table::{Order, Tri};
 
 use crate::{
-    table::{TABLE_CHECK, sort_of},
+    table::{TABLE_CHECK, lines_of, sort_of},
     tree::{
         A11yProps, A11yText, Group, LandmarkKind, Live, NIL, Node as UiNode, NodeId, Role, rare,
     },
@@ -111,6 +111,11 @@ pub(crate) struct A11y {
 }
 
 impl A11y {
+    /// Whether a client listens (TD-0009 A4.5: notices are dropped otherwise).
+    pub(crate) const fn active(&self) -> bool {
+        self.active
+    }
+
     pub(crate) fn new() -> Self {
         Self {
             active: false,
@@ -133,13 +138,21 @@ pub(crate) struct SideProps {
 }
 
 impl SideProps {
+    /// None, with room for a shortcut: side slots pass from node to node as they come and go
+    /// (the palette's results, slice 6c), so each starts with a buffer a shortcut fits in.
+    pub(crate) fn new() -> Self {
+        Self {
+            props: A11yProps::NONE,
+            text: String::with_capacity(crate::pool::capacity_for(0)),
+        }
+    }
+
     /// Copies an element's props and text, reusing the buffer. Returns whether anything changed.
     fn set(&mut self, props: A11yProps, text: &str) -> bool {
         let mut changed = self.props != props;
         self.props = props;
         if self.text != text {
-            self.text.clear();
-            self.text.push_str(text);
+            crate::pool::copy_text(&mut self.text, text);
             changed = true;
         }
         changed
@@ -169,7 +182,10 @@ impl<M> UiNode<M> {
     /// container's text, which names and describes a control beside it (a settings row's).
     pub(crate) fn presents_children(&self) -> bool {
         match self.role {
-            Role::CheckBox => true,
+            // A table cell's too: a badge cell's badge, a group header's label and count, which
+            // the cell's name says (TD-0009 A3.5 (10)). And a menu item's parts (a palette
+            // result's label, detail, badge and keys: slice 6c), which its text names.
+            Role::CheckBox | Role::Cell | Role::MenuItem => true,
             Role::Button => !self.text.is_empty(),
             Role::Container => self.is_presentation(),
             _ => false,
@@ -310,6 +326,7 @@ impl<M> Ui<M> {
     pub fn a11y_deactivate(&mut self) {
         self.forget_changes();
         self.a11y.active = false;
+        self.notices.clear();
     }
 
     /// The node behind an AccessKit id, if it's still live.
@@ -392,6 +409,10 @@ impl<M> Ui<M> {
         match n.role {
             // A table's header is a row group of its column headers.
             Role::Container if self.is_table_header(i) => AkRole::RowGroup,
+            // A group's header is a row of the grid (A3.10 item 5).
+            Role::Container if self.is_group_header(i) => AkRole::Row,
+            // UI Automation's Window with IsDialog (TD-0009 A3.5 addition 12).
+            Role::Container if n.is_dialog() => AkRole::Dialog,
             Role::Container => match n.group {
                 // A table's rows' viewport: the client leaves it out, so its rows are the grid's.
                 Some(Group::Rows) => AkRole::GenericContainer,
@@ -565,7 +586,8 @@ impl<M> Ui<M> {
         if matches!(
             n.role,
             Role::Grid | Role::Row | Role::Cell | Role::ColumnHeader
-        ) {
+        ) || role == AkRole::Row
+        {
             self.ak_table(i, &mut node);
         }
         if n.in_viewport {
@@ -595,10 +617,15 @@ impl<M> Ui<M> {
                 } else if n.enabled {
                     node.add_action(Action::SetValue);
                 }
+                // The list it drives: the palette's results (ControllerFor, A3.5 (3)).
+                if self.id(f.controls).is_some() {
+                    node.set_controls(vec![self.ak_id(f.controls)]);
+                }
             }
             // A label's text is its value, which clients read as its name.
             (AkRole::Label, false) => node.set_value(n.text.as_str()),
             (AkRole::Label, true) => node.set_hidden(),
+            (AkRole::Cell | AkRole::RowHeader, false) => cell_label(n, &mut node),
             // A dropdown's text is its value; its name is in its side slot.
             (AkRole::ComboBox, _) => {
                 node.set_value(n.text.as_str());
@@ -723,7 +750,8 @@ impl<M> Ui<M> {
                     return;
                 };
                 let st = &self.tables[t as usize];
-                node.set_row_count(st.rows as usize);
+                // Its group headers are rows of the grid, not of the set (A3.10 item 5).
+                node.set_row_count(self.grid_rows(t));
                 // AccessKit computes neither a set's size nor a member's place (A2.3).
                 node.set_size_of_set(st.rows as usize);
                 node.set_column_count(st.columns.len() + usize::from(st.checks));
@@ -733,14 +761,20 @@ impl<M> Ui<M> {
                 }
             }
             Role::Row => {
-                if let Some((_, at)) = self.row_place(i) {
-                    node.set_row_index(at as usize);
+                if let Some((t, at)) = self.row_place(i) {
+                    node.set_row_index(self.grid_row(t, at));
                     node.set_position_in_set(at as usize);
+                }
+            }
+            // A group's header: one cell across the grid.
+            Role::Container => {
+                if let Some((row, _)) = self.group_row(i) {
+                    node.set_row_index(row);
                 }
             }
             Role::Cell => {
                 if let Some((t, at)) = self.row_place(n.parent) {
-                    node.set_row_index(at as usize);
+                    node.set_row_index(self.grid_row(t, at));
                     node.set_column_index(self.sibling_index(i));
                     if n.key == TABLE_CHECK {
                         let label = self.tables[t as usize].check_label.as_str();
@@ -752,6 +786,11 @@ impl<M> Ui<M> {
                             node.add_action(Action::Click);
                         }
                     }
+                } else if let Some((row, span)) = self.group_row(n.parent) {
+                    // A group header's one cell, across the grid.
+                    node.set_row_index(row);
+                    node.set_column_index(0);
+                    node.set_column_span(span);
                 }
             }
             Role::ColumnHeader => {
@@ -820,6 +859,21 @@ impl<M> Ui<M> {
 /// a header among them isn't one.
 fn is_option<M>(n: &UiNode<M>) -> bool {
     n.role == Role::MenuItem && n.selected.is_some()
+}
+
+/// A table cell's name: its text, or a two-line cell's first line, its second line its
+/// description (TD-0009 A3.5 (10)).
+fn cell_label<M>(n: &UiNode<M>, node: &mut Node) {
+    match n.lines() {
+        Some(split) => {
+            let (first, second) = lines_of(&n.text, split);
+            node.set_label(first);
+            if !second.is_empty() {
+                node.set_description(second);
+            }
+        }
+        None => node.set_label(n.text.as_str()),
+    }
 }
 
 /// A check state as a client reads it.

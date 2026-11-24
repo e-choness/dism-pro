@@ -98,7 +98,7 @@ impl<M> Cx<'_, M> {
                     }),
             );
         }
-        let narrow = self.ui.viewport().w < settings::NARROW;
+        let narrow = self.viewport().w < settings::NARROW;
         let (line, text) = if narrow {
             (NARROW_LINE, Style::default())
         } else {

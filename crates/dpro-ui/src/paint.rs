@@ -49,11 +49,11 @@ use crate::{
     canvas::Canvas,
     geom::{Rect, RectPx, Size},
     style::Justify,
-    table::{TABLE_CHECK, sort_of},
-    text::{GlyphSink, Icon, TextSystem},
+    table::{TABLE_CHECK, lines_of, second_line, sort_of},
+    text::{GlyphSink, Icon, TextMetrics, TextStyle, TextSystem},
     theme::{
         Color, Scheme, Theme, Tone,
-        tokens::{radius, stroke},
+        tokens::{radius, stroke, table as tok},
     },
     tree::{NIL, Node, Role},
     ui::{ROOT, Ui},
@@ -73,6 +73,22 @@ impl<M> Ui<M> {
     /// Damages the whole window: after a theme switch, or for a canvas whose pixels were lost.
     pub fn repaint_all(&mut self) {
         self.damage_all();
+    }
+
+    /// Shows or hides the scrim (TD-0009 A3.5 addition 13): [`Tone::Smoke`] over the whole window
+    /// while the palette or a dialog is open over it. Paint only: nothing is laid out or hit
+    /// tested differently. A change repaints the window once; the same value changes nothing.
+    pub fn set_scrim(&mut self, on: bool) {
+        if self.scrim != on {
+            self.scrim = on;
+            self.damage_all();
+        }
+    }
+
+    /// Whether the scrim shows.
+    #[must_use]
+    pub fn scrim(&self) -> bool {
+        self.scrim
     }
 
     /// Repaints the damaged regions in `theme`'s colors. The damage stays for the presenter, which
@@ -106,11 +122,35 @@ impl<M> Ui<M> {
         };
         let mut c = self.nodes[ROOT as usize].first;
         while c != NIL {
-            self.paint_node(c, region, Tone::App, &mut p);
+            self.paint_child(c, region, Tone::App, &mut p);
             c = self.nodes[c as usize].next;
+        }
+        if self.scrim {
+            // Over everything (A3.5 addition 13). High contrast's smoke is clear: no scrim.
+            p.canvas.set_clip(region);
+            p.canvas.fill(region, theme.color(Tone::Smoke));
         }
         let all = p.canvas.bounds();
         p.canvas.set_clip(all);
+    }
+
+    /// Paints child `c` and its subtree within `clip`: moved by its slide while it slides in
+    /// (`slide.rs`, TD-0009 A3.5 addition 11, slice 6d).
+    fn paint_child(&self, c: u32, clip: RectPx, under: Tone, p: &mut Painter<'_, '_>) {
+        let dx = if self.slides.is_empty() {
+            0
+        } else {
+            self.slide_offset(c)
+        };
+        if dx == 0 {
+            self.paint_node(c, clip, under, p);
+        } else {
+            let origin = p.canvas.origin();
+            p.canvas
+                .set_origin([origin[0].saturating_add(dx), origin[1]]);
+            self.paint_node(c, clip, under, p);
+            p.canvas.set_origin(origin);
+        }
     }
 
     /// Paints node `i` and its subtree within `clip`, over the fill `under` (its nearest
@@ -135,6 +175,8 @@ impl<M> Ui<M> {
         if let Some(fill) = fill {
             p.canvas.rrect(rect, corner, p.theme.color(fill));
         }
+        // The fill around the node, which its focus ring must stand out from (A4.5).
+        let around = under;
         let under = fill.unwrap_or(under);
         let interactive = node.enabled && node.role.interactive();
         // A column header that doesn't sort takes focus only: no state layer.
@@ -152,8 +194,9 @@ impl<M> Ui<M> {
             p.state_layer(node, rect, corner, lit, under);
         }
         if let Some(border) = node.look.border {
+            let width = p.border_px(border);
             p.canvas
-                .ring(rect, corner, 1, p.theme.stroke(border, node.enabled));
+                .ring(rect, corner, width, p.theme.stroke(border, node.enabled));
         }
         if (interactive && button) || lit {
             p.outline(node, rect, corner, under, lit);
@@ -162,7 +205,7 @@ impl<M> Ui<M> {
             if node.enabled {
                 node.look.ink
             } else {
-                Tone::TextSecondary
+                Tone::TextDisabled
             },
             under,
         );
@@ -205,7 +248,7 @@ impl<M> Ui<M> {
             }
             Role::ComboBox => p.combo(node, ink),
             Role::Separator => p.separator(rect),
-            Role::Cell => p.cell(node, ink),
+            Role::Cell => p.cell(node, ink, under),
             Role::ColumnHeader => p.column_header(node, ink),
             Role::Container if self.is_table_header(i) => p.rule_below(rect),
             Role::Container
@@ -221,26 +264,46 @@ impl<M> Ui<M> {
         // A menu item's focus is its light, not a ring.
         if self.focus == i && self.focus_visible && node.role != Role::MenuItem {
             p.canvas.set_clip(visible);
-            p.focus_ring(rect, corner);
+            p.focus_ring(self.ring_rect(i, rect, p), corner, around);
+        }
+    }
+
+    /// Where node `i`'s focus ring goes: round its box `rect`, but for a table's row, which never
+    /// scrolls across (A2.4), round the part its viewports show where it's wider than its table,
+    /// so the ring stays whole (A4.5's rule 5). Not the part a repaint's region shows: the ring
+    /// stays where it is whatever is repainted.
+    fn ring_rect(&self, i: u32, rect: RectPx, p: &Painter<'_, '_>) -> RectPx {
+        if self.nodes[i as usize].role != Role::Row {
+            return rect;
+        }
+        let (shown, at) = (self.window_clip(i).snap(p.scale), p.canvas.placed(rect));
+        RectPx {
+            x0: rect.x0 + (shown.x0 - at.x0).max(0),
+            x1: rect.x1 - (at.x1 - shown.x1).max(0),
+            ..rect
         }
     }
 
     /// Node `i`'s children within `visible`, over the fill `under`. A viewport's show moved by
-    /// its offset, and its bars go over them, inside its hairline if it has one.
+    /// its offset, and its bars go over them, inside its border if it has one.
     fn paint_children(&self, i: u32, visible: RectPx, under: Tone, p: &mut Painter<'_, '_>) {
         let node = &self.nodes[i as usize];
         let origin = p.canvas.origin();
         let mut visible = visible;
         if node.scroll != NIL {
-            if node.look.border.is_some() {
-                // Content scrolls under the hairline (a pixel wide), not over it, as CSS clips
-                // to the padding box. No viewport is rounded, so the corners need no clip.
-                let r = p.canvas.placed(node.rect.snap(p.scale));
+            if let Some(border) = node.look.border {
+                // Content and bars scroll under the border, not over it, as CSS clips to the
+                // padding box: a hairline is a pixel, a transient surface's border in high
+                // contrast more (A4.4). No viewport is rounded, so the corners need no clip.
+                let (r, w) = (
+                    p.canvas.placed(node.rect.snap(p.scale)),
+                    p.border_px(border),
+                );
                 visible = visible.intersect(RectPx {
-                    x0: r.x0 + 1,
-                    y0: r.y0 + 1,
-                    x1: r.x1 - 1,
-                    y1: r.y1 - 1,
+                    x0: r.x0 + w,
+                    y0: r.y0 + w,
+                    x1: r.x1 - w,
+                    y1: r.y1 - w,
                 });
             }
             // A table's rows are laid out from their base.
@@ -252,7 +315,7 @@ impl<M> Ui<M> {
         }
         let mut child = node.first;
         while child != NIL {
-            self.paint_node(child, visible, under, p);
+            self.paint_child(child, visible, under, p);
             child = self.nodes[child as usize].next;
         }
         if node.scroll != NIL {
@@ -301,7 +364,14 @@ impl<M> Ui<M> {
         }
         if node.text.is_empty() {
             if !field.placeholder.is_empty() {
-                let secondary = p.theme.ink(Tone::TextSecondary, under);
+                // Secondary text, which high contrast shows as the window's text: its GrayText
+                // is disabled text's alone (A4.5).
+                let tone = if node.enabled {
+                    Tone::TextSecondary
+                } else {
+                    Tone::TextDisabled
+                };
+                let secondary = p.theme.ink(tone, under);
                 p.line(&field.placeholder, node, line, secondary);
             }
         } else {
@@ -340,25 +410,33 @@ struct Painter<'p, 'c> {
 }
 
 impl Painter<'_, '_> {
-    /// Windows 11's focus visual inside `rect`: a ring in text color, [`stroke::FOCUS`] wide, then
-    /// one pixel of surface color inside it.
-    fn focus_ring(&mut self, rect: RectPx, corner: f32) {
+    /// Windows 11's focus visual inside `rect`, on the fill `around` the node: a ring
+    /// [`stroke::FOCUS`] wide, then one pixel inside it parting it from the node, in the colors
+    /// that stand out from that fill ([`Theme::focus_on`]).
+    fn focus_ring(&mut self, rect: RectPx, corner: f32, around: Tone) {
         // Whole pixels, at least one.
         let wide = (stroke::FOCUS * self.scale).round().max(1.0);
         let width = px_width(wide);
-        self.canvas.ring(rect, corner, width, self.theme.focus());
+        let (ring, inside) = self.theme.focus_on(around);
+        self.canvas.ring(rect, corner, width, ring);
         let inner = RectPx {
             x0: rect.x0 + width,
             y0: rect.y0 + width,
             x1: rect.x1 - width,
             y1: rect.y1 - width,
         };
-        self.canvas.ring(
-            inner,
-            (corner - wide).max(0.0),
-            1,
-            self.theme.color(Tone::Surface),
-        );
+        self.canvas.ring(inner, (corner - wide).max(0.0), 1, inside);
+    }
+
+    /// A border of `tone` in whole physical pixels: one for a hairline at any scale, and
+    /// `stroke.contrast` at the scale for a transient surface's in high contrast (A4.4).
+    fn border_px(&self, tone: Tone) -> i32 {
+        let w = self.theme.border_width(tone);
+        if w > stroke::HAIRLINE {
+            px_width((w * self.scale).round())
+        } else {
+            1
+        }
     }
 
     /// A scroll bar over its viewport, on the fill `under`: the track while `expanded`, then the
@@ -553,7 +631,7 @@ impl Painter<'_, '_> {
         let on = n.selected == Some(true);
         let fill = match (on, n.enabled) {
             (true, true) => Tone::Accent,
-            (true, false) => Tone::TextSecondary,
+            (true, false) => Tone::TextDisabled,
             (false, _) => Tone::Surface,
         };
         self.canvas.rrect(r, round, self.theme.color(fill));
@@ -616,7 +694,7 @@ impl Painter<'_, '_> {
         let on = n.check != Tri::Off;
         let fill = match (on, n.enabled) {
             (true, true) => Tone::Accent,
-            (true, false) => Tone::TextSecondary,
+            (true, false) => Tone::TextDisabled,
             (false, _) => Tone::Surface,
         };
         self.canvas.rrect(r, corner, self.theme.color(fill));
@@ -673,30 +751,67 @@ impl Painter<'_, '_> {
     /// `justify` says; trimmed if it doesn't fit.
     fn aligned_text<M>(&mut self, n: &Node<M>, content: Rect, ink: Color) {
         let m = self.text.measure(&n.text, &n.text_style, content.w);
+        let y = content.y + ((content.h - m.height) / 2.0).max(0.0);
+        self.text_line(&n.text, n.text_style, n.style.justify, content, y, m, ink);
+    }
+
+    /// `text`, measured `m`, at `y` in `ink`, placed across `content` as `justify` says.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "a line's text, face, place and ink"
+    )]
+    fn text_line(
+        &mut self,
+        text: &str,
+        style: TextStyle,
+        justify: Justify,
+        content: Rect,
+        y: f32,
+        m: TextMetrics,
+        ink: Color,
+    ) {
         let free = (content.w - m.width).max(0.0);
         let x = content.x
-            + match n.style.justify {
+            + match justify {
                 Justify::Center => free / 2.0,
                 Justify::End => free,
                 Justify::Start | Justify::SpaceBetween => 0.0,
             };
-        let y = content.y + ((content.h - m.height) / 2.0).max(0.0);
         let rect = Rect::new(x, y, content.right() - x, m.height);
         let mut sink = Ink {
             canvas: &mut *self.canvas,
             color: ink,
         };
-        self.text
-            .draw(&n.text, &n.text_style, rect, self.scale, &mut sink);
+        self.text.draw(text, &style, rect, self.scale, &mut sink);
     }
 
-    /// A table cell: its text, or a check cell's box (none in a row that can't be checked).
-    fn cell<M>(&mut self, n: &Node<M>, ink: Color) {
+    /// A table cell: its text, or a check cell's box (none in a row that can't be checked). A
+    /// two-line cell's second line is under its first in caption secondary text, the two centered
+    /// together; a badge cell's badge, its child, says its word (TD-0009 A3.5 (10)).
+    fn cell<M>(&mut self, n: &Node<M>, ink: Color, under: Tone) {
         if n.key == TABLE_CHECK {
             if n.enabled {
                 self.centered_box(n);
             }
-        } else if !n.text.is_empty() {
+            return;
+        }
+        if n.first != NIL || n.text.is_empty() {
+            return;
+        }
+        if let Some(split) = n.lines() {
+            let content = n.rect.inset(n.style.padding);
+            let (first, second) = lines_of(&n.text, split);
+            let small = second_line(n.text_style);
+            let m1 = self.text.measure(first, &n.text_style, content.w);
+            let m2 = self.text.measure(second, &small, content.w);
+            let block = m1.height + tok::LINE_GAP + m2.height;
+            let y = content.y + ((content.h - block) / 2.0).max(0.0);
+            let justify = n.style.justify;
+            self.text_line(first, n.text_style, justify, content, y, m1, ink);
+            let dim = self.theme.ink(Tone::TextSecondary, under);
+            let y = y + m1.height + tok::LINE_GAP;
+            self.text_line(second, small, justify, content, y, m2, dim);
+        } else {
             self.aligned_text(n, n.rect.inset(n.style.padding), ink);
         }
     }

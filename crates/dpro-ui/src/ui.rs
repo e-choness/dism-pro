@@ -12,7 +12,8 @@ use crate::{
     field::{Caret, ClipboardRequest, Field},
     geom::{Point, Rect, RectPx, Size},
     layout::Shown,
-    pool::TextPool,
+    notice::Notices,
+    pool::{TextPool, capacity_for},
     scroll::{Drag, Scroll},
     table::{DRAG_DISTANCE, Divider, Press, TableState},
     tooltip::Tip,
@@ -150,7 +151,26 @@ pub struct Ui<M> {
     pub(crate) drag_distance: f32,
     /// Messages layout made (a column's fit), for the host to take ([`Ui::take_messages`]).
     pub(crate) queued: Vec<M>,
+    // Slice 6d: the slides running (`slide.rs`, A3.5 addition 11), the scopes open, and what a
+    // scope that closed gives focus back to (`scope.rs`, addition 10).
+    pub(crate) slides: Vec<crate::slide::Slide>,
+    pub(crate) scopes: Vec<crate::scope::ScopeSlot<M>>,
+    pub(crate) scope_closed: crate::scope::Closed,
+    // Slice 6c (TD-0009 A3.5 (7), (13), addition 13).
+    /// The scrim shows over the window: the palette or a dialog is open over it.
+    pub(crate) scrim: bool,
+    /// The toast shown here, its Dismiss and its hide (A3.5 (7)).
+    pub(crate) expiry: crate::composite::Expiry<M>,
+    /// The node [`focus_first`](Self::focus_first) lands on: a dialog frame's initial button
+    /// (A3.5 (13)).
+    pub(crate) initial: Option<NodeId>,
+    /// Notices for the platform to raise (TD-0009 A4.5, `notice.rs`).
+    pub(crate) notices: Notices,
 }
+
+/// Windows' message duration when the window hasn't said (`SPI_GETMESSAGEDURATION`'s default): 5
+/// seconds.
+pub const MESSAGE_MS: u32 = 5_000;
 
 /// A node's tooltip, a dropdown's accessible name and step, and a field's step: in a side table,
 /// so the nodes without them (nearly all) carry one index.
@@ -260,6 +280,13 @@ impl<M> Ui<M> {
             divider: None,
             drag_distance: DRAG_DISTANCE,
             queued: Vec::new(),
+            slides: Vec::new(),
+            scopes: Vec::new(),
+            scope_closed: crate::scope::Closed::default(),
+            scrim: false,
+            expiry: crate::composite::Expiry::new(),
+            initial: None,
+            notices: Notices::default(),
         };
         ui.damage_all();
         ui
@@ -439,10 +466,21 @@ impl<M> Ui<M> {
         })
     }
 
-    /// A new detached node, from the free list when possible, with a spare text buffer that holds
-    /// `text_len` bytes when there is one.
+    /// A new detached node, from the free list when possible, with a text buffer that holds
+    /// `text_len` bytes: a spare one when there is one.
     pub(crate) fn alloc(&mut self, key: Key, role: Role, text_len: usize) -> u32 {
-        let text = self.texts.take(text_len);
+        // A field opened empty takes a buffer too: its first keystroke then allocates nothing
+        // (U8; slice 6c's palette opens empty).
+        let mut text = self.texts.take(if role == Role::Field {
+            text_len.max(1)
+        } else {
+            text_len
+        });
+        if text.capacity() < text_len {
+            // None spare: the buffer its text goes into, so that copy (`update`) doesn't look in
+            // the pool again.
+            text.reserve_exact(capacity_for(text_len));
+        }
         let i = if let Some(i) = self.free.pop() {
             self.nodes[i as usize].reuse(key, role, text);
             i
@@ -516,9 +554,14 @@ impl<M> Ui<M> {
         // The stops it takes with it may have been its viewport's only ones.
         self.stop_changed(child);
         let parent = self.nodes[child as usize].parent;
+        let focus = self.focus;
         self.unlink(child);
         self.free_subtree(child);
         self.forget_freed();
+        // A scope that went with it gives focus back, if focus went too (A3.5 addition 10).
+        if self.scope_closed.freed {
+            self.scope_removed(parent, focus);
+        }
         self.mark_dirty(parent);
         self.a11y_touch(parent);
     }
@@ -545,6 +588,7 @@ impl<M> Ui<M> {
             self.anchor_node = NIL;
         }
         self.tip_forget_freed();
+        self.forget_freed_slides();
     }
 
     fn free_subtree(&mut self, i: u32) {
@@ -588,6 +632,9 @@ impl<M> Ui<M> {
             if scroll != NIL {
                 self.release_scroll(scroll);
             }
+        }
+        if !self.scopes.is_empty() {
+            self.forget_scope(i);
         }
         let n = &mut self.nodes[i as usize];
         n.live = false;

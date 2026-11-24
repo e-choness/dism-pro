@@ -79,3 +79,68 @@ ui-batch-hidden = { $hidden ->
 }
 ui-batch-clear = Clear selection
 ui-batch-region = Selection actions
+
+## The Preview drawer's frame (A3.5 (6)), slice 6d.
+
+ui-drawer-close = Close
+ui-drawer-cancel = Cancel
+ui-code-copy = Copy command
+
+## The command palette (A3.5 (3)).
+
+ui-palette-name = Command palette
+ui-palette-field = Search commands
+ui-palette-placeholder = Type a command, page or setting
+ui-palette-results = Commands
+# $query (String) - what was typed
+ui-palette-none = No commands match “{ $query }”.
+ui-palette-hint-move = ↑↓ to move
+ui-palette-hint-open = Enter to open
+ui-palette-hint-close = Esc to close
+
+## A job's toast (A3.5 (7)).
+
+ui-toast-region = Job status
+# $job (String) - the job's name
+# $percent (Number) - how far it has come
+ui-toast-progress = { $job }: { $percent } %
+# $job (String) - the job's name
+ui-toast-done = { $job } finished.
+# $job (String) - the job's name
+ui-toast-done-restart = { $job } finished. Restart Windows to complete it.
+# $job (String) - the job's name
+# $applied (Number) - changes applied
+# $total (Number) - changes planned
+ui-toast-failed = { $job } failed. { $applied } of { $total } changes were applied.
+# $job (String) - the job's name
+# $applied (Number) - changes applied
+# $total (Number) - changes planned
+ui-toast-cancelled = { $job } was cancelled after { $applied } of { $total } changes.
+# $job (String) - the job's name
+# $reason (String) - why it stopped
+ui-toast-aborted = { $job } stopped: { $reason }
+ui-toast-view = View
+ui-toast-undo = Undo…
+ui-toast-dismiss = Dismiss
+
+## Notices (TD-0009 A4.4, slice 7b): spoken by a screen reader without a focus move, as UI
+## Automation notifications.
+
+# $job (String) - the job's title
+# $percent (Number) - 10 to 90, in steps of 10
+a11y-job-progress = { $job }: { $percent } percent
+a11y-copied = Copied.
+# $count (Number) - 1 or more; no results is the palette's visible status line
+a11y-results = { $count ->
+    [one] One result
+   *[other] { $count } results
+}
+# $shown (Number) - rows the filter shows
+# $total (Number) - rows in the table
+a11y-filter-count = { $shown } of { $total } shown
+# $count (Number) - items listed
+a11y-listed = { $count ->
+    [one] One item listed
+   *[other] { $count } items listed
+}
+a11y-hold-released = Released early. Nothing was changed.

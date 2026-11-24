@@ -355,6 +355,8 @@ mod simple;
 mod landmarks;
 mod menu;
 mod menu_events;
+// dpro: notifications (PATCHES.md, 7).
+mod notify;
 mod providers;
 mod realize;
 mod table;

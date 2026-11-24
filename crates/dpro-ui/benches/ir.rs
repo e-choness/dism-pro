@@ -12,8 +12,8 @@
 //!   first frame at 100 and at 225 %. Popups (TD-0009 A1.7): Shift+F10 on a row (it's picked and
 //!   its menu built and laid out), Down in the open menu, and a pending tooltip coming due.
 //! - `paint`: U3 without presenting, frames painted at 1000 × 700, scale 1, light theme; and the
-//!   whole window repainted, as after a theme switch, at scales 1 and 1.5 and with the text at
-//!   225 %. With a keystroke and a caret blink in the field, a hold's frame, a progress report and
+//!   whole window repainted, as after a theme switch, at scales 1 and 1.5, with the text at
+//!   225 %, and in high contrast (slice 7d's audit). With a keystroke and a caret blink in the field, a hold's frame, a progress report and
 //!   Shift+F10 on a row, the menu's window included.
 //! - `popup`: a 6-item menu's `Ui` built, laid out and painted whole, as its window first shows.
 //! - `a11y`: U12 with a client listening, as in `a11y.rs`: the whole tree (the shell's, and an open
@@ -30,10 +30,32 @@
 //!   the summary cards wrap two to a line (`cards_wrap_resize`). `a11y` adds the page's whole
 //!   tree (`a11y_tree.composites`). A3.7 names them `composite::batch_count` and so on; the bench
 //!   ids after the dot say which case.
+//! - `grouped` (TD-0009 A3.7 U18, slice 6b): the fling's table with its rows two lines each, in
+//!   1,000 groups of 100 under their header rows. The same 90 frames as `table::fling.frames`,
+//!   painted (`fling.frames`); and, frames ending at layout and damage, Down on a group's last
+//!   row, which passes its next group's header and scrolls (`event.row_down`), and a far row
+//!   realized for a client by its grid row, headers counted, with its update made
+//!   (`event.realize`).
+//! - `composite_drawer` (TD-0009 A3.7's U16, slice 6d): the drawer page of `fixtures/drawer.rs`,
+//!   warmed by its session. "Review changes" opening the drawer as a pane (`drawer_open`), and
+//!   the 6th frame of its slide (`drawer_frame`), each at layout and damage and painted.
+//! - Slice 6c (A3.7 U14, U15, U17): a character typed in the palette, painted
+//!   (`composite::palette_keystroke`), Down in it (`palette_arrow`), and a job's progress with
+//!   its toast and card both showing it (`toast_progress`); the palette's and the dialog's
+//!   windows' first show (`popup::open.palette`, `.dialog`); the scrim turned on over the shell,
+//!   painted (`paint::painted_event.palette_scrim`); and the palette's and the toast's windows'
+//!   updates (`a11y::a11y_window_update.palette_arrow`, `.toast_line`).
+//! - `notice` (TD-0009 A4.7, slice 7b), in a group of its own: a progress report that queues a
+//!   notice, with a client listening (`notice_event.progress_step`, A4.7's `interact::event.notice`),
+//!   and the update after a job toast's live line turns to an assertive failure
+//!   (`live_toast.failed`, A4.7's `a11y_update.live_toast`).
 //!
 //! C1: `docker compose run --rm bench-gate`.
 
 #![allow(missing_docs)]
+
+#[path = "fixtures/drawer.rs"]
+mod drawer_page;
 
 #[path = "fixtures/composites.rs"]
 mod composites;
@@ -48,6 +70,7 @@ use dpro_ui::{
     Canvas, ColumnId, FakeText, Input, KeyCode, Mods, Motion, Point, Size, TableEvent, Theme, Ui,
     accesskit::TreeUpdate, tokens,
 };
+use dpro_ui::{Cx, Element, Key, Live};
 use fling_table::Fling;
 use gungraun::{
     Callgrind, LibraryBenchmarkConfig, library_benchmark, library_benchmark_group, main,
@@ -216,6 +239,30 @@ fn warm_painted_225() -> (Run, Vec<Step>) {
     warmed(Run::painted_text_scaled(Shell::new(), Theme::LIGHT, 2.25))
 }
 
+/// A dark contrast theme's system colors, as Night sky's are: all high contrast paints with.
+const CONTRAST: dpro_ui::SysColors = {
+    use dpro_ui::Color;
+    dpro_ui::SysColors {
+        window: Color::hex(0x00_0000),
+        window_text: Color::hex(0xFF_FFFF),
+        highlight: Color::hex(0x8E_E3F0),
+        highlight_text: Color::hex(0x26_3B50),
+        hot_light: Color::hex(0x75_E9FC),
+        gray_text: Color::hex(0xA6_A6A6),
+        btn_face: Color::hex(0x00_0000),
+        btn_text: Color::hex(0xFF_FFFF),
+    }
+};
+
+/// Warm and painted in high contrast at scale 1 (TD-0009 A4.5's audit, slice 7d).
+fn warm_painted_contrast() -> (Run, Vec<Step>) {
+    warmed(Run::painted(
+        Shell::new(),
+        1.0,
+        Theme::high_contrast(CONTRAST),
+    ))
+}
+
 #[library_benchmark]
 #[bench::scripted(setup = warm)]
 fn session((mut run, steps): (Run, Vec<Step>)) -> (Run, Vec<Step>) {
@@ -290,6 +337,7 @@ fn painted_session((mut run, steps): (Run, Vec<Step>)) -> (Run, Vec<Step>) {
 #[bench::context_menu(args = (Step::Input(Input::ContextMenu(None))), setup = row_painted_with)]
 #[bench::wheel_notch(args = (-120), setup = table_painted_with)]
 #[bench::column_drag(args = (30.0), setup = divider_painted_with)]
+#[bench::palette_scrim(args = (Step::Scrim(true)), setup = warm_painted_with)]
 fn painted_event((mut run, step): (Run, Step)) -> Run {
     run.step(black_box(step));
     run
@@ -305,6 +353,7 @@ fn painted_first_frame(shell: Shell) -> Run {
 #[bench::light_100(setup = warm_painted)]
 #[bench::dark_150(setup = warm_painted_150)]
 #[bench::text_225(setup = warm_painted_225)]
+#[bench::contrast_100(setup = warm_painted_contrast)]
 fn repaint_all((mut run, steps): (Run, Vec<Step>)) -> (Run, Vec<Step>) {
     run.repaint_all();
     (run, steps)
@@ -327,26 +376,91 @@ fn menu_shell() -> Shell {
     shell
 }
 
-// A popup window's first show (U3 without presenting): its `Ui` made, the menu built, its first
-// item focused (opened from the keyboard), sized to its content, laid out, and painted whole.
-#[library_benchmark]
-#[bench::menu(setup = menu_shell)]
-fn open(shell: Shell) -> (Ui<Msg>, Vec<u32>, Shell) {
+/// What a popup window shows as it first opens: row 4's menu, or slice 6c's palette or dialog
+/// over the composites page (A3.7).
+enum Opening {
+    Menu(Shell),
+    Palette(Box<composites::Model>),
+    Dialog(Box<composites::Model>),
+}
+
+/// The popup's `Ui`, its pixels and what it showed, handed back so dropping them isn't counted.
+#[allow(dead_code, reason = "held only so dropping them isn't counted")]
+enum Opened {
+    Menu(Ui<Msg>, Vec<u32>, Shell),
+    Overlay(Ui<composites::Msg>, Vec<u32>, Box<composites::Model>),
+}
+
+fn menu_opening() -> Opening {
+    Opening::Menu(menu_shell())
+}
+
+/// The composites page's model with the palette open.
+fn palette_opening() -> Opening {
+    let mut m = composites::Model::new();
+    m.update(composites::Msg::PaletteOpen);
+    Opening::Palette(Box::new(m))
+}
+
+/// The composites page's model with the dialog open.
+fn dialog_opening() -> Opening {
+    let mut m = composites::Model::new();
+    m.update(composites::Msg::DialogOpen);
+    Opening::Dialog(Box::new(m))
+}
+
+/// A popup's `Ui`, empty.
+fn popup_ui<M>() -> Ui<M> {
     let motion = Motion {
         hover_ms: tokens::motion::HOVER_MS,
     };
-    let mut ui = Ui::new(Size { w: 0.0, h: 0.0 }, 1.0, motion);
-    ui.build(|cx| popup_view(black_box(&shell), cx));
+    Ui::new(Size { w: 0.0, h: 0.0 }, 1.0, motion)
+}
+
+/// What the view built, its first Tab stop focused (opened from the keyboard), sized to its
+/// content: `w` wide if given (the palette's and the dialog's width), else its own width in at
+/// most the window's; laid out and painted whole.
+fn first_show<M>(ui: &mut Ui<M>, w: Option<f32>) -> Vec<u32> {
     ui.focus_first(true);
-    let size = ui.natural_size(&mut FakeText, START.w);
-    ui.set_viewport(size);
+    let size = ui.natural_size(&mut FakeText, w.unwrap_or(START.w));
+    ui.set_viewport(w.map_or(size, |w| Size { w, h: size.h }));
     ui.layout(&mut FakeText);
     let (w, h) = ui.pixel_size();
     let mut pixels = vec![0; usize::try_from(u64::from(w) * u64::from(h)).unwrap_or(0)];
     if let Some(mut canvas) = Canvas::new(&mut pixels, w, h) {
         ui.paint(&mut canvas, &mut FakeText, &Theme::LIGHT);
     }
-    (ui, pixels, shell)
+    pixels
+}
+
+// A popup window's first show (U3 without presenting; U15 for the palette): its `Ui` made, the
+// view built, its first Tab stop focused (a menu's first item, the palette's field, the dialog's
+// initial button), sized to its content, laid out, and painted whole.
+#[library_benchmark]
+#[bench::menu(setup = menu_opening)]
+#[bench::palette(setup = palette_opening)]
+#[bench::dialog(setup = dialog_opening)]
+fn open(opening: Opening) -> Opened {
+    match opening {
+        Opening::Menu(shell) => {
+            let mut ui = popup_ui();
+            ui.build(|cx| popup_view(black_box(&shell), cx));
+            let pixels = first_show(&mut ui, None);
+            Opened::Menu(ui, pixels, shell)
+        }
+        Opening::Palette(m) => {
+            let mut ui = popup_ui();
+            ui.build(|cx| composites::palette_view(black_box(&m), cx));
+            let pixels = first_show(&mut ui, Some(tokens::palette::WIDTH));
+            Opened::Overlay(ui, pixels, m)
+        }
+        Opening::Dialog(m) => {
+            let mut ui = popup_ui();
+            ui.build(composites::dialog_view);
+            let pixels = first_show(&mut ui, Some(tokens::dialog::WIDTH));
+            Opened::Overlay(ui, pixels, black_box(m))
+        }
+    }
 }
 
 library_benchmark_group!(name = popup, benchmarks = [open]);
@@ -466,9 +580,42 @@ fn a11y_update(mut run: Box<Run>) -> (Option<TreeUpdate>, Box<Run>) {
     (run.a11y_update(), run)
 }
 
+/// Slice 6c: the composites page after its session and the overlays', a client listening, then
+/// the palette open (`window` the popup) or a job's toast at 40 % then 41 %, its line not yet
+/// brought up to date (the toast), then `step` with that window's update left to take.
+fn overlay_accessible_after(
+    window: composites::Window,
+    step: composites::Step,
+) -> (Box<composites::Run>, composites::Window) {
+    let run = overlaid(composites::Run::accessible(composites::Model::new()));
+    let mut run = if window == composites::Window::Toast {
+        let mut run = run.job_running();
+        run.step(composites::Step::Update(composites::Msg::Progress(41)));
+        run
+    } else {
+        run.palette_open()
+    };
+    run.take_a11y = false;
+    run.step(step);
+    (Box::new(run), window)
+}
+
+// U12 for slice 6c's windows: Down in the palette (the highlight moves, the field's active
+// descendant with it), and the toast's line brought up to date (a polite live region). A function
+// of its own, so `a11y_update`'s cases keep their one window (a sum type would cost its small
+// cases about 4 Ir, more than `unchanged`'s 5 %).
+#[library_benchmark]
+#[bench::palette_arrow(args = (composites::Window::Popup, composites::popup_key(KeyCode::Down)), setup = overlay_accessible_after)]
+#[bench::toast_line(args = (composites::Window::Toast, composites::Step::Update(composites::Msg::JobLine)), setup = overlay_accessible_after)]
+fn a11y_window_update(
+    (mut run, window): (Box<composites::Run>, composites::Window),
+) -> (Option<TreeUpdate>, Box<composites::Run>) {
+    (run.a11y_update_of(window), run)
+}
+
 library_benchmark_group!(
     name = a11y,
-    benchmarks = [a11y_tree, a11y_table_tree, a11y_update]
+    benchmarks = [a11y_tree, a11y_table_tree, a11y_update, a11y_window_update]
 );
 
 /// The composites page after its session, settled, then `step` to run. Boxed, as the U12 runs
@@ -507,13 +654,279 @@ fn cards_wrap_resize(
     run
 }
 
+// ---- Slice 6c (A3.7: U14, U17) ---------------------------------------------------------------
+
+/// The composites page after its session and slice 6c's (the palette, a job and the dialog,
+/// opened and closed), settled.
+fn overlaid(mut run: composites::Run) -> composites::Run {
+    run = run.warmed();
+    for s in composites::Run::overlay_session() {
+        run.step(s);
+    }
+    run.settle();
+    run
+}
+
+/// [`overlaid`] with the palette open, then `step`.
+fn palette_with(step: composites::Step) -> (Box<composites::Run>, composites::Step) {
+    let run = overlaid(composites::Run::with(composites::Model::new()));
+    (Box::new(run.palette_open()), step)
+}
+
+/// [`palette_with`], painted in the light theme: the page under the scrim, and the palette.
+fn palette_painted_with(step: composites::Step) -> (Box<composites::Run>, composites::Step) {
+    let run = overlaid(composites::Run::painted(
+        composites::Model::new(),
+        Theme::LIGHT,
+    ));
+    (Box::new(run.palette_open()), step)
+}
+
+/// [`overlaid`] with a job at 40 %, its toast and its card showing, then `step`.
+fn job_with(step: composites::Step) -> (Box<composites::Run>, composites::Step) {
+    let run = overlaid(composites::Run::with(composites::Model::new()));
+    (Box::new(run.job_running()), step)
+}
+
+// U14's view part: a character typed in the palette's field. The results filter, its 50 rows are
+// built again, and the popup is laid out and painted (the page under the scrim doesn't change).
+#[library_benchmark]
+#[bench::one_char(args = (composites::popup_char('c')), setup = palette_painted_with)]
+fn palette_keystroke(
+    (mut run, step): (Box<composites::Run>, composites::Step),
+) -> Box<composites::Run> {
+    run.step(step);
+    run
+}
+
+// Down in the palette: the highlight moves to the next row, the field keeping the focus.
+#[library_benchmark]
+#[bench::down(args = (composites::popup_key(KeyCode::Down)), setup = palette_with)]
+fn palette_arrow(
+    (mut run, step): (Box<composites::Run>, composites::Step),
+) -> Box<composites::Run> {
+    run.step(step);
+    run
+}
+
+// U17: one progress event, 40 to 41 %, with the toast and the job card both showing it: their
+// two bars change.
+#[library_benchmark]
+#[bench::both(args = (composites::Step::Update(composites::Msg::Progress(41))), setup = job_with)]
+fn toast_progress(
+    (mut run, step): (Box<composites::Run>, composites::Step),
+) -> Box<composites::Run> {
+    run.step(step);
+    run
+}
+
 library_benchmark_group!(
     name = composite,
-    benchmarks = [batch_count, scan_size, cards_wrap_resize]
+    benchmarks = [
+        batch_count,
+        scan_size,
+        cards_wrap_resize,
+        palette_keystroke,
+        palette_arrow,
+        toast_progress
+    ]
 );
+
+/// U18's benches (TD-0009 A3.7, slice 6b), in a module of their own: the group's `fling` and
+/// `event` are named as A3.7 names them, beside `table`'s and `interact`'s.
+mod grouped_rows {
+    use std::hint::black_box;
+
+    use dpro_ui::{Input, KeyCode, KeyEvent, Mods};
+    use gungraun::{library_benchmark, library_benchmark_group};
+
+    use super::fling_table::{GROUP_ROWS, Grouped, Step, grid_row};
+
+    /// U18's table at scale 1, its first frame painted, and the frames `table::fling.frames`
+    /// counts: the script's first 60 and 30 of its thumb drag.
+    fn fling_frames() -> (Box<Grouped>, Vec<f32>) {
+        let f = Grouped::new(1.0);
+        let script = f.script();
+        let mut frames: Vec<f32> = script.frames.iter().take(60).copied().collect();
+        frames.extend(script.frames.iter().skip(script.drag).take(30));
+        (Box::new(f), frames)
+    }
+
+    #[library_benchmark]
+    #[bench::frames(setup = fling_frames)]
+    fn fling((mut f, frames): (Box<Grouped>, Vec<f32>)) -> (Box<Grouped>, Vec<f32>) {
+        for &offset in &frames {
+            f.frame(black_box(offset));
+        }
+        (f, frames)
+    }
+
+    /// A key pressed, as the platform delivers it.
+    const fn key(key: KeyCode) -> Step {
+        Step::Input(Input::Key(KeyEvent {
+            key,
+            down: true,
+            mods: Mods {
+                shift: false,
+                ctrl: false,
+                alt: false,
+                win: false,
+            },
+        }))
+    }
+
+    /// U18's table warmed, frames ending at layout and damage, group 0's last row current and
+    /// focused at the view's bottom; then `step`.
+    fn group_end_with(step: Step) -> (Box<Grouped>, Step) {
+        let f = Grouped::new(1.0)
+            .unpainted()
+            .current_focused(GROUP_ROWS - 1);
+        (Box::new(f), step)
+    }
+
+    /// U18's table warmed with a client listening; then `step`, its update made in its frame.
+    fn accessible_with(step: Step) -> (Box<Grouped>, Step) {
+        (Box::new(Grouped::new(1.0).unpainted().accessible()), step)
+    }
+
+    #[library_benchmark]
+    #[bench::row_down(args = (key(KeyCode::Down)), setup = group_end_with)]
+    #[bench::realize(args = (Step::Realize(grid_row(50_000))), setup = accessible_with)]
+    fn event((mut f, step): (Box<Grouped>, Step)) -> Box<Grouped> {
+        f.step(black_box(step));
+        f
+    }
+
+    library_benchmark_group!(name = grouped, benchmarks = [fling, event]);
+}
+
+use grouped_rows::grouped;
+
+// Slice 6d: the drawer frame (TD-0009 A3.5 (6), A3.7's U16). `fixtures/drawer.rs`'s page, warmed
+// by its session. A3.7 names these `composite::drawer_open` and `composite::drawer_frame`; they're
+// a group of their own, so the slices that add composites alongside never edit the same lines.
+
+/// The drawer page after its session, settled and closed, framed at layout and damage (painted
+/// too, if `painted`); and the step that opens the drawer.
+fn drawer_closed(painted: bool) -> (Box<drawer_page::Run>, drawer_page::Step) {
+    let model = drawer_page::Model::new();
+    let run = if painted {
+        drawer_page::Run::painted(model, Theme::LIGHT)
+    } else {
+        drawer_page::Run::with(model)
+    };
+    (
+        Box::new(run.warmed()),
+        drawer_page::Step::Update(drawer_page::Msg::Open),
+    )
+}
+
+/// The drawer just opened, 5 frames into its slide; and the 6th frame.
+fn drawer_sliding(painted: bool) -> (Box<drawer_page::Run>, drawer_page::Step) {
+    let (mut run, open) = drawer_closed(painted);
+    run.step(open);
+    for _ in 0..5 {
+        run.step(drawer_page::Step::Tick(drawer_page::FRAME_MS));
+    }
+    (run, drawer_page::Step::Tick(drawer_page::FRAME_MS))
+}
+
+// "Review changes" opens the drawer as a pane: the page takes its new width, and the drawer is
+// built and laid out once, at its place.
+#[library_benchmark]
+#[bench::pane(args = (false), setup = drawer_closed)]
+#[bench::painted(args = (true), setup = drawer_closed)]
+fn drawer_open(
+    (mut run, step): (Box<drawer_page::Run>, drawer_page::Step),
+) -> Box<drawer_page::Run> {
+    run.step(black_box(step));
+    run
+}
+
+// A frame of the slide: the paint moves and nothing is laid out. The frame damages where the
+// drawer was and where it is (U16).
+#[library_benchmark]
+#[bench::mid_slide(args = (false), setup = drawer_sliding)]
+#[bench::painted(args = (true), setup = drawer_sliding)]
+fn drawer_frame(
+    (mut run, step): (Box<drawer_page::Run>, drawer_page::Step),
+) -> Box<drawer_page::Run> {
+    run.step(black_box(step));
+    run
+}
+
+library_benchmark_group!(
+    name = composite_drawer,
+    benchmarks = [drawer_open, drawer_frame]
+);
+
+// ---- notice (TD-0009 A4.7 U21, U22; slice 7b) --------------------------------------------------
+
+/// [`warm_accessible`], the drawer open and its job started 2 s ago, then a progress report that
+/// crosses a step: the announcer speaks, the shell writes the notice's text, the Ui queues it, and
+/// the frame runs. A4.7's `interact::event.notice`.
+fn noticed() -> (Box<Run>, Step) {
+    let mut run = warm_accessible().drawer_open();
+    run.step(Step::Tick(dpro_app::announce::JOB_GAP_MS));
+    (Box::new(run), Step::Update(Msg::Progress(41)))
+}
+
+#[library_benchmark]
+#[bench::progress_step(setup = noticed)]
+fn notice_event((mut run, step): (Box<Run>, Step)) -> Box<Run> {
+    run.step(black_box(step));
+    run
+}
+
+/// The job toast's own window's `Ui`, as A3's toast lays it out (slice 6c builds the real one):
+/// a group named by its region, the job's line (a live region), its bar and Dismiss.
+fn toast_view(cx: &mut Cx<'_, u8>, failed: bool) {
+    let (line, live) = if failed {
+        (
+            "Apply 20 changes failed. 3 of 20 changes were applied.",
+            Live::Assertive,
+        )
+    } else {
+        ("Apply 20 changes: 41 %", Live::Polite)
+    };
+    cx.add_with(
+        Element::stack(Key::name("toast")).name("Job status"),
+        |cx| {
+            cx.add(Element::text(Key::name("line"), line).live(live));
+            if !failed {
+                cx.add(Element::progress(Key::name("bar"), 0.41));
+            }
+            cx.add(Element::button(Key::name("dismiss"), "Dismiss", 1));
+        },
+    );
+}
+
+/// A running job's toast, a client listening, then the job fails: the line's text changes and
+/// turns assertive, and the bar goes. Its update is A4.7's `a11y_update.live_toast` (U21:
+/// ≤ 5,000 Ir).
+fn toast_failed() -> Box<Ui<u8>> {
+    let mut ui = Ui::new(Size { w: 360.0, h: 96.0 }, 1.0, Motion::STANDARD);
+    ui.build(|cx| toast_view(cx, false));
+    ui.layout(&mut FakeText);
+    drop(ui.a11y_tree());
+    ui.build(|cx| toast_view(cx, true));
+    ui.layout(&mut FakeText);
+    Box::new(ui)
+}
+
+#[library_benchmark]
+#[bench::failed(setup = toast_failed)]
+fn live_toast(mut ui: Box<Ui<u8>>) -> (Option<TreeUpdate>, Box<Ui<u8>>) {
+    (ui.a11y_update(), ui)
+}
+
+library_benchmark_group!(name = notice, benchmarks = [notice_event, live_toast]);
+
+// ---- end notice --------------------------------------------------------------------------------
 
 main!(
     // Instruction counts only: the cache simulation would slow every run for metrics nothing gates.
     config = LibraryBenchmarkConfig::default().tool(Callgrind::with_args(["--cache-sim=no"]));
-    library_benchmark_groups = interact, paint, popup, table, a11y, composite
+    library_benchmark_groups = interact, paint, popup, table, a11y, composite, grouped,
+        composite_drawer, notice
 );

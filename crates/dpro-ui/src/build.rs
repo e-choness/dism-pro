@@ -12,7 +12,7 @@
 use crate::{
     a11y::SideProps,
     field::TextEdit,
-    pool::capacity_for,
+    pool::{capacity_for, copy_text},
     table::sort_value,
     text::TextStyle,
     tree::{CHECK_ITEM, Element, Extra, Live, NIL, NodeId, PRESENTATION, Role, rare},
@@ -39,6 +39,8 @@ impl<M> Ui<M> {
         };
         view(&mut cx);
         cx.finish();
+        // Focus a scope took with it comes back (A3.5 addition 10, slice 6d).
+        self.give_focus_back();
     }
 }
 
@@ -148,6 +150,16 @@ impl<M> Cx<'_, M> {
     }
 }
 
+/// Slice 6d: the window's size for views (TD-0009 A3.5 addition 14).
+impl<M> Cx<'_, M> {
+    /// The window's logical size from the last [`Ui::set_viewport`], so a view can choose its
+    /// layout by width: the rail's, a drawer's pane or sheet, a settings row's line.
+    #[must_use]
+    pub fn viewport(&self) -> crate::Size {
+        self.ui.viewport()
+    }
+}
+
 impl<M> Ui<M> {
     /// Copies what changed from `el` into node `i`: layout changes mark it dirty, looks (check
     /// state, enabled, [`Look`](crate::Look)) damage it, and what a client sees (text, check
@@ -181,7 +193,13 @@ impl<M> Ui<M> {
         if n.text != el.text {
             n.text.clear();
             if n.text.capacity() < el.text.len() {
-                n.text.reserve_exact(capacity_for(el.text.len()));
+                // A spare buffer that holds it first: a text that grows (a toast's line as its
+                // job ends, slice 6c) takes back the one its node gave the pool last time (U8).
+                let old = std::mem::replace(&mut n.text, self.texts.take(el.text.len()));
+                self.texts.put(old);
+                if n.text.capacity() < el.text.len() {
+                    n.text.reserve_exact(capacity_for(el.text.len()));
+                }
             }
             n.text.push_str(el.text);
             if field == NIL {
@@ -254,6 +272,11 @@ impl<M> Ui<M> {
         if looks {
             // Where it is now; if layout moves it, layout damages where it goes.
             self.damage_node(i);
+            // A suggestion the field's step highlighted comes into view (the palette's, A3.5
+            // (3)): a highlight shows with its look.
+            if picked && self.nodes[i as usize].selected == Some(true) && self.suggestion(i) {
+                self.reveal(i);
+            }
         }
         if seen {
             self.a11y_touch(i);
@@ -321,14 +344,25 @@ impl<M> Ui<M> {
             Extra::Glyph(icon) => (None, crate::tree::glyph_value(icon), None),
             // And a container's presentational children (addition 9): a client doesn't see them.
             Extra::Presentation => (None, PRESENTATION, None),
+            // And where a two-line cell's first line ends (slice 6b): both lines show it, and a
+            // client reads the first as its name and the second as its description.
+            Extra::Lines(split) => (None, crate::table::lines_value(split), None),
+            // And a dialog's being one (addition 12): a client sees a dialog.
+            Extra::Dialog => (None, crate::tree::DIALOG, None),
             // A live region's politeness (addition 5, A4.5) is read below.
             Extra::None | Extra::Field { .. } | Extra::Combo { .. } | Extra::Live(_) => {
                 (None, 0.0, None)
             }
+            // A scope's escape (addition 10) is read below.
+            Extra::Scope { .. } => (None, 0.0, None),
         };
         let politeness = match extra {
             Extra::Live(live) => live,
             _ => Live::Off,
+        };
+        let (scope, on_escape) = match extra {
+            Extra::Scope { on_escape } => (true, on_escape),
+            _ => (false, None),
         };
         let n = &mut self.nodes[i as usize];
         // The group sets a client's role (a tab list, a radio group, a list).
@@ -342,13 +376,18 @@ impl<M> Ui<M> {
         n.politeness = politeness;
         n.special = group.is_some() || invoke.is_some() || value.to_bits() != 0;
         n.special |= politeness != Live::Off;
+        n.special |= scope;
         // A menu item became or stopped being a check item: every label in its menu moves past
-        // the checks' gutter or back, so the menu is laid out again.
-        let rechecked = revalued && n.role == Role::MenuItem;
+        // the checks' gutter or back, so the menu is laid out again. A two-line cell whose lines
+        // split elsewhere (slice 6b) repaints, as its text would.
+        let rechecked = revalued && matches!(n.role, Role::MenuItem | Role::Cell);
         // A container's children became presentational or stopped being: the flag follows down.
         let represented = revalued && n.role == Role::Container;
         if n.hold || invoke.is_some() {
             self.update_hold(i, invoke);
+        }
+        if scope || !self.scopes.is_empty() {
+            self.update_scope(i, scope, on_escape);
         }
         if rechecked {
             self.mark_dirty(i);
@@ -421,13 +460,11 @@ impl<M> Ui<M> {
         let side = &mut self.sides[s as usize];
         side.step = step;
         if side.tip != tip {
-            side.tip.clear();
-            side.tip.push_str(tip);
+            copy_text(&mut side.tip, tip);
             seen = true;
         }
         if side.label != label {
-            side.label.clear();
-            side.label.push_str(label);
+            copy_text(&mut side.label, label);
             seen = true;
         }
         if tip.is_empty() {
@@ -444,10 +481,11 @@ impl<M> Ui<M> {
         } else {
             self.sides.push(Side {
                 node: i,
-                tip: String::new(),
+                // A description fits as it is: slots pass from node to node as they come and go.
+                tip: String::with_capacity(capacity_for(32)),
                 label: String::new(),
                 step: None,
-                props: SideProps::default(),
+                props: SideProps::new(),
             });
             u32::try_from(self.sides.len() - 1).unwrap_or(NIL)
         }

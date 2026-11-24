@@ -99,7 +99,53 @@ jobs:
       - run: docker compose run --rm test
       # Doc 04 §3's deterministic gate: instruction counts vs benches/baseline.json.
       - run: docker compose run --rm bench-gate
-      - run: docker compose run --rm test-win
+      # T2 takes about 2 minutes. A hang stops it at 12, not at the job's 90. Anonymous API reads
+      # get annotations but not logs, so when the output stops for 2 minutes a watchdog annotates
+      # the last lines and the Windows programs running in the container (at most 3 times), and a
+      # failure annotates a test libtest flagged past 60 s, any failure, a crash (Wine's line and
+      # the faulting frame: task.sh turns off the crash dialog), and the last lines.
+      - name: Run docker compose run --rm test-win
+        shell: bash
+        run: |
+          log="$RUNNER_TEMP/t2.log"
+          : > "$log"
+          annotate() { # level, title, text (its newlines kept)
+            printf '::%s title=%s::%s\n' "$1" "$2" "$(printf '%s' "$3" |
+              sed 's/\x1b\[[0-9;]*m//g; s/\r//g; s/%/%25/g' | sed ':a;N;$!ba;s/\n/%0A/g')"
+          }
+          tail_of() { sed 's/\x1b\[[0-9;]*m//g' "$log" | grep -v '^ *$' | tail -"$1" || true; }
+          (
+            set +e
+            quiet=0
+            prev=-1
+            while [ "$quiet" -lt 3 ]; do
+              sleep 120
+              size=$(stat -c %s "$log")
+              if [ "$size" = "$prev" ]; then
+                quiet=$((quiet + 1))
+                c=$(docker ps -q --filter label=com.docker.compose.service=test-win | head -1)
+                exes=$([ -n "$c" ] && docker exec "$c" sh -c \
+                  'for p in /proc/[0-9]*; do tr "\0" " " < "$p/cmdline"; echo; done' 2>/dev/null |
+                  grep -ai '\.exe' | cut -c1-200 | sort | uniq -c | head -12)
+                annotate warning "T2 quiet for 2 min ($quiet)" \
+                  "$(printf 'last lines:\n%s\nprograms:\n%s' "$(tail_of 4)" "${exes:-none}")"
+              fi
+              prev=$size
+            done
+          ) &
+          watchdog=$!
+          status=0
+          timeout --kill-after=1m 12m docker compose run --rm test-win 2>&1 | tee -a "$log" ||
+            status=$?
+          kill "$watchdog" 2> /dev/null || true
+          if [ "$status" -ne 0 ]; then
+            flagged=$(sed 's/\x1b\[[0-9;]*m//g' "$log" |
+              grep -E 'has been running for over|panicked at|^test .* FAILED|^wine: Unhandled|^=>0 ' |
+              cut -c1-300 | head -8 || true)
+            annotate error "T2 exit $status" \
+              "$(printf 'flagged:\n%s\nlast lines:\n%s' "${flagged:-none}" "$(tail_of 6)")"
+          fi
+          exit "$status"
       - run: docker compose run --rm deny
       - run: docker compose run --rm build
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

@@ -102,16 +102,26 @@ impl Rect {
 
     /// The physical pixels painting fills for this rectangle at `scale`: each edge rounded to the
     /// nearest pixel boundary, so fills and hairlines are crisp. Always inside [`Rect::to_px`],
-    /// which damage uses.
+    /// which damage uses. Halves round up, never away from zero, so a rectangle moved by whole
+    /// pixels (scrolled) snaps to the same pixels moved, on either side of the window's edge.
     #[must_use]
     pub fn snap(&self, scale: f32) -> RectPx {
         RectPx {
-            x0: px((self.x * scale).round()),
-            y0: px((self.y * scale).round()),
-            x1: px((self.right() * scale).round()),
-            y1: px((self.bottom() * scale).round()),
+            x0: px(nearest(self.x * scale)),
+            y0: px(nearest(self.y * scale)),
+            x1: px(nearest(self.right() * scale)),
+            y1: px(nearest(self.bottom() * scale)),
         }
     }
+}
+
+/// The nearest whole number, halves up: -0.5 is 0, as 0.5 is 1. It differs from `f32::round` at
+/// a negative half, and where the sum itself rounds: the float just under 0.5, and odd whole
+/// numbers past 2^23, where layout's own `f32` is coarser than a pixel. Rounding those as
+/// `round` does cost 0.3 to 1.1 % of C1's repaints and table fling (slice 7d's review), for no
+/// visible change.
+fn nearest(v: f32) -> f32 {
+    (v + 0.5).floor()
 }
 
 /// `as` from a float saturates at the integer's bounds and maps NaN to 0, which is what a pixel
@@ -287,6 +297,26 @@ mod tests {
             y1: 2,
         };
         assert!(px.contains_px(1, 0) && !px.contains_px(2, 0));
+    }
+
+    /// A rectangle moved by whole pixels snaps to the same pixels, moved: a node scrolled into
+    /// view paints where reveal put it, above a viewport's top as below it (TD-0009 A4.5's
+    /// keyboard audit, rule 4: Shift+Tab left a focus ring a pixel under the viewport's edge).
+    #[test]
+    fn snapping_commutes_with_whole_pixel_moves() {
+        for scale in [1.0_f32, 2.0] {
+            for y in [-0.5_f32, 0.5, 33.5, 1234.5, -1234.5] {
+                let r = Rect::new(2.5, y, 34.0, 34.0);
+                let moved = Rect::new(2.5 - 3.0, y - 1235.0, 34.0, 34.0);
+                let (a, b) = (r.snap(scale), moved.snap(scale));
+                let (dx, dy) = (px(3.0 * scale), px(1235.0 * scale));
+                assert_eq!(
+                    (a.x0 - dx, a.y0 - dy, a.x1 - dx, a.y1 - dy),
+                    (b.x0, b.y0, b.x1, b.y1),
+                    "{y} at {scale}"
+                );
+            }
+        }
     }
 
     #[test]

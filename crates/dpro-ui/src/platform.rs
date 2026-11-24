@@ -27,8 +27,9 @@
 //! focus. Over a field the pointer is an I-beam.
 //!
 //! **Popups** (TD-0009 A1, `popups.rs`). The model's menu or dropdown list, and the toolkit's
-//! tooltip, each show in a popup window of the main one, with a [`Ui`] of its own. Every
-//! surface's events reach this one handler, marked with the surface they're for.
+//! tooltip, each show in a popup window of the main one, with a [`Ui`] of its own. So do slice
+//! 6c's palette, dialog and toast. Every surface's events reach this one handler, marked with the
+//! surface they're for.
 
 mod popups;
 
@@ -39,11 +40,12 @@ use dpro_win::gui::{
     Surface, Window, WindowCx, WindowOptions, text,
 };
 
+use crate::{Activity, Notice, NoticeKind};
 use crate::{
     Bytes, Canvas, Caret, CaretStop, ClipboardRequest, Color, Cursor, Cx, Formats, GlyphSink, Icon,
-    Input, Key, KeyCode, KeyEvent, MAX_FIELD_LEN, Mods, Motion, NodeId, Point, Popup, Rect, Scheme,
-    Size, SizeUnits, SysColors, TextMetrics, TextStyle, TextSystem, Theme, Ui, UnixMillis,
-    format_size,
+    Input, Key, KeyCode, KeyEvent, MAX_FIELD_LEN, Mods, Motion, NodeId, Point, Popup, PopupKind,
+    Rect, Scheme, Size, SizeUnits, SysColors, TextMetrics, TextStyle, TextSystem, Theme, Ui,
+    UnixMillis, format_size,
     materials::{
         Environment, GLASS_BUILD, GlassPref, Materials, PresenterKind, SolidReason, materials,
     },
@@ -162,6 +164,37 @@ pub trait Model {
     fn size_units(&self) -> SizeUnits {
         SizeUnits::default()
     }
+
+    // Slice 6c (TD-0009 A3.5 addition 13).
+
+    /// Whether the model's toast shows. After every event the host shows, rebuilds or hides the
+    /// toast window, at the owner's bottom end, to match; it never takes activation.
+    fn toast(&self) -> bool {
+        false
+    }
+
+    /// What the [`toast`](Self::toast) window shows: one [`Cx::toast`].
+    fn toast_view(&self, _cx: &mut Cx<'_, Self::Msg>) {}
+
+    /// The message a key pressed in the main window sends that no part of the page used: the
+    /// app's accelerators (Ctrl+K opens the palette). `None` if it's none.
+    fn accelerator(&self, _key: KeyEvent) -> Option<Self::Msg> {
+        None
+    }
+
+    // Slice 7b (TD-0009 A4.5).
+
+    /// The model's clock (TD-0009 A4.5): after every event, before the view is built, at
+    /// `now_ms` on the window's monotonic clock. Work that follows time runs here, such as a
+    /// simulated job's progress. Returns how long until it wants the clock again; by default,
+    /// never, so a settled window wakes for nothing (U6).
+    fn wake(&mut self, _now_ms: u64) -> Option<u64> {
+        None
+    }
+
+    /// Hands the model's waiting notices to `f` (TD-0009 A4.4's announcements, their text
+    /// resolved from the catalog), after every event; the host queues them with [`Ui::notify`].
+    fn notices(&mut self, _f: impl FnMut(Notice<'_>)) {}
 }
 
 /// The user's formats (TD-0009 A2.5): Windows' days, moments and decimal separator, with the
@@ -202,10 +235,10 @@ pub struct Host<P: Model> {
     /// When the window's wake is set for, on that clock: the caret's next blink, or a tooltip's
     /// next change.
     wake_due: Option<u64>,
-    /// The popup windows' UIs, in [`popups::KINDS`]' order: a menu, a dropdown's list and the
-    /// tooltip.
-    layers: [popups::Layer<P::Msg>; 3],
-    /// Which of the menu and the list shows the model's popup.
+    /// The popup windows' UIs, in [`popups::KINDS`]' order: a menu, a dropdown's list, the
+    /// tooltip, the palette, the toast and a dialog.
+    layers: [popups::Layer<P::Msg>; 6],
+    /// Which of the menu, the list, the palette and the dialog shows the model's popup.
     open: Option<gui::PopupKind>,
     /// Whose tip the tooltip window shows, and its text.
     tip_for: Option<(Surface, NodeId)>,
@@ -305,6 +338,7 @@ impl<P: Model> Host<P> {
             layer.ui.set_tooltip_delay(env.tooltip_ms);
             layer.ui.set_wheel(env.wheel_lines, env.wheel_chars);
             layer.ui.set_auto_hide_scroll_bars(auto_hide);
+            layer.ui.set_message_duration(env.message_ms);
         }
         self.restyle()
     }
@@ -396,6 +430,9 @@ impl<P: Model> Host<P> {
     /// Rebuilds and lays out the view and the popups, and hands each surface's damage to its
     /// window.
     fn frame(&mut self, cx: &mut WindowCx<'_>) {
+        // The model's clock, before the view: a job's progress may move (TD-0009 A4.5).
+        let clock = self.now_ms();
+        let model_wake = self.model.wake(clock);
         // A context request asks the model for that node's menu.
         if let Some(key) = self
             .ui
@@ -406,15 +443,20 @@ impl<P: Model> Host<P> {
         {
             self.model.update(msg);
         }
+        let scrim = self.wants_scrim();
+        self.ui.set_scrim(scrim);
         self.build();
-        // A popup whose anchor went away closes (A1.8).
+        // A menu or a list whose anchor went away closes (A1.8).
         if self.ui.popup_anchor().is_none()
             && let Some(popup) = self.model.popup()
+            && matches!(popup.kind, PopupKind::Menu | PopupKind::List)
         {
             self.model.update(popup.on_close);
             self.build();
         }
+        self.queue_notices();
         self.sync_popup(cx);
+        self.sync_toast(cx);
         // Before the damage goes out: a blink damages the caret.
         let now = self.now_ms();
         let next = [
@@ -422,6 +464,8 @@ impl<P: Model> Host<P> {
             self.ui.tooltip_timer(now),
             self.layers[0].ui.tooltip_timer(now),
             self.layers[1].ui.tooltip_timer(now),
+            self.popup_timers(now),
+            model_wake.map(|ms| ms.saturating_sub(now.saturating_sub(clock))),
         ]
         .into_iter()
         .flatten()
@@ -465,6 +509,13 @@ impl<P: Model> Host<P> {
     fn now_ms(&self) -> u64 {
         u64::try_from(self.start.elapsed().as_millis()).unwrap_or(u64::MAX)
     }
+
+    /// The model's notices, queued for the window to raise once it has served the tree
+    /// (TD-0009 A4.5). Without a client they're dropped at once.
+    fn queue_notices(&mut self) {
+        let ui = &mut self.ui;
+        self.model.notices(|n| ui.notify(n));
+    }
 }
 
 impl<P: Model> Host<P> {
@@ -503,11 +554,7 @@ impl<P: Model> Host<P> {
             Event::Char(c) => self.input(Input::Char(c)),
             Event::PointerUp(p) => self.input(Input::PointerUp(at(p))),
             Event::PointerLeave => self.input(Input::PointerLeave),
-            Event::Key { vk, down, mods } => self.input(Input::Key(KeyEvent {
-                key: key_code(vk),
-                down,
-                mods: mods_of(mods),
-            })),
+            Event::Key { vk, down, mods } => self.main_key(vk, down, mods, cx),
             Event::ContextMenu(p) => self.input(Input::ContextMenu(p.map(at))),
             // A wheel over the window closes its menu or list, whose anchor it may scroll away
             // (TD-0009 A2.4), and scrolls what's under the pointer.
@@ -544,6 +591,8 @@ impl<P: Model> Host<P> {
             Event::Wake => {
                 // One shot: it's gone, and the frame sets the next.
                 self.wake_due = None;
+                let now = self.now_ms();
+                self.wake_popups(now);
                 true
             }
             Event::Frame => {
@@ -574,6 +623,10 @@ impl<P: Model> Handler for Host<P> {
                 Some(used) => used,
                 None => return true,
             },
+            Surface::Popup(kind) if popups::hands_back(kind, &event) => {
+                cx.activate(Surface::Main);
+                true
+            }
             Surface::Popup(kind) => self.popup_event(kind, event),
         };
         self.clipboard(cx);
@@ -611,6 +664,13 @@ impl<P: Model> Handler for Host<P> {
         self.ui_of(surface).a11y_update()
     }
 
+    /// The main view's notices (TD-0009 A4.5); popups have none.
+    fn a11y_notices(&mut self, surface: Surface, out: &mut Vec<gui::Notice>) {
+        if surface == Surface::Main {
+            self.ui.take_notices(|n| out.push(gui_notice(n)));
+        }
+    }
+
     /// Runs like a click (or a focus move), then the frame shows it and the window serves it.
     /// Collapse closes the open popup (the dropdown's); an item's message in a popup closes it
     /// first, as a click does.
@@ -626,12 +686,13 @@ impl<P: Model> Handler for Host<P> {
             Surface::Popup(kind) => &mut self.layers[popups::slot(kind)].ui,
         };
         if ui.a11y_action(request, &mut self.msgs) {
-            if surface == Surface::Main {
-                for msg in self.msgs.drain(..) {
-                    self.model.update(msg);
+            match surface {
+                Surface::Main => {
+                    for msg in self.msgs.drain(..) {
+                        self.model.update(msg);
+                    }
                 }
-            } else {
-                self.item_messages();
+                Surface::Popup(kind) => self.popup_messages(kind),
             }
             self.frame(cx);
         }
@@ -814,6 +875,28 @@ const fn mods_of(m: gui::Mods) -> Mods {
     }
 }
 
+/// A notice as the window carries it (TD-0009 A4.5).
+fn gui_notice(n: Notice<'_>) -> gui::Notice {
+    gui::Notice {
+        text: n.text.to_owned(),
+        kind: match n.kind {
+            NoticeKind::ItemAdded => gui::NoticeKind::ItemAdded,
+            NoticeKind::ItemRemoved => gui::NoticeKind::ItemRemoved,
+            NoticeKind::ActionCompleted => gui::NoticeKind::ActionCompleted,
+            NoticeKind::ActionAborted => gui::NoticeKind::ActionAborted,
+            NoticeKind::Other => gui::NoticeKind::Other,
+        },
+        important: n.important,
+        replace: n.replace,
+        activity: match n.activity {
+            Activity::Progress(slot) => gui::Activity::Progress(slot),
+            Activity::Copy => gui::Activity::Copy,
+            Activity::Count => gui::Activity::Count,
+            Activity::Hold => gui::Activity::Hold,
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -982,6 +1065,62 @@ mod tests {
             };
             assert!(button.contains(p), "ink at {p:?} outside {button:?}");
         }
+    }
+
+    /// A model that says "Copied." once (TD-0009 A4.5, slice 7b).
+    #[derive(Default)]
+    struct Copier {
+        said: bool,
+    }
+
+    impl Model for Copier {
+        type Msg = Msg;
+
+        fn view(&self, cx: &mut Cx<'_, Msg>) {
+            cx.add(Element::button(Key::name("b"), "b", Msg::Pressed));
+        }
+
+        fn update(&mut self, _: Msg) {}
+
+        fn notices(&mut self, mut f: impl FnMut(Notice<'_>)) {
+            if !std::mem::replace(&mut self.said, true) {
+                f(Notice::of(
+                    &dpro_app::announce::Announcement::Copied,
+                    "Copied.",
+                ));
+            }
+        }
+    }
+
+    /// The model's notices reach the window as its own, for the main surface only, and only
+    /// while a client listens.
+    #[test]
+    fn a_model_s_notice_reaches_the_window_while_a_client_listens() {
+        let mut quiet = Host::new(Copier::default(), Box::new(FakeText), GlassPref::Auto);
+        quiet.queue_notices();
+        let mut out = Vec::new();
+        quiet.a11y_notices(Surface::Main, &mut out);
+        assert!(out.is_empty(), "no client, no notice");
+
+        let mut host = Host::new(Copier::default(), Box::new(FakeText), GlassPref::Auto);
+        drop(host.ui.a11y_tree());
+        host.queue_notices();
+        host.a11y_notices(Surface::Popup(gui::PopupKind::Menu), &mut out);
+        assert!(out.is_empty(), "a popup has none");
+        host.a11y_notices(Surface::Main, &mut out);
+        assert_eq!(
+            out,
+            [gui::Notice {
+                text: "Copied.".into(),
+                kind: gui::NoticeKind::ActionCompleted,
+                important: false,
+                replace: true,
+                activity: gui::Activity::Copy,
+            }]
+        );
+        out.clear();
+        host.a11y_notices(Surface::Main, &mut out);
+        assert!(out.is_empty(), "taken once");
     }
 
     #[test]
@@ -1230,6 +1369,8 @@ mod tests {
         fn view(&self, cx: &mut Cx<'_, SizesMsg>) {
             let table = crate::Table {
                 rows: 1,
+                lines: crate::RowLines::One,
+                groups: &[],
                 columns: &SIZE_COLUMNS,
                 widths: &[],
                 hidden: &[],

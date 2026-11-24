@@ -120,7 +120,8 @@ impl<M: Clone> Cx<'_, M> {
                     {
                         let (look, text_style) = match emphasis {
                             Emphasis::Primary => (PRIMARY, STRONG),
-                            Emphasis::Normal => (QUIET, TextStyle::default()),
+                            // The bar has no danger look on its inverse fill (A3.5 (11)).
+                            Emphasis::Normal | Emphasis::Danger => (QUIET, TextStyle::default()),
                         };
                         cx.add(
                             Element::button(Key::index(i), label, msg.clone())

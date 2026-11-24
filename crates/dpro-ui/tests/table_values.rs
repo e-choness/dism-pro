@@ -338,6 +338,8 @@ impl Page {
     fn view(&self, cx: &mut Cx<'_, Msg>) {
         let table = Table {
             rows: u32::try_from(self.names.len()).expect("rows"),
+            lines: dpro_ui::RowLines::One,
+            groups: &[],
             columns: &COLUMNS,
             widths: &[],
             hidden: &[],

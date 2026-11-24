@@ -189,6 +189,8 @@ impl<M: Clone> Ui<M> {
                     return true;
                 }
                 let before = self.focus;
+                // An Esc that hides a tooltip goes no further than that popup (§4.3).
+                let tip_shown = k.key == KeyCode::Escape && self.tooltip().is_some();
                 if k.down {
                     // Any key hides a tooltip.
                     self.tip_cancel(true);
@@ -200,6 +202,10 @@ impl<M: Clone> Ui<M> {
                 } else {
                     self.key(k, out)
                 };
+                // An Esc nothing used, that hid no tooltip, goes to its scope (A3.5 addition 10),
+                // or else dismisses the toast shown here (A3.5 (7)).
+                let esc = k.down && k.key == KeyCode::Escape && !tip_shown;
+                let used = used || (esc && (self.scope_escape(out) || self.escape_toast(out)));
                 // Focus the keyboard moved shows its tip at once.
                 if self.focus != before && self.focus_visible {
                     self.tip_focus(self.focus);
@@ -531,12 +537,16 @@ enum Rove {
 }
 
 impl<M: Clone> Ui<M> {
-    /// Advances animations and the hold to `now_ms` on the monotonic clock, damaging what they
-    /// change. An animation or a hold started since the last tick starts now. A hold that comes
-    /// to its end pushes its button's message to `out`.
+    /// Advances animations, the hold and slides to `now_ms` on the monotonic clock, damaging what
+    /// they change. An animation or a hold started since the last tick starts now; a slide, a
+    /// frame before (`slide.rs`). A hold that comes to its end pushes its button's message to
+    /// `out`.
     pub fn tick(&mut self, now_ms: u64, out: &mut Vec<M>) {
         self.tick_hold(now_ms, out);
         self.tick_animations(now_ms);
+        self.tick_slides(now_ms);
+        // An ended toast's hide, once due (A3.5 (7)).
+        self.tick_expiry(now_ms, out);
     }
 
     fn tick_hold(&mut self, now_ms: u64, out: &mut Vec<M>) {
@@ -613,10 +623,11 @@ impl<M> Ui<M> {
         }
     }
 
-    /// Whether an animation or a hold is running, so the window should keep asking for frames.
+    /// Whether an animation, a hold or a slide is running, so the window should keep asking for
+    /// frames.
     #[must_use]
     pub fn wants_frame(&self) -> bool {
-        !self.anims.is_empty() || self.hold_running()
+        !self.anims.is_empty() || self.hold_running() || !self.slides.is_empty()
     }
 
     /// How far the running hold has come, 0 to 1; `None` when no hold is running (none is
@@ -730,7 +741,7 @@ impl<M> Ui<M> {
     /// Whether Tab can land on `at`, coming from `from`, and where: an interactive node, or for
     /// one in a group its [entry](Self::group_entry), unless `from` is in that group already or
     /// the group is a suggestion list, which Tab skips (A3.5 addition 7).
-    fn tab_stop(&self, at: u32, from: u32, forward: bool) -> u32 {
+    pub(crate) fn tab_stop(&self, at: u32, from: u32, forward: bool) -> u32 {
         if !self.nodes[at as usize].interactive() {
             // A viewport with no tab stop inside is one (A2.4).
             return if self.nodes[at as usize].scroll != NIL && self.lone_viewport(at) {
@@ -1009,7 +1020,7 @@ impl<M> Ui<M> {
 }
 
 /// Doc 05's ease-out: fast, then settling (cubic).
-fn ease_out(t: f32) -> f32 {
+pub(crate) fn ease_out(t: f32) -> f32 {
     let u = 1.0 - t.clamp(0.0, 1.0);
     1.0 - u * u * u
 }

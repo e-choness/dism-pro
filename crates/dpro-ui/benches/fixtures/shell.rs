@@ -19,8 +19,11 @@
     reason = "each file that includes the fixture uses a part of it"
 )]
 
-use std::sync::OnceLock;
+use std::{fmt::Write as _, sync::OnceLock};
 
+use dpro_app::announce::{Announcement, Announcer};
+use dpro_core::{id::JobId, progress::Progress};
+use dpro_ui::Notice;
 use dpro_ui::{
     Align, Axis, Bytes, Canvas, Cells, ClipboardRequest, Column, ColumnId, ColumnLayout,
     ColumnMenuLabels, Cx, Dim, Element, FakeText, Input, Insets, InvariantFormats, Justify, Key,
@@ -238,6 +241,8 @@ pub(crate) struct Shell {
     days: Vec<UnixMillis>,
     /// Data rows on the tab and matching the filter, in the table's order.
     visible: Vec<u32>,
+    /// The drawer's job as the announcer hears it (TD-0009 A4.4, slice 7b).
+    job: Job,
 }
 
 impl Shell {
@@ -296,6 +301,7 @@ impl Shell {
             sizes,
             days,
             visible: Vec::with_capacity(rows),
+            job: Job::new(),
         };
         s.refilter();
         s
@@ -493,6 +499,8 @@ impl Shell {
     fn table_of(&self) -> Table<'_, Msg> {
         Table {
             rows: u32::try_from(self.visible.len()).unwrap_or(u32::MAX),
+            lines: dpro_ui::RowLines::One,
+            groups: &[],
             columns: &COLUMNS,
             widths: self.columns.widths(),
             hidden: self.columns.hidden(),
@@ -1054,6 +1062,9 @@ pub(crate) enum Step {
     /// The user's formats changed (Settings › Time & language › Region): sizes' decimal
     /// separator is now this (A2.5, slice 5b3).
     Decimal(&'static str),
+    /// The scrim over the window turned on or off, as the host does while the palette or a dialog
+    /// is open (TD-0009 A3.5 addition 13, slice 6c).
+    Scrim(bool),
 }
 
 /// A key pressed with `mods`, as a step.
@@ -1207,10 +1218,16 @@ impl Run {
                     self.ui.find_row(table, None, name);
                 }
             }
+            Step::Scrim(on) => self.ui.set_scrim(on),
         }
         for m in self.msgs.drain(..) {
             self.shell.update(m);
         }
+        // The model's clock and its notices, as the platform asks after every event (slice 7b).
+        // The script drives the clock, so the job's wake is the script's to follow.
+        let _ = self.shell.job_wake(self.now);
+        let ui = &mut self.ui;
+        self.shell.notices(|n| ui.notify(n));
         // The caret and tooltip timers, as the platform runs them after every event and on its
         // wake: the caret blinks if it's due, before the frame paints, and a tip due shows.
         let _ = self.wake();
@@ -1802,4 +1819,107 @@ pub(crate) fn click(p: Point) -> [Step; 2] {
 /// Pixels in a `w × h` canvas.
 fn area(w: u32, h: u32) -> usize {
     usize::try_from(u64::from(w) * u64::from(h)).unwrap_or(usize::MAX)
+}
+
+// ---- notices (TD-0009 A4.4, A4.5; slice 7b) ----------------------------------------------------
+
+/// The drawer's job's title, as A4.4's example names one (`a11y-job-progress`'s `$job`).
+pub(crate) const JOB_TITLE: &str = "Apply 20 changes";
+/// How often a simulated job's progress moves (`--job-ms`): one coalesced report per 100 ms.
+pub(crate) const JOB_TICK_MS: u64 = 100;
+
+/// The drawer's apply job as the announcer hears it: it starts when the drawer opens and ends when
+/// it closes. Its progress is the engine's reports ([`Msg::Progress`]), or with
+/// [`Shell::with_job_ms`] (the probe's `--job-ms`, for G1's Accessibility depth) the clock's.
+pub(crate) struct Job {
+    id: JobId,
+    announcer: Announcer,
+    /// When it started, on the window's clock, while the drawer is open.
+    started: Option<u64>,
+    /// A simulated job's length.
+    sim_ms: Option<u64>,
+    /// The progress last heard, in percent.
+    heard: u8,
+    /// The notice waiting, and its text, built in place.
+    said: Option<Announcement>,
+    text: String,
+}
+
+impl Job {
+    fn new() -> Self {
+        Self {
+            id: JobId::from_parts(UnixMillis(FIRST_DAY), 7),
+            announcer: Announcer::new(),
+            started: None,
+            sim_ms: None,
+            heard: 0,
+            said: None,
+            text: String::with_capacity(64),
+        }
+    }
+}
+
+impl Shell {
+    /// The drawer's job runs `ms` from the drawer opening, its progress following the clock (the
+    /// probe's `--job-ms`, for G1's Accessibility depth).
+    pub(crate) fn with_job_ms(mut self, ms: u64) -> Self {
+        self.job.sim_ms = Some(ms.max(1));
+        self
+    }
+
+    /// The model's clock (`Model::wake`), after every event: the job starts or ends with the
+    /// drawer, a simulated one moves, and a new progress goes to the announcer, whose notice
+    /// [`notices`](Self::notices) hands on. Returns how long until the job wants the clock
+    /// again: only while a simulated job runs.
+    pub(crate) fn job_wake(&mut self, now: u64) -> Option<u64> {
+        let job = &mut self.job;
+        match (self.drawer, job.started) {
+            (true, None) => {
+                job.started = Some(now);
+                job.announcer.started(job.id, now);
+                job.heard = 0;
+                if job.sim_ms.is_some() {
+                    self.progress = 0;
+                }
+            }
+            (false, Some(_)) => {
+                job.started = None;
+                job.announcer.finished(job.id);
+                return None;
+            }
+            (false, None) => return None,
+            (true, Some(_)) => {}
+        }
+        let start = job.started?;
+        let mut next = None;
+        if let Some(ms) = job.sim_ms
+            && self.progress < 100
+        {
+            let elapsed = now.saturating_sub(start).min(ms);
+            self.progress = u8::try_from(elapsed * 100 / ms).unwrap_or(100);
+            next = (self.progress < 100).then_some(JOB_TICK_MS);
+        }
+        if self.progress != job.heard {
+            job.heard = self.progress;
+            let p = Progress {
+                done: u64::from(self.progress),
+                total: 100,
+            };
+            if let Some(said) = job.announcer.progress(job.id, p, now) {
+                job.text.clear();
+                if let Announcement::Progress { percent, .. } = said {
+                    let _ = write!(job.text, "{JOB_TITLE}: {percent} percent");
+                }
+                job.said = Some(said);
+            }
+        }
+        next
+    }
+
+    /// The notice waiting, if any, to `f` (the platform's `Model::notices`).
+    pub(crate) fn notices(&mut self, mut f: impl FnMut(Notice<'_>)) {
+        if let Some(said) = self.job.said.take() {
+            f(Notice::of(&said, &self.job.text));
+        }
+    }
 }

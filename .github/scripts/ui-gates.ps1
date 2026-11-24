@@ -101,6 +101,30 @@ raw-API baseline, measured in this job, so it holds on whatever machine the runn
       header's HeaderItems; Invoke on Name's twice sorts by it and then reverses, so GetItem(0, 1)
       is the last row's name. Each is read back through UIA within 2 s; GetItem's and the search's
       round trips are advisory (U3: 50 ms).
+  Composites (TD-0009 A3.5, slice 6c): the shell with --composites, slice 6c's page, through real
+      keys and clicks. Ctrl+K shows the palette in an owned popup that takes the activation, its
+      Edit "Search commands" focused; its List "Commands" has exactly one selected ListItem, and
+      Down selects the next while focus stays in the field; typing filters the results; Esc closes
+      it and the page is active again. Ctrl+J starts a job: its toast shows at the window's bottom
+      end without taking the activation (and isn't WS_EX_NOACTIVATE), and a click on it leaves the
+      activation; F6 gives it the keyboard (Dismiss focused), and F6 hands it back; Esc in it
+      hides it, and the page is active again. Ctrl+E ends the job, which shows its toast again,
+      and the toast hides once SPI_GETMESSAGEDURATION has passed (not before) with the pointer and
+      the focus elsewhere. SPI_GETMESSAGEDURATION and SPI_GETCLIENTAREAANIMATION are reported for
+      A3.5's verifies. Each check reads back within 2 s; the palette's opening is advisory (U15:
+      100 ms from Ctrl+K to UIA seeing its field focused). Screenshots of the palette and the toast
+      go to -Out.
+  Composites: drawer (TD-0009 A3.5 (6), slice 6d): the drawer probe (examples/drawer.rs). Enter
+      on "Review changes" opens the drawer, the Group "Preview" (a region landmark), focus on its
+      first change; Esc closes it and focus goes back to "Review changes". Those are gates. A
+      second run under --ui-probe idle counts the slide's frame timers: 12 with animations on
+      (U16), none off; advisory, as the runner's timing is.
+  Accessibility depth, notifications (TD-0009 A4.5, A4.7 U23, slice 7b): the shell with
+      --job-ms 4000, whose drawer job runs 4 s from the drawer opening. A COM IUIAutomation5 client
+      (managed UIA can't hear notifications) subscribes to the window's notifications, and Invoke on
+      Review changes opens the drawer. Gates: exactly one progress notification over the job, at
+      2 s or later, saying "Apply 20 changes: N0 percent", kind Other, processing MostRecent,
+      activity DismPro.Progress.0. Its delivery after the step was due is advisory (U23: 100 ms).
 
 The probe target is dpro-ui's `shell` example until roadmap 3.2 gives dismpro.exe its shell.
 Results go to annotations and the job summary; the raw reports and screenshots go to -Out, which
@@ -398,6 +422,9 @@ public static class ThemeGateWin32 {
     [DllImport("gdi32.dll")] public static extern uint GetPixel(IntPtr hdc, int x, int y);
     [DllImport("gdi32.dll")] public static extern bool BitBlt(IntPtr dst, int x, int y, int w, int h, IntPtr src, int sx, int sy, uint rop);
     [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hwnd, out RECT r);
+    [DllImport("user32.dll")] public static extern bool IsHungAppWindow(IntPtr hwnd);
+    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     public static extern IntPtr SendMessageTimeoutW(IntPtr hwnd, uint msg, IntPtr wp, string lp, uint flags, uint ms, out IntPtr result);
 
@@ -405,10 +432,29 @@ public static class ThemeGateWin32 {
     // for example under another window).
     public static int Unreadable;
 
+    // Each grid point's brightness from the last Luminance call, column by column; -1 if unread.
+    static readonly double[] Cells = new double[160];
+
+    // The last Luminance call's grid, 10 rows of 16, top row first: each point's brightness as a
+    // digit, 0 black to 9 white, or '?' if unread.
+    public static string[] Map() {
+        var rows = new string[10];
+        for (int j = 0; j < 10; j++) {
+            var row = new char[16];
+            for (int i = 0; i < 16; i++) {
+                double l = Cells[i * 10 + j];
+                row[i] = l < 0 ? '?' : (char)('0' + (int)Math.Round(l * 9));
+            }
+            rows[j] = new string(row);
+        }
+        return rows;
+    }
+
     // The mean brightness (0..1, Rec. 709 weights over sRGB) of the readable points of a 16 x 10
     // grid over the client area; -1 if none is readable.
     public static double Luminance(IntPtr hwnd) {
         Unreadable = 0;
+        for (int k = 0; k < Cells.Length; k++) Cells[k] = -1;
         RECT r;
         if (!GetClientRect(hwnd, out r) || r.Right < 16 || r.Bottom < 10) return -1;
         IntPtr dc = GetDC(hwnd);
@@ -420,7 +466,9 @@ public static class ThemeGateWin32 {
                 for (int j = 0; j < 10; j++) {
                     uint c = GetPixel(dc, (2 * i + 1) * r.Right / 32, (2 * j + 1) * r.Bottom / 20);
                     if (c == 0xFFFFFFFF) { Unreadable++; continue; }
-                    sum += 0.2126 * ((c & 0xFF) / 255.0) + 0.7152 * (((c >> 8) & 0xFF) / 255.0) + 0.0722 * (((c >> 16) & 0xFF) / 255.0);
+                    double l = 0.2126 * ((c & 0xFF) / 255.0) + 0.7152 * (((c >> 8) & 0xFF) / 255.0) + 0.0722 * (((c >> 16) & 0xFF) / 255.0);
+                    Cells[i * 10 + j] = l;
+                    sum += l;
                     n++;
                 }
             }
@@ -429,6 +477,39 @@ public static class ThemeGateWin32 {
     }
 }
 '@
+# The screen around `$Rect` (left, top, right, bottom), DWM's shadow and corners included, saved
+# to -Out as `$Name` for A1.3's check by hand. Returns a report line; a failure is reported, not
+# gated.
+function Save-Screen([int[]] $Rect, [string] $Name, [int] $Margin = 16) {
+    $bmp = $null
+    $g = $null
+    try {
+        Add-Type -AssemblyName System.Drawing
+        $x = $Rect[0] - $Margin
+        $y = $Rect[1] - $Margin
+        $w = $Rect[2] - $Rect[0] + 2 * $Margin
+        $h = $Rect[3] - $Rect[1] + 2 * $Margin
+        $bmp = [Drawing.Bitmap]::new($w, $h)
+        $g = [Drawing.Graphics]::FromImage($bmp)
+        # BitBlt itself: CopyFromScreen rejects SRCCOPY | CAPTUREBLT as an undefined enum value.
+        $dst = $g.GetHdc()
+        $screen = [ThemeGateWin32]::GetDC([IntPtr]::Zero)
+        try {
+            if (-not [ThemeGateWin32]::BitBlt($dst, 0, 0, $w, $h, $screen, $x, $y, 0x40CC0020)) { throw 'BitBlt failed' } # SRCCOPY | CAPTUREBLT
+        } finally {
+            [void][ThemeGateWin32]::ReleaseDC([IntPtr]::Zero, $screen)
+            $g.ReleaseHdc($dst)
+        }
+        $bmp.Save((Join-Path $Out $Name), [Drawing.Imaging.ImageFormat]::Png)
+        "  screenshot $Name ($($Rect[2] - $Rect[0])x$($Rect[3] - $Rect[1]) at $($Rect[0]),$($Rect[1]), $Margin px around)"
+    } catch {
+        "  screenshot $Name failed: $($_.Exception.Message)"
+    } finally {
+        if ($g) { $g.Dispose() }
+        if ($bmp) { $bmp.Dispose() }
+    }
+}
+
 # The window follows Windows' app mode live: the runner's `AppsUseLightTheme` is set to dark and
 # `WM_SETTINGCHANGE "ImmersiveColorSet"` sent to the shell's window (as Settings broadcasts it), then
 # back to light. Gate: the client area turns dark, then light again, within 2 s each; the time is
@@ -440,8 +521,9 @@ function Set-AppMode([int] $Light, [IntPtr] $Hwnd) {
     if (-not (Test-Path $personalize)) { $null = New-Item -Path $personalize -Force }
     Set-ItemProperty -Path $personalize -Name AppsUseLightTheme -Value $Light -Type DWord
     $result = [IntPtr]::Zero
-    # SMTO_ABORTIFHUNG; our window only, so the runner's other windows aren't involved.
-    [void][ThemeGateWin32]::SendMessageTimeoutW($Hwnd, 0x001A, [IntPtr]::Zero, 'ImmersiveColorSet', 2, 2000, [ref] $result)
+    # SMTO_ABORTIFHUNG; our window only, so the runner's other windows aren't involved. Zero: the
+    # window was hung, or didn't answer in 2 s.
+    [ThemeGateWin32]::SendMessageTimeoutW($Hwnd, 0x001A, [IntPtr]::Zero, 'ImmersiveColorSet', 2, 2000, [ref] $result) -ne [IntPtr]::Zero
 }
 $lines = @("live theme switch on the shell at $Size, by mean brightness (gates: dark, then light again, each within 2 s; advisory: <= 100 ms)")
 $checks = [ordered]@{}
@@ -463,15 +545,26 @@ try {
     $script:startLum = -1
     $checks['starts light'] = Wait-Until { $script:startLum = [ThemeGateWin32]::Luminance($hwnd); $script:startLum -gt 0.5 } 5000
     $lines += '{0,-12} {1,7:N1} ms  luminance {2:N2}{3}' -f 'light', $sw.Elapsed.TotalMilliseconds, $script:startLum, $(if ([ThemeGateWin32]::Unreadable -gt 0) { " ($([ThemeGateWin32]::Unreadable) of 160 points unreadable)" } else { '' })
+    if (-not $checks['starts light']) {
+        # What the window was doing (an intermittent failure, TD-0009 §13, run 45134227331: 0.29
+        # for 5 s, then the switches passed). Read before anything changes it.
+        $cr = New-Object ThemeGateWin32+RECT
+        [void][ThemeGateWin32]::GetClientRect($hwnd, [ref] $cr)
+        $lines += "  client $($cr.Right)x$($cr.Bottom); hung: $([ThemeGateWin32]::IsHungAppWindow($hwnd)); foreground: $([ThemeGateWin32]::GetForegroundWindow() -eq $hwnd); process responding: $(-not $p.HasExited -and $p.Responding)"
+        $lines += '  the grid, top row first (0 black to 9 white, ? unread):'
+        $lines += [ThemeGateWin32]::Map() | ForEach-Object { "    $_" }
+        $wr = New-Object ThemeGateWin32+RECT
+        if ([ThemeGateWin32]::GetWindowRect($hwnd, [ref] $wr)) { $lines += Save-Screen @($wr.Left, $wr.Top, $wr.Right, $wr.Bottom) 'theme-start.png' }
+    }
     foreach ($step in @(@{ Name = 'dark'; Light = 0 }, @{ Name = 'light again'; Light = 1 })) {
         $sw = [Diagnostics.Stopwatch]::StartNew()
-        Set-AppMode $step.Light $hwnd
+        $delivered = Set-AppMode $step.Light $hwnd
         $switched = Wait-Until {
             $l = [ThemeGateWin32]::Luminance($hwnd)
             $l -ge 0 -and (($step.Light -eq 0 -and $l -lt 0.5) -or ($step.Light -eq 1 -and $l -gt 0.5))
         } 2000
         $ms = $sw.Elapsed.TotalMilliseconds
-        $lines += '{0,-12} {1}  luminance {2:N2}{3}' -f $step.Name, $(if ($switched) { '{0,7:N1} ms' -f $ms } else { 'NOT in 2 s' }), [ThemeGateWin32]::Luminance($hwnd), $(if ($switched -and $ms -gt 100) { ' (advisory: over 100 ms)' } else { '' })
+        $lines += '{0,-12} {1}  luminance {2:N2}{3}{4}' -f $step.Name, $(if ($switched) { '{0,7:N1} ms' -f $ms } else { 'NOT in 2 s' }), [ThemeGateWin32]::Luminance($hwnd), $(if ($switched -and $ms -gt 100) { ' (advisory: over 100 ms)' } else { '' }), $(if (-not $delivered) { ' (WM_SETTINGCHANGE not answered: hung or over 2 s)' } else { '' })
         $checks["turns $($step.Name)"] = $switched
     }
 } catch {
@@ -1125,39 +1218,6 @@ function Test-Focused($Type, [string] $Name) {
 function Format-Ms([double] $Ms, [double] $Advisory = 100) {
     '{0:N1} ms{1}' -f $Ms, $(if ($Ms -gt $Advisory) { " (advisory: over $Advisory ms)" } else { '' })
 }
-# The screen around `$Rect` (left, top, right, bottom), DWM's shadow and corners included, saved
-# to -Out as `$Name` for A1.3's check by hand. Returns a report line; a failure is reported, not
-# gated.
-function Save-Screen([int[]] $Rect, [string] $Name, [int] $Margin = 16) {
-    $bmp = $null
-    $g = $null
-    try {
-        Add-Type -AssemblyName System.Drawing
-        $x = $Rect[0] - $Margin
-        $y = $Rect[1] - $Margin
-        $w = $Rect[2] - $Rect[0] + 2 * $Margin
-        $h = $Rect[3] - $Rect[1] + 2 * $Margin
-        $bmp = [Drawing.Bitmap]::new($w, $h)
-        $g = [Drawing.Graphics]::FromImage($bmp)
-        # BitBlt itself: CopyFromScreen rejects SRCCOPY | CAPTUREBLT as an undefined enum value.
-        $dst = $g.GetHdc()
-        $screen = [ThemeGateWin32]::GetDC([IntPtr]::Zero)
-        try {
-            if (-not [ThemeGateWin32]::BitBlt($dst, 0, 0, $w, $h, $screen, $x, $y, 0x40CC0020)) { throw 'BitBlt failed' } # SRCCOPY | CAPTUREBLT
-        } finally {
-            [void][ThemeGateWin32]::ReleaseDC([IntPtr]::Zero, $screen)
-            $g.ReleaseHdc($dst)
-        }
-        $bmp.Save((Join-Path $Out $Name), [Drawing.Imaging.ImageFormat]::Png)
-        "  screenshot $Name ($($Rect[2] - $Rect[0])x$($Rect[3] - $Rect[1]) at $($Rect[0]),$($Rect[1]), $Margin px around)"
-    } catch {
-        "  screenshot $Name failed: $($_.Exception.Message)"
-    } finally {
-        if ($g) { $g.Dispose() }
-        if ($bmp) { $bmp.Dispose() }
-    }
-}
-
 $lines = @("Popups on the shell at $Size (the checks are gates, each read back through UIA within 2 s; opening is advisory: <= 100 ms from the key or click to UIA seeing it, U3)")
 $checks = [ordered]@{}
 $hwnd = [IntPtr]::Zero
@@ -1854,6 +1914,372 @@ try {
 foreach ($k in $checks.Keys) { $lines += '{0,-50} {1}' -f $k, (Format-Verdict $checks[$k]) }
 $ok = $checks.Count -gt 0 -and -not ($checks.Values -contains $false)
 Publish 'Data table' $lines $ok
+if (-not $ok) { $failed++ }
+
+# Composites: drawer (TD-0009 A3.5 (6), A3.9, slice 6d) ---------------------------------------------
+# G1's Drawer check, on the drawer probe (crates/dpro-ui/examples/drawer.rs, fixtures/drawer.rs):
+# Enter on "Review changes" opens the drawer, the Group "Preview" (a region landmark), and focus
+# moves to its first change; Esc closes it, and focus goes back to "Review changes". Those are gates.
+# The slide's frames are counted in a second run under --ui-probe idle, with the same Enter and Esc
+# sent inside its 5 s watch (3 s after the first frame): ceil(180 / 16) = 12 frame timers with
+# animations on (A3.7's U16), none with them off. The count is advisory, as the runner's timing is.
+$drawerExe = Join-Path $Bin 'drawer.exe'
+# Waits for the drawer probe `$Process`'s window and returns it with its UIA element.
+function Wait-DrawerWindow($Process) {
+    $found = [IntPtr]::Zero
+    $shown = Wait-Until {
+        $script:drawerHwnd = [UiaGateWin32]::FindWindowW('dismpro.window', 'DISM Pro drawer probe')
+        $script:drawerHwnd -ne [IntPtr]::Zero -and [UiaGateWin32]::IsWindowVisible($script:drawerHwnd)
+    } 30000
+    if (-not $shown) { throw "the drawer probe showed no window in 30 s ($(if ($Process.HasExited) { "exited with code $($Process.ExitCode)" } else { 'still running' }))" }
+    $found = $script:drawerHwnd
+    @{ Hwnd = $found; Root = $ae::FromHandle($found) }
+}
+# Focuses "Review changes" in `$Window`, active, and returns it.
+function Focus-Opener($Window) {
+    $opener = $null
+    $found = Wait-Until { $script:drawerOpener = Find-First $Window.Root $types::Button 'Review changes'; $null -ne $script:drawerOpener } 10000
+    if (-not $found) { throw 'no Button "Review changes" in 10 s' }
+    $opener = $script:drawerOpener
+    [void][GlassGateWin32]::Activate($Window.Hwnd)
+    $opener.SetFocus()
+    if (-not (Wait-Until { $opener.Current.HasKeyboardFocus } 2000)) { throw '"Review changes" took no focus in 2 s' }
+    $opener
+}
+
+$lines = @("Drawer on the drawer probe at $Size (the checks are gates; the slide's frame count is advisory)")
+$checks = [ordered]@{}
+$p = $null
+$window = $null
+try {
+    if (-not (Test-Path $drawerExe)) { throw "missing $drawerExe (docker compose run --rm t3-tools builds it)" }
+    $p = Start-Process -FilePath $drawerExe -ArgumentList @('--size', $Size) -PassThru
+    $null = $p.Handle
+    $window = Wait-DrawerWindow $p
+    $null = Focus-Opener $window
+    Send-Key 0x0D
+    $drawer = $null
+    $checks['Enter on Review changes opens the Group "Preview"'] = Wait-Until { $script:drawer = Find-First $window.Root $types::Group 'Preview'; $null -ne $script:drawer } 2000
+    if ($null -eq $drawer) { throw 'no Group "Preview" in 2 s' }
+    $first = Find-First $drawer $types::CheckBox 'Temporary files'
+    $checks['focus moves to its first change'] = ($null -ne $first) -and (Wait-Until { $first.Current.HasKeyboardFocus } 2000)
+    Send-Key 0x1B
+    $checks['Esc closes it'] = Wait-Until { (Find-Elements $window.Root $types::Group 'Preview').Count -eq 0 } 2000
+    $checks['focus goes back to Review changes'] = Wait-Until {
+        $back = Find-First $window.Root $types::Button 'Review changes'
+        $null -ne $back -and $back.Current.HasKeyboardFocus
+    } 2000
+} catch {
+    $lines += "drawer FAILED: $($_.Exception.Message)"
+    $checks['client'] = $false
+} finally {
+    if ($null -ne $p -and -not $p.HasExited) {
+        if ($null -ne $window) { [void][UiaGateWin32]::PostMessageW($window.Hwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) } # WM_CLOSE
+        if (-not $p.WaitForExit(5000)) { $p.Kill(); $lines += 'the drawer probe did not close on WM_CLOSE'; $checks['closes'] = $false }
+    }
+}
+# The slide's frames (advisory): the idle probe's frame timers, with the drawer opened and closed
+# inside its watch.
+try {
+    if (Test-Path $drawerExe) {
+        $report = Join-Path $Out 'drawer-idle.txt'
+        Remove-Item $report -ErrorAction SilentlyContinue
+        $q = Start-Process -FilePath $drawerExe -ArgumentList @('--size', $Size, '--ui-probe', 'idle', '--probe-out', $report) -PassThru
+        $null = $q.Handle
+        $idleWindow = Wait-DrawerWindow $q
+        Start-Sleep -Milliseconds 3500
+        $null = Focus-Opener $idleWindow
+        Send-Key 0x0D
+        Start-Sleep -Milliseconds 1000
+        Send-Key 0x1B
+        if (-not $q.WaitForExit(15000)) { $q.Kill(); throw 'the idle probe reported nothing in 15 s' }
+        $fields = @{}
+        foreach ($pair in ((Get-Content $report -Raw).Trim() -split '\s+')) {
+            $key, $value = $pair -split '=', 2
+            $fields[$key] = $value
+        }
+        $timers = [int] $fields.timers
+        $lines += 'slide: {0} frame timers and {1} paints in the watch, for an open and a close (12 timers with animations on, 0 off){2}' -f $timers, $fields.paints, $(if ($timers -ne 12 -and $timers -ne 0) { ' (advisory: not 12)' } else { '' })
+    }
+} catch {
+    $lines += "slide count (advisory) failed: $($_.Exception.Message)"
+}
+foreach ($k in $checks.Keys) { $lines += '{0,-50} {1}' -f $k, (Format-Verdict $checks[$k]) }
+$ok = $checks.Count -gt 0 -and -not ($checks.Values -contains $false)
+Publish 'Composites: drawer' $lines $ok
+if (-not $ok) { $failed++ }
+
+# Composites (TD-0009 A3.5, slice 6c) ---------------------------------------------------------------
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class CompositesGateWin32 {
+    [DllImport("user32.dll")]
+    static extern bool SystemParametersInfoW(uint action, uint param, ref uint value, uint ini);
+    // SPI_GETMESSAGEDURATION, in seconds; -1 if it couldn't be read.
+    public static long MessageDuration() { uint v = 0; return SystemParametersInfoW(0x2016, 0, ref v, 0) ? v : -1; }
+    // SPI_GETCLIENTAREAANIMATION, a BOOL; -1 if it couldn't be read.
+    public static long ClientAreaAnimation() { uint v = 0; return SystemParametersInfoW(0x1042, 0, ref v, 0) ? v : -1; }
+}
+'@
+$messageS = [CompositesGateWin32]::MessageDuration()
+$messageMs = if ($messageS -gt 0) { $messageS * 1000 } else { 5000 }
+$paletteField = 'Search commands'
+
+$lines = @("Composites: slice 6c's palette and toast on the composites page (shell --composites) at $Size (the checks are gates, each read back within 2 s; the palette's opening is advisory: <= 100 ms from Ctrl+K to UIA seeing its field focused, U15)")
+$lines += "Windows: SPI_GETMESSAGEDURATION $messageS s, SPI_GETCLIENTAREAANIMATION $([CompositesGateWin32]::ClientAreaAnimation())"
+$checks = [ordered]@{}
+$hwnd = [IntPtr]::Zero
+$p = Start-Process -FilePath $exe.shell -ArgumentList @('--size', $Size, '--composites') -PassThru
+$null = $p.Handle
+try {
+    $shown = Wait-Until {
+        $script:hwnd = [UiaGateWin32]::FindWindowW('dismpro.window', 'DISM Pro shell probe')
+        $script:hwnd -ne [IntPtr]::Zero -and [UiaGateWin32]::IsWindowVisible($script:hwnd)
+    } 30000
+    if (-not $shown) { throw "the composites page showed no window in 30 s ($(if ($p.HasExited) { "exited with code $($p.ExitCode)" } else { 'still running' }))" }
+    $root = $ae::FromHandle($hwnd)
+    $found = Wait-Until { (Find-Elements $root $types::Text 'Clean').Count -ge 1 } 10000
+    if (-not $found) { throw 'no heading "Clean" in 10 s' }
+    $checks['the window is active'] = [GlassGateWin32]::Activate($hwnd)
+    $m = [PopupGateWin32]::Rect($hwnd)
+    $center = @([int] (($m[0] + $m[2]) / 2), [int] (($m[1] + $m[3]) / 2))
+    [void][TextGateWin32]::MoveTo($center[0], $center[1])
+
+    # The palette (A3.5 (3)): Ctrl+K shows it in an owned popup that takes the activation, its
+    # field focused; Down moves the one selected result while focus stays in the field; typing
+    # filters; Esc closes it and the page is active again.
+    $palette = $null
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    [void][TextGateWin32]::Chord($ctrl, 0x4B) # Ctrl+K
+    $opened = Wait-Until {
+        $script:palette = Find-Popup $hwnd $types::Edit $paletteField
+        $null -ne $script:palette -and (Test-Focused $types::Edit $paletteField)
+    } 2000
+    $openMs = $sw.Elapsed.TotalMilliseconds
+    $checks['Ctrl+K: the palette, its field focused'] = $opened
+    if (-not $opened) { throw "Ctrl+K showed no palette with its field focused in 2 s ($((Get-Shown $hwnd).Count) popups shown)" }
+    $lines += "palette open: Ctrl+K to its field focused in UIA, $(Format-Ms $openMs)"
+    $lines += Save-Screen ([PopupGateWin32]::Rect($palette.Hwnd)) 'composites-palette.png'
+    $checks['it takes the activation'] = [PopupGateWin32]::GetForegroundWindow() -eq $palette.Hwnd
+    $paletteRoot = $ae::FromHandle($palette.Hwnd)
+    $options = { @(Find-Elements $paletteRoot $types::ListItem $null) }
+    $selected = { @(& $options | Where-Object { Test-Selected $_ } | ForEach-Object { $_.Current.Name }) }
+    $all = (& $options).Count
+    $first = & $selected
+    $lines += "  results: $all, selected: $($first -join ', ')"
+    $checks['a List "Commands", exactly one result selected'] = (Find-Elements $paletteRoot $types::List 'Commands').Count -eq 1 -and $all -gt 1 -and $first.Count -eq 1
+    Send-Key 0x28 # Down
+    $checks['Down moves the selection, focus stays in the field'] = Wait-Until {
+        $s = & $selected
+        $s.Count -eq 1 -and $s[0] -ne $first[0] -and (Test-Focused $types::Edit $paletteField)
+    } 2000
+    [void][TextGateWin32]::Type('set')
+    $checks['typing filters the results'] = Wait-Until {
+        $n = (& $options).Count
+        $value = (Get-Pattern $palette.Element ([Windows.Automation.ValuePattern]::Pattern)).Current.Value
+        $value -eq 'set' -and $n -ge 1 -and $n -lt $all
+    } 2000
+    Send-Key 0x1B # Esc
+    $checks['Esc closes it, the page active again'] = Wait-Until {
+        (Get-Shown $hwnd).Count -eq 0 -and [PopupGateWin32]::GetForegroundWindow() -eq $hwnd
+    } 2000
+
+    # The toast (A3.5 (7)): Ctrl+J starts a job, whose toast shows at the window's bottom end
+    # without the activation, and a click on it leaves the activation where it was. F6 gives it
+    # the keyboard (Dismiss focused), and F6 hands it back. Ctrl+E ends the job: the toast hides
+    # once Windows' message duration has passed with the pointer and the focus elsewhere.
+    [void][TextGateWin32]::Chord($ctrl, 0x4A) # Ctrl+J
+    $toast = $null
+    $toastShown = Wait-Until { $script:toast = Find-Popup $hwnd $types::Button 'Dismiss'; $null -ne $script:toast } 2000
+    $checks['Ctrl+J: a job''s toast shows'] = $toastShown
+    if (-not $toastShown) { throw "Ctrl+J showed no toast with Dismiss in 2 s ($((Get-Shown $hwnd).Count) popups shown)" }
+    Start-Sleep -Milliseconds 200
+    $t = [PopupGateWin32]::Rect($toast.Hwnd)
+    $m = [PopupGateWin32]::Rect($hwnd)
+    $lines += Save-Screen $t 'composites-toast.png'
+    $lines += "  toast at $($t -join ','), the window at $($m -join ',')"
+    $checks['it shows without the activation'] = [PopupGateWin32]::GetForegroundWindow() -eq $hwnd -and ([PopupGateWin32]::ExStyle($toast.Hwnd) -band 0x08000000) -eq 0 # not WS_EX_NOACTIVATE
+    $checks['at the window''s bottom end'] = ($m[2] - $t[2]) -ge 8 -and ($m[2] - $t[2]) -le 64 -and ($m[3] - $t[3]) -ge 8 -and ($m[3] - $t[3]) -le 64
+    # In its left padding, halfway down: on the toast, on none of its controls.
+    [void][TextGateWin32]::MoveTo($t[0] + 8, [int] (($t[1] + $t[3]) / 2))
+    [void][PopupGateWin32]::Click($false)
+    Start-Sleep -Milliseconds 300
+    $checks['a click on it leaves the activation'] = [PopupGateWin32]::GetForegroundWindow() -eq $hwnd -and (Get-Shown $hwnd).Count -eq 1
+    [void][TextGateWin32]::MoveTo($center[0], $center[1])
+    Send-Key 0x75 # F6
+    $checks['F6 gives it the keyboard, Dismiss focused'] = Wait-Until {
+        [PopupGateWin32]::GetForegroundWindow() -eq $toast.Hwnd -and (Test-Focused $types::Button 'Dismiss')
+    } 2000
+    Send-Key 0x75 # F6
+    $checks['F6 again hands it back'] = Wait-Until { [PopupGateWin32]::GetForegroundWindow() -eq $hwnd } 2000
+    Send-Key 0x75 # F6
+    $null = Wait-Until { [PopupGateWin32]::GetForegroundWindow() -eq $toast.Hwnd } 2000
+    Send-Key 0x1B # Esc
+    $checks['Esc in it hides it, the page active again'] = Wait-Until {
+        (Get-Shown $hwnd).Count -eq 0 -and [PopupGateWin32]::GetForegroundWindow() -eq $hwnd
+    } 2000
+    [void][TextGateWin32]::Chord($ctrl, 0x45) # Ctrl+E
+    $sw.Restart()
+    $ended = Wait-Until { $null -ne (Find-Popup $hwnd $types::Button 'View') } 2000
+    $hid = $ended -and (Wait-Until { (Get-Shown $hwnd).Count -eq 0 } ($messageMs + 3000))
+    $lines += 'ended toast: hid {0:N0} ms after the job ended (message duration {1} ms)' -f $sw.Elapsed.TotalMilliseconds, $messageMs
+    $checks['an ended toast hides after the message duration'] = $hid -and $sw.Elapsed.TotalMilliseconds -ge ($messageMs - 500)
+} catch {
+    $lines += "composites FAILED: $($_.Exception.Message)"
+    $checks['client'] = $false
+} finally {
+    if (-not $p.HasExited) {
+        if ($hwnd -ne [IntPtr]::Zero) { [void][UiaGateWin32]::PostMessageW($hwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) } # WM_CLOSE
+        if (-not $p.WaitForExit(5000)) { $p.Kill(); $lines += 'the composites page did not close on WM_CLOSE'; $checks['closes'] = $false }
+    }
+}
+foreach ($k in $checks.Keys) { $lines += '{0,-50} {1}' -f $k, (Format-Verdict $checks[$k]) }
+$ok = $checks.Count -gt 0 -and -not ($checks.Values -contains $false)
+Publish 'Composites' $lines $ok
+if (-not $ok) { $failed++ }
+
+# Accessibility depth: notifications (TD-0009 A4.5, A4.7 U23, slice 7b) ---------------------------
+# Managed UI Automation can't hear notifications, so a COM IUIAutomation5 client does. It's declared
+# flat below: IUIAutomation's 55 methods (ElementFromHandle the 4th), IUIAutomation2's 6, 3's 2 and
+# 4's 2, then 5's two. It subscribes on an MTA thread of its own, as UI Automation advises for event
+# handlers, and stamps each notification with the Stopwatch clock this script reads.
+Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Concurrent;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Threading;
+
+[ComImport, Guid("C7CB2637-E6C2-4D0C-85DE-4948C02175C7"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface INoticeGateHandler {
+    [PreserveSig] int HandleNotificationEvent(IntPtr sender, int kind, int processing,
+        [MarshalAs(UnmanagedType.BStr)] string text, [MarshalAs(UnmanagedType.BStr)] string activity);
+}
+
+[ComImport, Guid("25F700C8-D816-4057-A9DC-3CBDEE77E256"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface INoticeGateAutomation5 {
+    void M01(); void M02(); void M03();
+    [PreserveSig] int ElementFromHandle(IntPtr hwnd, out IntPtr element);
+    void M05(); void M06(); void M07(); void M08(); void M09(); void M10(); void M11(); void M12();
+    void M13(); void M14(); void M15(); void M16(); void M17(); void M18(); void M19(); void M20();
+    void M21(); void M22(); void M23(); void M24(); void M25(); void M26(); void M27(); void M28();
+    void M29(); void M30(); void M31(); void M32(); void M33(); void M34(); void M35(); void M36();
+    void M37(); void M38(); void M39(); void M40(); void M41(); void M42(); void M43(); void M44();
+    void M45(); void M46(); void M47(); void M48(); void M49(); void M50(); void M51(); void M52();
+    void M53(); void M54(); void M55(); void M56(); void M57(); void M58(); void M59(); void M60();
+    void M61(); void M62(); void M63(); void M64(); void M65();
+    [PreserveSig] int AddNotificationEventHandler(IntPtr element, int scope, IntPtr cacheRequest, INoticeGateHandler handler);
+    [PreserveSig] int RemoveNotificationEventHandler(IntPtr element, INoticeGateHandler handler);
+}
+
+[ComVisible(true), ClassInterface(ClassInterfaceType.None)]
+public sealed class NoticeGateSink : INoticeGateHandler {
+    public readonly ConcurrentQueue<string> Seen = new ConcurrentQueue<string>();
+    public int HandleNotificationEvent(IntPtr sender, int kind, int processing, string text, string activity) {
+        Seen.Enqueue(string.Format("{0}|{1}|{2}|{3}|{4}", Stopwatch.GetTimestamp(), kind, processing, activity, text));
+        return 0;
+    }
+}
+
+public static class NoticeGate {
+    public static NoticeGateSink Sink;
+    static Thread worker;
+    static ManualResetEventSlim stop;
+    static int hr;
+    // Subscribes to the window's notifications (TreeScope_Subtree) and returns the HRESULT, 0 once
+    // subscribed. Stop unsubscribes.
+    public static int Start(IntPtr hwnd) {
+        Sink = new NoticeGateSink();
+        stop = new ManualResetEventSlim(false);
+        var ready = new ManualResetEventSlim(false);
+        hr = unchecked((int) 0x80004005);
+        worker = new Thread(() => {
+            IntPtr element = IntPtr.Zero;
+            try {
+                object o = Activator.CreateInstance(Type.GetTypeFromCLSID(new Guid("E22AD333-B25F-460C-83D0-0581107395C9")));
+                var uia = (INoticeGateAutomation5) o;
+                hr = uia.ElementFromHandle(hwnd, out element);
+                if (hr == 0) { hr = uia.AddNotificationEventHandler(element, 7, IntPtr.Zero, Sink); }
+                ready.Set();
+                if (hr == 0) {
+                    stop.Wait();
+                    uia.RemoveNotificationEventHandler(element, Sink);
+                }
+            } catch (Exception e) {
+                hr = e.HResult;
+            } finally {
+                ready.Set();
+                if (element != IntPtr.Zero) { Marshal.Release(element); }
+            }
+        });
+        worker.SetApartmentState(ApartmentState.MTA);
+        worker.IsBackground = true;
+        worker.Start();
+        if (!ready.Wait(10000)) { return unchecked((int) 0x80004005); }
+        return hr;
+    }
+    public static void Stop() {
+        if (stop != null) { stop.Set(); }
+        if (worker != null) { worker.Join(5000); worker = null; }
+    }
+}
+'@
+
+# The shell's drawer job runs 4 s from the drawer opening (--job-ms 4000), and Invoke on "Review
+# changes" opens it. A job's progress is said on a new 10 % step, at least 2 s after its start and
+# after its last notice: so once, at 2 s (50 %). At 4 s it's at 100 %, which is never said (A4.4).
+# Gates: one progress notification, saying the step, of kind Other with MostRecent processing and
+# the job's activity, not before 2 s. U23 (advisory): delivered <= 100 ms after its step was due.
+$lines = @("Accessibility depth, notifications: the shell at $Size with --job-ms 4000, through a COM IUIAutomation5 client (the checks are gates; the time is advisory, U23: 100 ms)")
+$checks = [ordered]@{}
+$hwnd = [IntPtr]::Zero
+$p = Start-Process -FilePath $exe.shell -ArgumentList @('--size', $Size, '--job-ms', '4000') -PassThru
+$null = $p.Handle
+try {
+    $shown = Wait-Until {
+        $script:hwnd = [UiaGateWin32]::FindWindowW('dismpro.window', 'DISM Pro shell probe')
+        $script:hwnd -ne [IntPtr]::Zero -and [UiaGateWin32]::IsWindowVisible($script:hwnd)
+    } 30000
+    if (-not $shown) { throw "the shell showed no window in 30 s ($(if ($p.HasExited) { "exited with code $($p.ExitCode)" } else { 'still running' }))" }
+    $root = $ae::FromHandle($hwnd)
+    $review = $null
+    $found = Wait-Until { $script:review = Find-First $root $types::Button 'Review changes'; $null -ne $script:review } 10000
+    if (-not $found) { throw 'no button "Review changes" in 10 s' }
+    $hr = [NoticeGate]::Start($hwnd)
+    $checks['the client subscribes to notifications'] = $hr -eq 0
+    if ($hr -ne 0) { throw ('AddNotificationEventHandler failed: 0x{0:X8}' -f $hr) }
+    $t0 = [Diagnostics.Stopwatch]::GetTimestamp()
+    (Get-Pattern $review ([Windows.Automation.InvokePattern]::Pattern)).Invoke()
+    Start-Sleep -Milliseconds 5500
+    [NoticeGate]::Stop()
+    $seen = @([NoticeGate]::Sink.Seen.ToArray() | ForEach-Object {
+        $f = $_ -split '\|', 5
+        [pscustomobject]@{ Ms = ([long] $f[0] - $t0) * 1000.0 / [Diagnostics.Stopwatch]::Frequency; Kind = [int] $f[1]; Processing = [int] $f[2]; Activity = $f[3]; Text = $f[4] }
+    })
+    foreach ($n in $seen) { $lines += '  {0,8:N1} ms after Invoke: kind {1}, processing {2}, {3}: "{4}"' -f $n.Ms, $n.Kind, $n.Processing, $n.Activity, $n.Text }
+    $progress = @($seen | Where-Object { $_.Activity -like 'DismPro.Progress.*' })
+    $checks['one progress notification over the job'] = $progress.Count -eq 1
+    if ($progress.Count -ge 1) {
+        $n = $progress[0]
+        $checks['it says the step: "Apply 20 changes: N0 percent"'] = $n.Text -match '^Apply 20 changes: [1-9]0 percent$'
+        $checks['kind Other, MostRecent, DismPro.Progress.0'] = $n.Kind -eq 4 -and $n.Processing -eq 3 -and $n.Activity -eq 'DismPro.Progress.0'
+        $checks['not before 2 s into the job'] = $n.Ms -ge 2000
+        $lines += 'U23: delivered {0} after its step was due (2 s after Invoke)' -f (Format-Ms ($n.Ms - 2000))
+    }
+} catch {
+    $lines += "notifications FAILED: $($_.Exception.Message)"
+    $checks['client'] = $false
+} finally {
+    [NoticeGate]::Stop()
+    if (-not $p.HasExited) {
+        if ($hwnd -ne [IntPtr]::Zero) { [void][UiaGateWin32]::PostMessageW($hwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) } # WM_CLOSE
+        if (-not $p.WaitForExit(5000)) { $p.Kill(); $lines += 'the shell did not close on WM_CLOSE'; $checks['closes'] = $false }
+    }
+}
+foreach ($k in $checks.Keys) { $lines += '{0,-50} {1}' -f $k, (Format-Verdict $checks[$k]) }
+$ok = $checks.Count -gt 0 -and -not ($checks.Values -contains $false)
+Publish 'Accessibility depth: notifications' $lines $ok
 if (-not $ok) { $failed++ }
 
 exit $failed

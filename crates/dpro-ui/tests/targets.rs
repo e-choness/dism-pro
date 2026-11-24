@@ -113,3 +113,49 @@ fn count<M>(ui: &Ui<M>, id: NodeId) -> usize {
         })
         .sum()
 }
+
+/// Slice 6c's windows (TD-0009 A3.9): the palette's field and options, the toast's Dismiss and
+/// actions, the job card's Cancel and the dialog's buttons. A palette option is a target too.
+#[test]
+fn every_overlay_target_is_at_least_24_px() {
+    use composites::{Model, Msg as C, Step as S, Window};
+    let mut small = Vec::new();
+    let mut targets = 0;
+    let mut check = |run: &composites::Run, w: Window, name: &str| {
+        let ui = run.ui_of(w);
+        let mut here = Vec::new();
+        too_small(ui, ui.root(), &mut here);
+        options_too_small(ui, ui.root(), &mut here);
+        small.extend(here.into_iter().map(|s| format!("{name}: {s}")));
+        count(ui, ui.root())
+    };
+    let run = composites::Run::with(Model::new()).palette_open();
+    targets += check(&run, Window::Popup, "the palette");
+    let mut run = composites::Run::with(Model::new()).job_running();
+    targets += check(&run, Window::Toast, "a running toast");
+    targets += check(&run, Window::Page, "the job card");
+    run.step(S::Update(C::JobEnd(dpro_ui::composite::ToastTone::Done)));
+    targets += check(&run, Window::Toast, "an ended toast");
+    let run = composites::Run::with(Model::new()).dialog_open();
+    targets += check(&run, Window::Popup, "the dialog");
+    assert!(targets >= 8, "{targets} targets");
+    assert!(
+        small.is_empty(),
+        "targets under {MIN} px:\n{}",
+        small.join("\n")
+    );
+}
+
+/// Every enabled menu item or option under `id` smaller than [`MIN`] either way, described.
+fn options_too_small<M>(ui: &Ui<M>, id: NodeId, out: &mut Vec<String>) {
+    for c in ui.children(id) {
+        let Some(n) = ui.info(c) else { continue };
+        if n.role == Role::MenuItem && n.enabled && (n.rect.w < MIN || n.rect.h < MIN) {
+            out.push(format!(
+                "{:?} {:?} is {} × {}",
+                n.role, n.text, n.rect.w, n.rect.h
+            ));
+        }
+        options_too_small(ui, c, out);
+    }
+}

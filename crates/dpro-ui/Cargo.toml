@@ -42,11 +42,21 @@ name = "ir"
 harness = false
 bench = false
 
+# TD-0009 A3.7's U16: the drawer's open, slide and close, their frame times (slice 6d).
+[[bench]]
+name = "drawer_slide"
+harness = false
+
 # TD-0009 §7 U4, U6, U7: G1's probe target until roadmap 3.2 gives dismpro.exe its shell. The
 # benches' synthetic shell in a real window; `.github/scripts/ui-gates.ps1` measures it against
 # dpro-win's bare_window.
 [[example]]
 name = "shell"
+
+# TD-0009 A3.9's G1 Drawer check and A3.7's U16: slice 6d's drawer page in a real window, driven
+# by `.github/scripts/ui-gates.ps1`.
+[[example]]
+name = "drawer"
 
 [lints]
 workspace = true

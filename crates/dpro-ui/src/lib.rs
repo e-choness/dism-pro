@@ -60,6 +60,7 @@ mod geom;
 mod input;
 mod layout;
 pub mod materials;
+mod notice;
 mod paint;
 #[cfg(windows)]
 pub mod platform;
@@ -75,6 +76,10 @@ mod tree;
 mod ui;
 mod values;
 
+// Slice 6d: scopes and slides (TD-0009 A3.5 additions 10, 11).
+mod scope;
+mod slide;
+
 pub use accesskit;
 pub use build::Cx;
 pub use canvas::Canvas;
@@ -83,15 +88,18 @@ pub use dpro_core::units::{Bytes, UnixMillis};
 pub use field::{Caret, ClipboardRequest, Cursor, FieldInfo, Insert, MAX_FIELD_LEN, TextEdit};
 pub use geom::{Insets, Point, Rect, RectPx, Size};
 pub use input::{Input, KeyCode, KeyEvent, Mods};
+pub use notice::{Activity, MAX_NOTICE_CHARS, Notice, NoticeKind};
 pub use popup::{Placement, Popup, PopupKind, place};
 pub use scroll::{Axes, ScrollBar, ScrollInfo};
 pub use style::{Align, Axis, Dim, Justify, Style};
 pub use table::{
-    COLUMN_FIT, COLUMN_FIT_ALL, COLUMN_RESET, Cells, Column, ColumnMenuLabels, Row, Status,
-    TABLE_BODY, TABLE_CHECK, TABLE_HEADER, Table, TableEvent, Track,
+    COLUMN_FIT, COLUMN_FIT_ALL, COLUMN_RESET, Cells, Column, ColumnMenuLabels, Row, RowGroup,
+    RowLines, Status, TABLE_BODY, TABLE_CHECK, TABLE_HEADER, Table, TableEvent, Track, table_group,
 };
 pub use text::{CaretStop, FakeText, GlyphSink, Icon, TextMetrics, TextStyle, TextSystem};
 pub use theme::{Color, Scheme, SysColors, Theme, Tone, tokens};
 pub use tree::{Element, Group, Key, Landmark, Live, Look, NodeId, NodeInfo, Radius, Role};
-pub use ui::{MAX_TEXT_SCALE, Motion, Ui};
+pub use ui::{MAX_TEXT_SCALE, MESSAGE_MS, Motion, Ui};
 pub use values::{Formats, InvariantFormats, SizeUnits, format_size};
+
+pub use slide::Edge;
