@@ -114,7 +114,9 @@ impl Types {
 /// One folder for a [`Lister`] to list, one level deep.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ListRequest {
+    /// The listing this request starts: its batches carry it.
     pub generation: Generation,
+    /// The folder to list.
     pub path: PathBuf,
 }
 
@@ -134,7 +136,9 @@ pub struct Entry {
 /// Up to [`BATCH`] entries of one listing, in the lister's order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ListBatch {
+    /// The listing it belongs to: the request's.
     pub generation: Generation,
+    /// Its entries, at most [`BATCH`].
     pub entries: Vec<Entry>,
     /// `None` while more batches follow; the listing's end on its last batch.
     pub end: Option<Result<(), ListError>>,
@@ -221,6 +225,8 @@ pub struct FsLister {
 }
 
 impl FsLister {
+    /// A lister that calls `wake` on a listing's thread after each batch it sends. Starts no
+    /// thread until a request comes; changes nothing on disk.
     #[must_use]
     pub fn new(wake: Box<dyn Fn() + Send + Sync>) -> Self {
         let (send, batches) = mpsc::channel();
@@ -460,6 +466,7 @@ impl FolderModel {
         }
     }
 
+    /// What it chooses: a folder, or a file of some types.
     #[must_use]
     pub fn mode(&self) -> &Mode {
         &self.mode
@@ -495,6 +502,7 @@ impl FolderModel {
         self.generation
     }
 
+    /// Where the current listing stands.
     #[must_use]
     pub fn listing(&self) -> Listing {
         self.listing
@@ -617,6 +625,7 @@ impl FolderModel {
         &self.table
     }
 
+    /// The rows' table, for the view's events (the current row moved, a row selected).
     pub fn table_mut(&mut self) -> &mut TableModel {
         &mut self.table
     }
@@ -846,5 +855,39 @@ mod tests {
         }));
         assert_eq!(m.choice(), Some(path.clone()), "found while it lists");
         assert_eq!(m.root(), path.parent());
+    }
+
+    /// `\\?\` paths and UNC paths are full paths: the field takes them, a pasted one too, and Up
+    /// stops at their root (A3.5 (12), A3.8). T2 runs it.
+    #[cfg(windows)]
+    #[test]
+    fn long_and_unc_paths_are_full_paths_and_up_stops_at_their_root() {
+        for (typed, root) in [
+            (r"\\?\C:\Windows\WinSxS", r"\\?\C:\"),
+            (r"\\server\share\images", r"\\server\share\"),
+            (r"\\?\UNC\server\share\images", r"\\?\UNC\server\share\"),
+        ] {
+            let mut m = FolderModel::new(Mode::Folder);
+            *m.path_mut() = format!("\"{typed}\"");
+            let request = m.go().expect(typed);
+            assert_eq!(request.path, Path::new(typed));
+            assert_eq!(m.root(), Some(Path::new(root)), "{typed}");
+            assert!(m.up().is_some(), "{typed} has a parent");
+            let mut ups = 1;
+            while m.up().is_some() {
+                ups += 1;
+            }
+            assert_eq!(
+                m.folder(),
+                Some(Path::new(root)),
+                "{typed}: Up stops at its root"
+            );
+            assert!(ups <= 2, "{typed}: {ups} levels");
+        }
+        let mut m = FolderModel::new(Mode::Folder);
+        for refused in [r"\\?\C:\Windows\..\Users", r"C:Windows", r"\Windows"] {
+            *m.path_mut() = refused.to_owned();
+            assert!(m.go().is_err(), "{refused}");
+        }
     }
 }

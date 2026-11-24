@@ -95,7 +95,10 @@ fn focus_row(run: &mut Run, at: u32) {
         run.step(key(KeyCode::Tab, NONE));
     }
     let focus = run.ui.focus().and_then(|f| run.ui.info(f)).map(|n| n.role);
-    assert!(on_a_row(run), "Tab never reached the rows: focus on {focus:?}");
+    assert!(
+        on_a_row(run),
+        "Tab never reached the rows: focus on {focus:?}"
+    );
 }
 
 /// The text of the first node keyed `key` under `part`.
