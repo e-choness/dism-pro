@@ -245,21 +245,25 @@ impl<M> Ui<M> {
     }
 
     /// Node `i`'s children within `visible`, over the fill `under`. A viewport's show moved by
-    /// its offset, and its bars go over them, inside its hairline if it has one.
+    /// its offset, and its bars go over them, inside its border if it has one.
     fn paint_children(&self, i: u32, visible: RectPx, under: Tone, p: &mut Painter<'_, '_>) {
         let node = &self.nodes[i as usize];
         let origin = p.canvas.origin();
         let mut visible = visible;
         if node.scroll != NIL {
-            if node.look.border.is_some() {
-                // Content scrolls under the hairline (a pixel wide), not over it, as CSS clips
-                // to the padding box. No viewport is rounded, so the corners need no clip.
-                let r = p.canvas.placed(node.rect.snap(p.scale));
+            if let Some(border) = node.look.border {
+                // Content and bars scroll under the border, not over it, as CSS clips to the
+                // padding box: a hairline is a pixel, a transient surface's border in high
+                // contrast more (A4.4). No viewport is rounded, so the corners need no clip.
+                let (r, w) = (
+                    p.canvas.placed(node.rect.snap(p.scale)),
+                    p.border_px(border),
+                );
                 visible = visible.intersect(RectPx {
-                    x0: r.x0 + 1,
-                    y0: r.y0 + 1,
-                    x1: r.x1 - 1,
-                    y1: r.y1 - 1,
+                    x0: r.x0 + w,
+                    y0: r.y0 + w,
+                    x1: r.x1 - w,
+                    y1: r.y1 - w,
                 });
             }
             // A table's rows are laid out from their base.

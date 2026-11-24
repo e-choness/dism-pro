@@ -1,5 +1,6 @@
 //! The high-contrast audit (TD-0009 A4.5, A4.9; slice 7d). Every screen the fixtures reach,
-//! painted in high contrast, keeps Microsoft's contrast-theme rules and WCAG 2.2's 1.4.1 and 1.4.11:
+//! painted in high contrast, keeps Microsoft's contrast-theme rules and WCAG 2.2's 1.4.1 and
+//! 1.4.11:
 //! 1. every pixel is one of the 8 system colors, or an antialiased edge between them;
 //! 2. every text run and glyph is a documented pair: `WindowText`, `GrayText` or `HotLight` on
 //!    `Window`, `HighlightText` on `Highlight`, `ButtonText` on `ButtonFace`, and the one listed
@@ -14,8 +15,9 @@
 //!
 //! The screens: the shell's table page (a row current, a category checked), its drawer with Hold
 //! to apply half held, a summary page and Settings; the shell's row menu, column menu, Start page
-//! list and a tooltip; the composites page, Details open; and every standard control, enabled and
-//! disabled. A5's and A6's fixtures join as they land.
+//! list (also scrolled in a short window, its bar shown) and a tooltip; the composites page,
+//! Details open; and every standard control, enabled and disabled. A5's and A6's fixtures join as
+//! they land.
 //!
 //! How text is found: a screen is painted twice, with `FakeText` and with its metrics but no ink.
 //! Where the two frames differ is text or a glyph, and the second frame says what is under it.
@@ -397,22 +399,45 @@ fn border(ui: &Ui<shell::Msg>) -> Vec<String> {
 }
 
 /// The shell's popups as their windows show them: the row menu and the column menu opened from
-/// the keyboard, the Start page list, and the drawer button's tooltip.
+/// the keyboard, the Start page list, the same list scrolled in a window shorter than its
+/// options with its bar shown, and the drawer button's tooltip.
 fn popups() -> Vec<(&'static str, Ui<shell::Msg>)> {
     use shell::{Run, Shell, Step};
     let take = |run: Run| run.popup;
     let rows = Run::with(Shell::new()).menu_open();
     let columns = Run::with(Shell::new()).column_menu_open();
     // The list opens from its dropdown, which anchors it: F4.
-    let mut list = audit::settings_page();
-    let combo = list
-        .ui
-        .find(&Run::START_COMBO)
-        .expect("Settings has the dropdown");
-    list.ui.set_focus(Some(combo));
-    list.step(Step::Input(audit::key(KeyCode::F4, Mods::default())));
-    list.settle();
-    assert!(list.popup_open, "F4 opens the list");
+    let open_list = || {
+        let mut list = audit::settings_page();
+        let combo = list
+            .ui
+            .find(&Run::START_COMBO)
+            .expect("Settings has the dropdown");
+        list.ui.set_focus(Some(combo));
+        list.step(Step::Input(audit::key(KeyCode::F4, Mods::default())));
+        list.settle();
+        assert!(list.popup_open, "F4 opens the list");
+        list
+    };
+    let list = open_list();
+    // What scrolls, and the bar over it, stay inside the border, which high contrast draws
+    // wider than a hairline.
+    let mut short = take(open_list());
+    short.set_auto_hide_scroll_bars(false);
+    short.set_viewport(Size {
+        h: 64.0,
+        ..short.viewport()
+    });
+    short.layout(&mut FakeText);
+    short.dispatch(audit::key(KeyCode::End, Mods::default()), &mut Vec::new());
+    short.layout(&mut FakeText);
+    let options = short.find(&[Key::name("start-pages")]).expect("the list");
+    let scroll = short
+        .info(options)
+        .unwrap()
+        .scroll
+        .expect("the list scrolls");
+    assert!(scroll.offset.y > 0.0, "End scrolls the list: {scroll:?}");
     let mut tip = Ui::new(Size { w: 0.0, h: 0.0 }, 1.0, Motion::default());
     tip.build(|cx| {
         cx.add(Element::tooltip_text(Key::name("tip"), shell::DRAWER_TIP));
@@ -424,6 +449,10 @@ fn popups() -> Vec<(&'static str, Ui<shell::Msg>)> {
         ("the row menu", take(rows)),
         ("the column menu", take(columns)),
         ("the Start page list", take(list)),
+        (
+            "the Start page list, scrolled to its end in a short window",
+            short,
+        ),
         ("a tooltip", tip),
     ]
 }

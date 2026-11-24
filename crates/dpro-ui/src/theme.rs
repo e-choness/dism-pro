@@ -388,9 +388,9 @@ impl Theme {
 
     /// High contrast: the system's colors only. Fills map to `Window`, `ButtonFace` (quiet
     /// fills) and `Highlight` (accent, danger, selection, the batch bar's primary action, the
-    /// picked tab); borders to `WindowText`; the state layers vanish. Badges, tints and the batch bar have no fill:
-    /// they're `Window`, with `WindowText` text and borders (A3.5 (1), (9), (11), (14)). Text goes
-    /// through [`ink`](Self::ink).
+    /// picked tab); borders to `WindowText`; the state layers vanish. Badges, tints and the
+    /// batch bar have no fill: they're `Window`, with `WindowText` text and borders (A3.5 (1),
+    /// (9), (11), (14)). Text goes through [`ink`](Self::ink).
     #[must_use]
     pub const fn high_contrast(sys: SysColors) -> Self {
         let none = Color {
