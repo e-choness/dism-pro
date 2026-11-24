@@ -397,7 +397,6 @@ fn the_shell_works_from_the_keyboard_alone() {
 
 /// Rules 1 to 6 on the composites' screens.
 #[test]
-#[ignore = "slice 7d: lands with the code"]
 fn the_composites_work_from_the_keyboard_alone() {
     let mut bad = Vec::new();
     for (name, make) in audit::COMPOSITES {
@@ -415,7 +414,6 @@ fn the_controls_work_from_the_keyboard_alone() {
 /// Rule 4's contrast on every screen's stops: the batch bar's ring was the one that blended in
 /// (A3's as-built note).
 #[test]
-#[ignore = "slice 7d: lands with the code"]
 fn every_focus_ring_stands_out_in_light_and_dark() {
     let mut bad = Vec::new();
     for (name, make) in audit::SHELL {

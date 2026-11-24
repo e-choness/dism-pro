@@ -312,6 +312,7 @@ fn between(p: u32, a: u32, b: u32) -> bool {
 
 /// Rule 5: Tab from nothing focused until focus comes back; at each stop, the ring: `Highlight`,
 /// or `HighlightText` where the fill around the node is `Highlight` (a box in a selected row).
+/// A table's row, which never scrolls across, has its ring round the part that shows.
 fn rings<S: Screen>(screen: &mut S) -> Vec<String> {
     let theme = Theme::high_contrast(ID);
     let wide = whole(tokens::stroke::FOCUS);
@@ -328,7 +329,13 @@ fn rings<S: Screen>(screen: &mut S) -> Vec<String> {
         }
         stops.push(focus);
         let n = screen.ui().info(focus).unwrap();
-        let r = n.rect.snap(1.0);
+        let mut r = n.rect.snap(1.0);
+        if n.role == Role::Row {
+            let shows = painted(screen.ui()).into_iter().find(|p| p.id == focus);
+            if let Some(s) = shows {
+                (r.x0, r.x1) = (s.shows.x0, s.shows.x1);
+            }
+        }
         let region = RectPx {
             x0: r.x0 - 1,
             y0: r.y0 - 1,
@@ -448,7 +455,6 @@ fn composites_screens() -> Vec<(&'static str, composites::Run)> {
 
 /// Rules 1 to 4 on every screen at rest, the popups and the controls included.
 #[test]
-#[ignore = "slice 7d: lands with the code"]
 fn every_pixel_and_text_run_is_a_system_pair() {
     let mut bad = Vec::new();
     for (name, run) in shell_screens() {
@@ -469,7 +475,6 @@ fn every_pixel_and_text_run_is_a_system_pair() {
 
 /// Rule 5 on every screen's Tab stops.
 #[test]
-#[ignore = "slice 7d: lands with the code"]
 fn the_focus_ring_is_highlight_and_whole_on_every_stop() {
     let mut bad = Vec::new();
     for (name, mut run) in shell_screens() {
@@ -484,7 +489,6 @@ fn the_focus_ring_is_highlight_and_whole_on_every_stop() {
 
 /// Rule 6 on every popup the shell opens.
 #[test]
-#[ignore = "slice 7d: lands with the code"]
 fn popups_have_a_contrast_border() {
     let mut bad = Vec::new();
     for (name, ui) in popups() {
@@ -495,7 +499,6 @@ fn popups_have_a_contrast_border() {
 
 /// Rule 7's marks on every screen, the popups and the controls included.
 #[test]
-#[ignore = "slice 7d: lands with the code"]
 fn selection_is_highlight_and_checks_show_a_mark() {
     let mut bad = Vec::new();
     for (name, run) in shell_screens() {
