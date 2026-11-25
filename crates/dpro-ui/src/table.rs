@@ -948,6 +948,9 @@ struct Plan {
     follow: bool,
     /// Focus was on one of the rows: if the build drops that row, focus stays in the table.
     focused: bool,
+    /// Focus was on the rows' viewport, which takes it only while it has no rows: it moves onto
+    /// them once they're built (TD-0009 A4.4 × A3.5 (12), wave 3).
+    empty: bool,
 }
 
 /// A column header's sort as its node's value: 0 none, 1 ascending, 2 descending.
@@ -1858,6 +1861,8 @@ impl<M> Ui<M> {
             let f = &self.nodes[self.focus as usize];
             f.role == Role::Row && f.parent == body
         };
+        // Only an empty table's viewport takes focus (A2.4): rows are its stops otherwise.
+        let empty = self.focus == body;
         // Until layout has measured them, the heights are guessed from the text size.
         let (row_guess, header_guess) = {
             let size = self.nodes[body as usize].text_style.size;
@@ -1944,6 +1949,7 @@ impl<M> Ui<M> {
             extra: current.filter(|&c| c < from || c >= to),
             follow,
             focused: focus_here,
+            empty,
         }
     }
 
@@ -2090,15 +2096,24 @@ impl<M> Ui<M> {
         }
         // A focused row the build dropped (scrolled away from, or gone with a refresh) took focus
         // with it: it comes back to the current row, else the first row in view, so the keyboard
-        // and a client's cursor stay in the table.
+        // and a client's cursor stay in the table. With no row left (a refresh that emptied it, as
+        // the in-app picker's folder does while it loads), to the rows' viewport, the stop an
+        // empty table has (A2.4), or its status line's action; and from there onto the rows once
+        // they're built (TD-0009 A4.4 × A3.5 (12), wave 3), so Enter and Backspace keep going.
         let dropped = plan.focused && self.focus == NIL;
-        if plan.follow || dropped {
+        let arrived = plan.empty && self.focus == body && !self.tables[t as usize].built.is_empty();
+        if plan.follow || dropped || arrived {
             let to = self.current_row_node(t).or_else(|| {
                 let at = self.first_row_in_view(t)?;
                 self.built_node(t, at)
             });
             if let Some(node) = to {
                 self.focus_node(node);
+            } else if dropped {
+                let stop = self.first_stop_in(body);
+                if stop != NIL {
+                    self.focus_node(stop);
+                }
             }
         }
     }

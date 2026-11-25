@@ -135,8 +135,9 @@ impl<M: Clone> Cx<'_, M> {
     /// animations off), and the page takes its new width at once: one layout. It moves focus to
     /// the body's first control, or to Close if the body has none. Esc closes it ([`close`]),
     /// and focus goes back to what opened it ([`Element::scope`]); a sheet's page is built again
-    /// when it closes, so there focus goes to the row's first control. Tab goes through the
-    /// header, the body and the footer, in that order.
+    /// when it closes, and its opener is found again by its keys (the scope's
+    /// [`FocusMemo`](crate::FocusMemo), A4.4). Tab goes through the header, the body and the
+    /// footer, in that order.
     ///
     /// [`close`]: DrawerFrame::close
     pub fn drawer(

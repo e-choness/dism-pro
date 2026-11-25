@@ -104,9 +104,12 @@ impl<M: Clone> Cx<'_, M> {
     /// does.
     ///
     /// Opening it moves focus to the path field. Esc, Close and Cancel send
-    /// [`close`](PathPicker::close), and when the sheet goes, focus goes back to what opened it
-    /// (the page is built again, so to the row's first control). Alt+Up anywhere in it, and
-    /// Backspace on its rows, press Up; Backspace in the path field edits the path.
+    /// [`close`](PathPicker::close), and when the sheet goes, focus goes back to what opened it,
+    /// found again by its keys though the page built it anew (the scope's
+    /// [`FocusMemo`](crate::FocusMemo), A4.4). Opening a folder empties the rows while it
+    /// loads: focus waits on the rows' viewport and moves onto the first row as it comes.
+    /// Alt+Up anywhere in it, and Backspace on its rows or the empty viewport, press Up;
+    /// Backspace in the path field edits the path.
     pub fn path_picker<'r>(
         &mut self,
         key: Key,

@@ -141,6 +141,11 @@ raw-API baseline, measured in this job, so it holds on whatever machine the runn
       Review changes opens the drawer. Gates: exactly one progress notification over the job, at
       2 s or later, saying "Apply 20 changes: N0 percent", kind Other, processing MostRecent,
       activity DismPro.Progress.0. Its delivery after the step was due is advisory (U23: 100 ms).
+  Accessibility depth, focus (TD-0009 A4.4, A4.7 U23, slice 7c): the drawer probe. Esc closes the
+      drawer and focus goes back to "Review changes" (its scope's FocusMemo); Delete drops the
+      focused first change and focus goes to the next, "Windows Update cache" (the successor rule).
+      Both are gates, read back through UIA within 2 s. The FocusChanged event to the opener after
+      Esc, heard by a managed UIA focus handler on an MTA thread, is advisory (U23: 100 ms).
   Accessibility depth, menus (TD-0009 A4.5, A4.4, slice 7c): the shell, and a COM IUIAutomation
       client on the desktop's subtree for MenuOpened, MenuClosed, ToolTipOpened and ToolTipClosed
       (the adapter's PATCHES.md 12 and 13). Each popup opens once first, since the first open

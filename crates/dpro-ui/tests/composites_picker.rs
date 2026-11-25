@@ -660,3 +660,43 @@ fn up_at_the_root_parks_focus_on_up_and_esc_still_closes() {
     assert!(run.picker().is_none());
     assert_eq!(run.ui.focus(), run.opener(), "focus is back on Browse…");
 }
+
+/// Wave 3 (TD-0009 A3.5 (12) × A4.4): Enter on a folder takes away the row that had focus, and
+/// every other: the folder loads with no rows. Focus goes to the rows' viewport, the stop an empty
+/// table has, not to the successor slice 7c's rule finds one level up (the header's last column),
+/// and onto the first row once the batch comes, so Enter and Backspace keep going by keys alone.
+#[test]
+fn folders_opened_and_left_by_keys_keep_focus_in_the_rows() {
+    let mut run = Run::with(Model::new());
+    open_listed(&mut run);
+    focus_row(&mut run, 2);
+    let focused = |run: &Run| {
+        let table = run.part(PICKER_TABLE).expect("the rows");
+        let f = run.ui.focus().filter(|&f| run.is_under(f, table));
+        f.and_then(|f| run.ui.info(f)).map(|n| (n.role, n.key))
+    };
+    let on_a_row = |run: &Run| focused(run).is_some_and(|(role, _)| role == Role::Row);
+    let on_the_viewport = |run: &Run| focused(run).is_some_and(|(_, key)| key == TABLE_BODY);
+
+    run.step(key(KeyCode::Enter, NONE));
+    let opened = start().join(entry_name(2));
+    assert_eq!(run.model.folder.folder(), Some(opened.as_path()));
+    assert_eq!(run.model.folder.listing(), Listing::Loading);
+    assert!(on_the_viewport(&run), "loading: {:?}", focused(&run));
+    // Backspace on the empty rows goes up.
+    run.step(key(KeyCode::Backspace, NONE));
+    assert_eq!(run.model.last, Some(Msg::Up), "Backspace while it loads");
+    assert_eq!(run.model.folder.folder(), Some(start().as_path()));
+    assert!(on_the_viewport(&run), "loading again: {:?}", focused(&run));
+    run.list_all();
+    assert!(on_a_row(&run), "listed: {:?}", focused(&run));
+    // Enter on that row opens it; listed, Backspace on a row goes up.
+    run.step(key(KeyCode::Enter, NONE));
+    let opened = start().join(entry_name(0));
+    assert_eq!(run.model.folder.folder(), Some(opened.as_path()));
+    run.list_all();
+    assert!(on_a_row(&run), "listed: {:?}", focused(&run));
+    run.step(key(KeyCode::Backspace, NONE));
+    assert_eq!(run.model.last, Some(Msg::Up), "Backspace on a row");
+    assert_eq!(run.model.folder.folder(), Some(start().as_path()));
+}

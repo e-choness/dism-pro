@@ -6,8 +6,8 @@
 //!   the same search one level up. The search stops at the enclosing landmark, whose first stop
 //!   (itself, as a viewport with none inside) is the last resort. Past a landmark with nothing to
 //!   focus it goes on, so focus doesn't fall to the window (decision #41). The ring stays as it
-//!   was. A table's own refocus (its current row, a header's neighbor) and a scope's give-back
-//!   come first.
+//!   was. A table's own refocus (its current row, a header's neighbor, and for a table a refresh
+//!   emptied, its rows' viewport: wave 3) and a scope's give-back come first.
 //! - **The parked focus** (`build.rs`, `input.rs`): a control disabled while focused keeps the
 //!   focus, takes no activation, and Tab and Shift+Tab leave it.
 //! - **Memos.** A [`FocusMemo`] remembers the focused node by its keys from the root, so it finds
@@ -265,7 +265,7 @@ impl<M> Ui<M> {
     }
 
     /// The first Tab stop in `at`'s subtree, `at` included; [`NIL`] if none.
-    fn first_stop_in(&self, at: u32) -> u32 {
+    pub(crate) fn first_stop_in(&self, at: u32) -> u32 {
         let stop = self.tab_stop(at, NIL, true);
         if stop == NIL {
             self.first_stop_below(at)

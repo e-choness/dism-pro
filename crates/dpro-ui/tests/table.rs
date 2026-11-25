@@ -1237,6 +1237,36 @@ fn an_empty_table_shows_its_status_line_and_action() {
     assert_eq!(run.ui.children(header).count(), 4);
 }
 
+/// Wave 3 (TD-0009 A4.4 × A3.5 (12)): a refresh that takes every row, the focused one with them
+/// (the in-app picker's folder while it loads), leaves focus on the rows' viewport, the stop an
+/// empty table has (A2.4), or on its status line's action; not on the header's last column, where
+/// the successor rule one level up would put it. Rows that come back take focus from the
+/// viewport, the first in view, so the keyboard stays on the rows.
+#[test]
+fn a_refresh_that_empties_the_table_keeps_focus_in_its_rows() {
+    let mut run = Run::new(50);
+    run.key(KeyCode::Tab, plain());
+    run.key(KeyCode::Tab, plain());
+    assert_eq!(run.focused_row(), Some(0));
+    run.page = Page::new(0);
+    run.frame();
+    assert_eq!(run.ui.focus(), Some(run.body()), "the empty rows' viewport");
+    run.page = Page::new(50);
+    run.frame();
+    assert_eq!(run.focused_row(), Some(0), "onto the first row in view");
+    assert_eq!(
+        run.key(KeyCode::Down, plain()),
+        [ev(TableEvent::Current(1))]
+    );
+    // An empty table with a status line's action: focus goes to the action.
+    run.page = Page::new(0);
+    run.page.status = Some("No programs match “zz”");
+    run.frame();
+    let action = run.ui.children(run.body()).nth(1);
+    assert!(action.is_some());
+    assert_eq!(run.ui.focus(), action, "Clear filter");
+}
+
 /// With no rows, the status line is as wide as the columns: the header, which follows it, still
 /// scrolls to a column header past the view that the keyboard moves to.
 #[test]
