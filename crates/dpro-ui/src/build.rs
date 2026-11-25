@@ -39,8 +39,11 @@ impl<M> Ui<M> {
         };
         view(&mut cx);
         cx.finish();
-        // Focus a scope took with it comes back (A3.5 addition 10, slice 6d).
-        self.give_focus_back();
+        // Focus a scope took with it comes back (A3.5 addition 10), and a focus a removal took
+        // goes to its successor (A4.4, slice 7c).
+        if self.focus_pending {
+            self.settle_focus();
+        }
     }
 }
 
@@ -126,7 +129,11 @@ impl<M> Cx<'_, M> {
                 }
                 i
             } else {
-                // Moved: its old place is damaged, and layout finds its new one.
+                // Moved: its old place is damaged, and layout finds its new one. A focus the
+                // move passes has its place recorded first (A4.4, slice 7c).
+                if ui.focus != NIL {
+                    ui.focus_passed(self.parent, self.next, found);
+                }
                 ui.damage_view(found);
                 ui.unlink(found);
                 ui.link_before(self.parent, found, self.next);
@@ -520,14 +527,13 @@ impl<M> Ui<M> {
         }
     }
 
-    /// A node that became disabled lets go of focus, hover, presses and holds.
+    /// A node that became disabled lets go of hover, presses and holds. Focus parks on it.
     fn lose_input(&mut self, i: u32) {
         if self.hold.node == i {
             self.end_hold();
         }
-        if self.focus == i {
-            self.focus = NIL;
-        }
+        // Focus stays: it's parked, takes no activation, and Tab leaves it (TD-0009 A4.4, slice
+        // 7c). Moving it on could put a second Enter on Cancel.
         if self.pressed == i {
             self.pressed = NIL;
         }

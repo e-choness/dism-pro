@@ -3,45 +3,28 @@
 //!
 //! - An Esc the focused control doesn't use goes to the nearest enclosing scope that has an
 //!   escape; with focus outside every scope, to the window's open scope (the last opened).
-//! - When a scope appears, the `Ui` records the focused node. When it's removed and focus went
-//!   with it, focus goes back there if that node is still there at the end of the build, else to
-//!   the first place Tab lands in the scope's parent. Focus the user moved out of the scope stays
-//!   where it went.
+//! - When a scope appears, the `Ui` takes a [`FocusMemo`] of the focused node. When it's removed
+//!   and focus went with it, focus goes back to that node at the end of the build, found by its
+//!   keys, so an opener a sheet's page built anew is found again (A4.4, slice 7c); if it went, as
+//!   a memo falls back (`focus.rs`). Opened with nothing focused, the successor rule decides.
+//!   Focus the user moved out of the scope stays where it went.
 //!
-//! The drawer (A3.5 (6)) and the in-app picker use it. General focus restoration is A4's.
+//! The drawer (A3.5 (6)) and the in-app picker use it. General focus restoration is A4's
+//! (`focus.rs`).
 
 use crate::{
-    Element, Key, NodeId, Ui,
+    Element, FocusMemo, Key, Ui,
     tree::{Extra, NIL},
 };
 
-/// An open scope: its node, what Esc sends it, the node focused when it appeared, and whether
-/// it appeared in this build (its owner moves focus into it once).
+/// An open scope: its node, what Esc sends it, the memo of the node focused when it appeared,
+/// and whether it appeared in this build (its owner moves focus into it once).
 #[derive(Debug)]
 pub(crate) struct ScopeSlot<M> {
     node: u32,
     on_escape: Option<fn() -> M>,
-    back: Option<NodeId>,
+    memo: Option<FocusMemo>,
     opened: bool,
-}
-
-/// What a scope that went gives focus back to.
-#[derive(Debug, Default)]
-pub(crate) struct Closed {
-    /// A removal is freeing a scope: set while it frees nodes, until the removal reads it.
-    pub(crate) freed: bool,
-    /// The outermost scope freed's recorded node.
-    freed_back: Option<NodeId>,
-    /// Set by a removal that took focus with a scope, for the end of the build.
-    pending: Option<GiveBack>,
-}
-
-/// Where focus goes back to at the end of the build: the recorded node, else the first place
-/// Tab lands in the scope's parent.
-#[derive(Clone, Copy, Debug)]
-struct GiveBack {
-    back: Option<NodeId>,
-    parent: Option<NodeId>,
 }
 
 impl<M> Element<'_, M> {
@@ -68,26 +51,32 @@ impl<M> Element<'_, M> {
 }
 
 impl<M> Ui<M> {
-    /// Node `i`'s scope from its element: one that appeared records the focused node; one that
-    /// stopped being a scope is forgotten, and gives nothing back.
+    /// Node `i`'s scope from its element: one that appeared takes a memo of the focused node;
+    /// one that stopped being a scope is forgotten, and gives nothing back.
     pub(crate) fn update_scope(&mut self, i: u32, scope: bool, on_escape: Option<fn() -> M>) {
         let slot = self.scopes.iter().position(|s| s.node == i);
         match (slot, scope) {
             (Some(k), true) => self.scopes[k].on_escape = on_escape,
-            (None, true) => {
-                let back = self.id(self.focus);
-                self.scopes.push(ScopeSlot {
-                    node: i,
-                    on_escape,
-                    back,
-                    opened: true,
-                });
-            }
+            (None, true) => self.scope_appeared(i, on_escape),
             (Some(k), false) => {
                 self.scopes.remove(k);
             }
             (None, false) => {}
         }
+    }
+
+    /// Scope node `i` appeared: it remembers the focused node. Out of line, off the build's
+    /// path, which inlines [`update_scope`](Self::update_scope).
+    #[cold]
+    #[inline(never)]
+    fn scope_appeared(&mut self, i: u32, on_escape: Option<fn() -> M>) {
+        let memo = self.focus_memo();
+        self.scopes.push(ScopeSlot {
+            node: i,
+            on_escape,
+            memo,
+            opened: true,
+        });
     }
 
     /// Whether scope node `i` appeared since the last call: true once, for its owner to move
@@ -99,50 +88,44 @@ impl<M> Ui<M> {
             .is_some_and(|s| std::mem::replace(&mut s.opened, false))
     }
 
-    /// Node `i` is being freed: if it's a scope, it's forgotten, and its recorded node kept for
-    /// the removal. Its subtree is freed first, so the outermost scope's is the one kept.
+    /// Node `i` is being freed: if it's a scope, it's forgotten, and its memo kept for the
+    /// removal. Its subtree is freed first, so the outermost scope's is the one kept.
     pub(crate) fn forget_scope(&mut self, i: u32) {
         if let Some(k) = self.scopes.iter().position(|s| s.node == i) {
             let s = self.scopes.remove(k);
-            self.scope_closed.freed = true;
-            self.scope_closed.freed_back = s.back;
+            self.scope_freed = true;
+            if s.memo.is_some() || self.restore.is_some() {
+                self.restore_mut().freed = s.memo;
+            }
         }
     }
 
-    /// A removal under `parent` freed a scope; `focus` was focused before it. If focus went with
-    /// it, it comes back at the end of the build ([`Ui::give_focus_back`]).
-    pub(crate) fn scope_removed(&mut self, parent: u32, focus: u32) {
-        let closed = &mut self.scope_closed;
-        closed.freed = false;
-        let back = closed.freed_back.take();
-        if focus != NIL && self.focus == NIL {
-            self.scope_closed.pending = Some(GiveBack {
-                back,
-                parent: self.id(parent),
-            });
+    /// A removal freed a scope; `focus` was focused before it. If focus went with it, it comes
+    /// back at the end of the build ([`Ui::give_focus_back`]); with no memo, the successor rule
+    /// decides (`focus.rs`).
+    pub(crate) fn scope_removed(&mut self, focus: u32) {
+        self.scope_freed = false;
+        let memo = self.restore.as_mut().and_then(|r| r.freed.take());
+        if focus != NIL
+            && self.focus == NIL
+            && let Some(memo) = memo
+        {
+            self.restore_mut().pending = Some(memo);
+            self.focus_pending = true;
         }
     }
 
     /// The end of a build: focus a scope took with it goes back to the node focused when the
-    /// scope appeared, if it's still there; else to the first place Tab lands in the scope's
-    /// parent. Focus moved since, to a node still there, stays.
+    /// scope appeared, found by its keys, or where its memo falls back to. Focus moved since, to
+    /// a node still there, stays.
     pub(crate) fn give_focus_back(&mut self) {
-        let Some(GiveBack { back, parent }) = self.scope_closed.pending.take() else {
+        let Some(memo) = self.restore.as_mut().and_then(|r| r.pending.take()) else {
             return;
         };
         if self.focus != NIL {
             return;
         }
-        let back = back.and_then(|id| self.index(id)).filter(|&i| {
-            let n = &self.nodes[i as usize];
-            n.interactive() || self.lone_viewport(i)
-        });
-        let to = match back {
-            Some(i) => i,
-            None => parent
-                .and_then(|id| self.index(id))
-                .map_or(NIL, |p| self.first_stop_below(p)),
-        };
+        let to = self.memo_target(&memo);
         if to != NIL {
             self.move_focus(to);
         }

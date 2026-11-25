@@ -133,6 +133,9 @@ pub(crate) enum Msg {
     Copy,
     Check(u8),
     Scan,
+    /// The first change still listed is dropped, as a refresh drops one: G1's stand-in for the
+    /// focused change going (Delete in the probe; TD-0009 A4.4, slice 7c).
+    Drop,
 }
 
 /// The view-model.
@@ -144,6 +147,8 @@ pub(crate) struct Model {
     pub(crate) empty: bool,
     pub(crate) copies: u32,
     pub(crate) last: Option<Msg>,
+    /// The changes dropped, a bit each ([`Msg::Drop`]).
+    pub(crate) dropped: u32,
 }
 
 impl Model {
@@ -154,6 +159,7 @@ impl Model {
             empty: false,
             copies: 0,
             last: None,
+            dropped: 0,
         }
     }
 
@@ -163,6 +169,8 @@ impl Model {
             Msg::Close | Msg::Cancel => self.open = false,
             Msg::Copy => self.copies += 1,
             Msg::Delete | Msg::Confirm | Msg::Scan => {}
+            // The lowest bit not yet set: the first change still listed.
+            Msg::Drop => self.dropped |= !self.dropped & self.dropped.wrapping_add(1),
             Msg::Check(i) => {
                 if let Some(c) = self.checked.get_mut(usize::from(i)) {
                     *c = !*c;
@@ -284,6 +292,9 @@ fn body(m: &Model, cx: &mut Cx<'_, Msg>) {
     }
     cx.drawer_section(CHANGES, "Changes", |cx| {
         for (i, name) in (0u8..).zip(ITEMS) {
+            if m.dropped & 1u32.checked_shl(u32::from(i)).unwrap_or(0) != 0 {
+                continue;
+            }
             let on = m.checked[usize::from(i)];
             cx.add(
                 Element::toggle(

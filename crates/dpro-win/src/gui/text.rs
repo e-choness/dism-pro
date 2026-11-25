@@ -921,7 +921,25 @@ fn count(n: usize) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Mutex, MutexGuard, PoisonError};
+
     use super::*;
+
+    /// This test's turn with DirectWrite, held until its [`Text`] is gone.
+    ///
+    /// The app lays text out on its one UI thread. Tests run on threads of their own, and under
+    /// Wine (T2) two of them laying text out at once can crash: the fonts of the shared system
+    /// collection, which [`system_fonts`] keeps for the process's life, set up their character
+    /// map on first use, and a thread doing so can find the font's stream null (a page fault in
+    /// Wine 10's `dwrite_cmap_init`, from `HasCharacter` in a layout's font fallback). With the
+    /// runner's 4 CPUs it crashed 1 run of dpro-win's tests in 100, and 13 runs of these tests
+    /// in 300 on 8 threads; taking turns, 0 in 300. Windows's DirectWrite is thread-safe, so
+    /// only the tests take turns.
+    fn directwrite() -> MutexGuard<'static, ()> {
+        static TURN: Mutex<()> = Mutex::new(());
+        // A failed test's poison doesn't fail the tests after it.
+        TURN.lock().unwrap_or_else(PoisonError::into_inner)
+    }
 
     /// Collects what's drawn: the bounding box of the ink, and the total coverage.
     #[derive(Default)]
@@ -953,6 +971,7 @@ mod tests {
     /// which T3 reports from the runner (TD-0009 §5.2's verification).
     #[test]
     fn every_family_and_weight_sets_text() {
+        let _turn = directwrite();
         let mut text = Text::new().expect("DirectWrite");
         println!("{text:?}");
         for (size, mono) in [
@@ -979,6 +998,7 @@ mod tests {
     #[test]
     fn the_glyph_cache_stays_under_8_mib() {
         assert_eq!(GLYPH_CACHE_CAP, 8 << 20);
+        let _turn = directwrite();
         let mut text = Text::new().expect("DirectWrite");
         let alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
         let mut peak = 0;
@@ -1010,6 +1030,7 @@ mod tests {
     /// the stops grow and end at the line's width.
     #[test]
     fn caret_stops_fall_between_clusters_and_end_at_the_width() {
+        let _turn = directwrite();
         let mut text = Text::new().expect("DirectWrite");
         let mut stops = Vec::new();
         let line = "a\u{1F600}b c";
@@ -1028,6 +1049,7 @@ mod tests {
 
     #[test]
     fn an_icon_is_centered_in_its_box_when_the_icon_font_exists() {
+        let _turn = directwrite();
         let mut text = Text::new().expect("DirectWrite");
         let mut ink = Ink::default();
         let rect = RectF {
@@ -1067,6 +1089,7 @@ mod tests {
         const ICONS: [u32; 11] = [
             0xE721, 0xE711, 0xE76C, 0xE930, 0xEA39, 0xE7BA, 0xE946, 0xE7A7, 0xE8B7, 0xE74A, 0xE712,
         ];
+        let _turn = directwrite();
         let mut text = Text::new().expect("DirectWrite");
         let font = text.icon_face().is_some();
         let rect = RectF {
@@ -1084,6 +1107,7 @@ mod tests {
 
     #[test]
     fn measuring_grows_with_the_text_and_trims_what_does_not_fit() {
+        let _turn = directwrite();
         let mut text = Text::new().expect("DirectWrite");
         let one = text.measure("W", &BODY, f32::INFINITY);
         let many = text.measure("WWWWWWWWWW", &BODY, f32::INFINITY);
@@ -1108,6 +1132,7 @@ mod tests {
 
     #[test]
     fn drawing_inks_inside_the_box_at_any_scale_and_reuses_glyphs() {
+        let _turn = directwrite();
         let mut text = Text::new().expect("DirectWrite");
         let m = text.measure("Hello", &BODY, f32::INFINITY);
         let rect = RectF {

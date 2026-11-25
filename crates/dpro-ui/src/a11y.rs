@@ -486,6 +486,22 @@ impl<M> Ui<M> {
         }
     }
 
+    /// Node `i`'s landmark, if a client sees one there ([`ak_structure`](Self::ak_structure)'s
+    /// rule, without its assertion): where the successor search stops (A4.4, `focus.rs`) and
+    /// what a page change focuses in.
+    pub(crate) fn landmark_of(&self, i: u32) -> Option<LandmarkKind> {
+        let n = &self.nodes[i as usize];
+        if !n.has_props()
+            || n.role != Role::Container
+            || n.group.is_some()
+            || self.is_table_header(i)
+        {
+            return None;
+        }
+        let kind = self.sides.get(n.side as usize)?.props.props.landmark()?;
+        (kind != LandmarkKind::Region || !n.text.is_empty()).then_some(kind)
+    }
+
     /// Node `i`'s description (A3.5 addition 4): the one given beside its tooltip, or the text
     /// in its `tip`, a description alone or the tooltip's own.
     fn description(&self, i: u32) -> Option<&str> {

@@ -924,8 +924,10 @@ fn sent(update: &accesskit::TreeUpdate, ui: &Ui<Msg>, id: NodeId) -> bool {
         .any(|(k, _)| ui.a11y_node(*k) == Some(id))
 }
 
+/// Slice 7c: the header's focus goes with its columns to the successor, the rows' first (TD-0009
+/// A4.4), where it went to nothing before.
 #[test]
-fn focus_on_a_column_header_when_every_column_goes_goes_with_them() {
+fn focus_on_a_column_header_when_every_column_goes_goes_to_the_rows() {
     // Found in review: with no check column, the header left empty, focus mended from nothing.
     let mut page = Page::new(100);
     page.checks = false;
@@ -934,7 +936,7 @@ fn focus_on_a_column_header_when_every_column_goes_goes_with_them() {
     run.page.hide_all = true;
     run.frame();
     assert_eq!(run.keys(run.header_node()), []);
-    assert_eq!(run.ui.focus(), None);
+    assert_eq!(run.ui.focus(), Some(run.row(0)));
 }
 
 #[test]

@@ -151,11 +151,16 @@ pub struct Ui<M> {
     pub(crate) drag_distance: f32,
     /// Messages layout made (a column's fit), for the host to take ([`Ui::take_messages`]).
     pub(crate) queued: Vec<M>,
-    // Slice 6d: the slides running (`slide.rs`, A3.5 addition 11), the scopes open, and what a
-    // scope that closed gives focus back to (`scope.rs`, addition 10).
+    // Slice 6d: the slides running (`slide.rs`, A3.5 addition 11), the scopes open, and whether a
+    // removal is freeing one (`scope.rs`, addition 10).
     pub(crate) slides: Vec<crate::slide::Slide>,
     pub(crate) scopes: Vec<crate::scope::ScopeSlot<M>>,
-    pub(crate) scope_closed: crate::scope::Closed,
+    pub(crate) scope_freed: bool,
+    // Slice 7c (`focus.rs`, A4.5): where a removal took the focused node from, whether the build's
+    // end has focus to settle, and the return stack with the scopes' memos (made on first use).
+    pub(crate) lost: crate::focus::Lost,
+    pub(crate) focus_pending: bool,
+    pub(crate) restore: Option<Box<crate::focus::Restore>>,
     // Slice 6c (TD-0009 A3.5 (7), (13), addition 13).
     /// The scrim shows over the window: the palette or a dialog is open over it.
     pub(crate) scrim: bool,
@@ -282,7 +287,10 @@ impl<M> Ui<M> {
             queued: Vec::new(),
             slides: Vec::new(),
             scopes: Vec::new(),
-            scope_closed: crate::scope::Closed::default(),
+            scope_freed: false,
+            lost: crate::focus::Lost::NONE,
+            focus_pending: false,
+            restore: None,
             scrim: false,
             expiry: crate::composite::Expiry::new(),
             initial: None,
@@ -553,14 +561,18 @@ impl<M> Ui<M> {
         self.damage_view(child);
         // The stops it takes with it may have been its viewport's only ones.
         self.stop_changed(child);
-        let parent = self.nodes[child as usize].parent;
+        let (parent, prev) = {
+            let n = &self.nodes[child as usize];
+            (n.parent, n.prev)
+        };
         let focus = self.focus;
         self.unlink(child);
         self.free_subtree(child);
         self.forget_freed();
-        // A scope that went with it gives focus back, if focus went too (A3.5 addition 10).
-        if self.scope_closed.freed {
-            self.scope_removed(parent, focus);
+        // Focus that went with it goes to its successor at the build's end, and a scope that went
+        // gives focus back (A4.4, A3.5 addition 10): bookkeeping off the steady path.
+        if self.focus != focus || self.lost.parent != NIL || self.scope_freed {
+            self.focus_removed(child, parent, prev, focus);
         }
         self.mark_dirty(parent);
         self.a11y_touch(parent);

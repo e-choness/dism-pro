@@ -140,7 +140,10 @@ impl<M: Clone> Layer<M> {
     }
 
     /// Its window was hidden: a press (an item held while Esc closed it), the hover, the focus
-    /// and its tip go, and so does damage nothing will paint.
+    /// and its tip go, and so does damage nothing will paint. So does what it showed: the window
+    /// is kept, but its next open builds new nodes, so a client hears each open and each close
+    /// (TD-0009 A4.5, the adapter's PATCHES.md 12 and 13: `MenuOpened` and `MenuClosed`,
+    /// `ToolTipOpened` and `ToolTipClosed`).
     fn hidden(&mut self) {
         self.shown = false;
         self.ui.cancel_press();
@@ -148,7 +151,20 @@ impl<M: Clone> Layer<M> {
         self.ui.dispatch(Input::PointerLeave, &mut none);
         self.ui.set_focus(None);
         self.ui.set_active(false);
+        self.ui.build(|_| {});
         self.ui.clear_damage();
+    }
+
+    /// Builds the tooltip window's one node, with `text`. A tip for another node than the one
+    /// showing is a new node, so a client hears the old tip close and the new one open (the
+    /// adapter's PATCHES.md 13); new text for the same node is a name change.
+    fn build_tip(&mut self, text: &str, another: bool) {
+        if another {
+            self.ui.build(|_| {});
+        }
+        self.ui.build(|c| {
+            c.add(Element::tooltip_text(Key::name("tip"), text));
+        });
     }
 
     /// `r`, in this popup's logical pixels, in screen pixels.
@@ -423,10 +439,7 @@ impl<P: Model> Host<P> {
             && !mods.alt
             && self.layers[slot(gui::PopupKind::Toast)].shown
         {
-            // Its first control takes focus, with the ring, so a screen reader reads where it is.
-            self.layers[slot(gui::PopupKind::Toast)]
-                .ui
-                .focus_first(true);
+            self.enter_toast();
             cx.activate(Surface::Popup(gui::PopupKind::Toast));
             return true;
         }
@@ -445,6 +458,16 @@ impl<P: Model> Host<P> {
             }
             None => false,
         }
+    }
+
+    /// F6 takes the keyboard into the toast: the main window's focus is remembered, to come back
+    /// when the main window has the keyboard again (TD-0009 A4.4, slice 7c), and the toast's
+    /// first control takes focus, with the ring, so a screen reader reads where it is.
+    pub(super) fn enter_toast(&mut self) {
+        self.toast_return = self.ui.focus_memo();
+        self.layers[slot(gui::PopupKind::Toast)]
+            .ui
+            .focus_first(true);
     }
 
     /// Whether the scrim shows over the page: while the palette or a dialog is open (A3.5
@@ -508,6 +531,10 @@ impl<P: Model> Host<P> {
             cx.hide_popup(open);
             self.layers[slot(open)].hidden();
             self.open = None;
+            // A dialog gives the main window's focus back to what opened it (A4.4).
+            if open == gui::PopupKind::Dialog {
+                self.ui.pop_focus_return();
+            }
         }
         let Some(kind) = kind else {
             return;
@@ -527,6 +554,9 @@ impl<P: Model> Host<P> {
         let place = if overlay { !cx.minimized() } else { opening };
         if opening && !place {
             return;
+        }
+        if opening && kind == gui::PopupKind::Dialog {
+            self.ui.push_focus_return();
         }
         let backdrop = self.popup_backdrop();
         let main_scale = self.ui.scale();
@@ -592,10 +622,8 @@ impl<P: Model> Host<P> {
             let layer = &mut self.layers[k];
             if layer.shown {
                 cx.hide_popup(gui::PopupKind::Toast);
-                layer.hidden();
                 // The next toast is a new one: its tree, and its hide's wait, start afresh.
-                layer.ui.build(|_| {});
-                layer.ui.clear_damage();
+                layer.hidden();
             }
             return;
         }
@@ -669,15 +697,12 @@ impl<P: Model> Host<P> {
         {
             return;
         }
-        self.tip_for = Some((surface, id));
+        let another = self.tip_for.replace((surface, id)) != Some((surface, id));
         self.tip_text.clear();
         self.tip_text.push_str(text);
         let (work, dpi) = cx.work_area(anchor);
         tip.at(anchor, work, dpi, text_scale, motion);
-        let text = self.tip_text.as_str();
-        tip.ui.build(|c| {
-            c.add(Element::tooltip_text(Key::name("tip"), text));
-        });
+        tip.build_tip(self.tip_text.as_str(), another);
         let rect = tip.fit(self.text.as_mut(), Placement::Above, f32::INFINITY);
         tip.rect = rect;
         tip.backdrop = backdrop;
@@ -739,5 +764,62 @@ mod tests {
         assert_eq!(window_kind(PopupKind::Toast), gui::PopupKind::Toast);
         assert_eq!(window_kind(PopupKind::Dialog), gui::PopupKind::Dialog);
         assert!(over_owner(gui::PopupKind::Dialog) && !over_owner(gui::PopupKind::Toast));
+    }
+
+    /// A menu with one item, as a model's popup view builds it.
+    fn menu(cx: &mut crate::Cx<'_, ()>) {
+        cx.add_with(Element::menu(Key::name("m")), |cx| {
+            cx.add(Element::menu_item(Key::name("i"), "item", ()));
+        });
+    }
+
+    /// A hidden popup drops what it showed, so its next open is new nodes: a client hears the
+    /// menu go as the window hides, and a new one come at the next open (TD-0009 A4.5; the
+    /// adapter's PATCHES.md 12 and 13 raise the pair).
+    #[test]
+    fn a_hidden_popup_opens_again_as_new_nodes() {
+        let mut layer = Layer::<()>::new();
+        layer.ui.build(menu);
+        let tree = layer.ui.a11y_tree();
+        let root = tree.tree.expect("a whole tree").root;
+        let first = layer.ui.find(&[Key::name("m")]).expect("the menu");
+        layer.shown = true;
+        layer.hidden();
+        assert_eq!(
+            layer.ui.find(&[Key::name("m")]),
+            None,
+            "hidden, it holds nothing"
+        );
+        let closed = layer.ui.a11y_update().expect("the menu goes");
+        let (_, window) = closed
+            .nodes
+            .iter()
+            .find(|(id, _)| *id == root)
+            .expect("the window, its children changed");
+        assert_eq!(window.children(), []);
+        layer.ui.build(menu);
+        let again = layer.ui.find(&[Key::name("m")]).expect("the menu again");
+        assert_ne!(first, again, "a new node, with an id of its own");
+        let opened = layer.ui.a11y_update().expect("a menu comes");
+        let menus = opened
+            .nodes
+            .iter()
+            .filter(|(_, n)| n.role() == accesskit::Role::Menu)
+            .count();
+        assert_eq!(menus, 1);
+    }
+
+    /// The tooltip window's node is new for a tip of another node, and the same for new text of
+    /// the same one (the adapter's PATCHES.md 13: `ToolTipClosed`, then `ToolTipOpened`).
+    #[test]
+    fn a_tip_for_another_node_is_a_new_node() {
+        let mut tip = Layer::<()>::new();
+        let node = |l: &Layer<()>| l.ui.find(&[Key::name("tip")]).expect("the tip");
+        tip.build_tip("Every change before it applies", true);
+        let first = node(&tip);
+        tip.build_tip("Every change, before it applies", false);
+        assert_eq!(node(&tip), first, "new text, the same node");
+        tip.build_tip("Hold until the bar fills to apply", true);
+        assert_ne!(node(&tip), first, "another tip, another node");
     }
 }

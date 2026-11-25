@@ -19,6 +19,9 @@ dpro-win = { workspace = true, features = ["gui"] }
 [dev-dependencies]
 criterion.workspace = true
 gungraun.workspace = true
+# Focus restoration over generated rebuilds, A4.8's remove and restore operations, until a
+# `ui_state` fuzz target exists (TD-0009 A4.9, slice 7c).
+proptest.workspace = true
 stats_alloc.workspace = true
 
 # TD-0009 §7 U2: written before the toolkit core (measure-first).

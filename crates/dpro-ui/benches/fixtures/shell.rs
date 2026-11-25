@@ -191,6 +191,9 @@ pub(crate) enum Msg {
     StepStartPage(bool),
     /// The open popup closes: the host's `on_close`.
     ClosePopup,
+    /// Summary card `i`'s category was cleaned: its card goes (TD-0009 A4.4's removed focus,
+    /// slice 7c).
+    Cleaned(u8),
 }
 
 /// Which popup the shell has open.
@@ -243,6 +246,8 @@ pub(crate) struct Shell {
     visible: Vec<u32>,
     /// The drawer's job as the announcer hears it (TD-0009 A4.4, slice 7b).
     job: Job,
+    /// The summary cards whose category was cleaned, a bit each: they're gone (slice 7c).
+    cleaned: u8,
 }
 
 impl Shell {
@@ -302,6 +307,7 @@ impl Shell {
             days,
             visible: Vec::with_capacity(rows),
             job: Job::new(),
+            cleaned: 0,
         };
         s.refilter();
         s
@@ -365,6 +371,7 @@ impl Shell {
                 };
             }
             Msg::ClosePopup => self.open = Open::None,
+            Msg::Cleaned(i) => self.cleaned |= card_bit(u64::from(i)),
         }
     }
 
@@ -812,9 +819,13 @@ fn content(s: &Shell, cx: &mut Cx<'_, Msg>) {
 /// The Preview drawer: the changes, the apply job's progress, and its actions. Hold to apply is a
 /// danger button: held for `motion.hold` it applies, and UI Automation's Invoke asks for the typed
 /// confirmation instead (TD-0009 §5.2, §8).
+///
+/// A scope, as A6's drawer is (A3.5 addition 10): focus in it when it closes goes back to what
+/// opened it, by the memo taken as it opened (A4.4, slice 7c). It has no escape, so Esc sends
+/// nothing (the keyboard audit's rule 5).
 fn drawer(s: &Shell, cx: &mut Cx<'_, Msg>) {
     cx.add_with(
-        Element::stack(Key::name("drawer"))
+        Element::scope(Key::name("drawer"))
             .style(Style {
                 width: Dim::Fixed(320.0),
                 padding: Insets::all(16.0),
@@ -877,7 +888,16 @@ fn drawer(s: &Shell, cx: &mut Cx<'_, Msg>) {
     );
 }
 
-/// Every page but the first and Settings: a heading and 8 summary cards (artboard 02).
+/// Summary card `i`'s bit in [`Shell::cleaned`]; none past the eighth.
+fn card_bit(i: u64) -> u8 {
+    u32::try_from(i)
+        .ok()
+        .and_then(|i| 1u8.checked_shl(i))
+        .unwrap_or(0)
+}
+
+/// Every page but the first and Settings: a heading and 8 summary cards (artboard 02), but those
+/// whose category was cleaned (slice 7c).
 fn summary(s: &Shell, cx: &mut Cx<'_, Msg>) {
     const CARDS: [(&str, &str); 8] = [
         ("Temporary files", "1.2 GB"),
@@ -907,6 +927,9 @@ fn summary(s: &Shell, cx: &mut Cx<'_, Msg>) {
                     .heading(1),
             );
             for (i, (what, size)) in (0..).zip(CARDS) {
+                if s.cleaned & card_bit(i) != 0 {
+                    continue;
+                }
                 cx.add_with(
                     Element::stack(Key::index(i))
                         .style(Style {
@@ -1378,7 +1401,9 @@ impl Run {
 
     /// Opens, rebuilds or hides the popup to match the shell's, as the platform does: a new one
     /// takes the activation from the main window, focuses its first item if the keyboard opened
-    /// it (a list, its picked option, either way), and is sized to its content.
+    /// it (a list, its picked option, either way), and is sized to its content. A hidden one
+    /// drops what it showed, so its next open is new nodes (TD-0009 A4.5: a client hears each
+    /// open and close).
     fn sync_popup(&mut self) {
         let Some(open) = self.shell.popup() else {
             if std::mem::take(&mut self.popup_open) {
@@ -1387,6 +1412,7 @@ impl Run {
                 self.popup.dispatch(Input::PointerLeave, &mut none);
                 self.popup.set_focus(None);
                 self.popup.set_active(false);
+                self.popup.build(|_| {});
                 // The activation comes back to the main window, its focus on the anchor.
                 self.ui.set_active(true);
             }
@@ -1479,6 +1505,24 @@ impl Run {
 
     /// The header's drawer button's path from the root.
     pub(crate) const DRAWER_BUTTON: [Key; 2] = [Key::name("header"), Key::name("drawer")];
+
+    /// The drawer's Cancel button's path from the root, while the drawer is open.
+    pub(crate) const CANCEL: [Key; 4] = [
+        Key::name("body"),
+        Key::name("drawer"),
+        Key::name("actions"),
+        Key::name("cancel"),
+    ];
+
+    /// Summary card `i`'s Review button's path from the root, on a summary page.
+    pub(crate) fn card_review(i: u64) -> [Key; 4] {
+        [
+            Key::name("body"),
+            Key::name("summary"),
+            Key::index(i),
+            Key::name("review"),
+        ]
+    }
 
     /// The table's path from the root, on the first page: the grid.
     pub(crate) const TABLE: [Key; 3] =
@@ -1608,6 +1652,33 @@ impl Run {
     /// The drawer open, nothing animating.
     pub(crate) fn drawer_open(mut self) -> Self {
         self.step(Step::Update(Msg::Drawer));
+        self.settle();
+        self
+    }
+
+    /// "Review changes" focused from the keyboard, Enter on it opening the drawer, and the
+    /// drawer's Cancel focused as the keyboard leaves it, nothing animating: Enter on Cancel
+    /// closes the drawer, and focus goes back to "Review changes" (TD-0009 A4.4, slice 7c).
+    pub(crate) fn drawer_from_keyboard(mut self) -> Self {
+        let opener = self.ui.find(&Self::DRAWER_BUTTON);
+        self.ui.set_focus(opener);
+        self.step(key(KeyCode::Enter, true, Mods::default()));
+        self.step(key(KeyCode::Enter, false, Mods::default()));
+        let cancel = self.ui.find(&Self::CANCEL);
+        self.ui.set_focus(cancel);
+        // Painted, as the platform paints after the keyboard moves focus.
+        self.frame();
+        self.settle();
+        self
+    }
+
+    /// The second page (a summary) shown, and card `i`'s Review focused as the keyboard leaves
+    /// it, nothing animating: [`Msg::Cleaned`] removes the focused node (slice 7c).
+    pub(crate) fn card_focused(mut self, i: u64) -> Self {
+        self.step(Step::Update(Msg::Page(1)));
+        let review = self.ui.find(&Self::card_review(i));
+        self.ui.set_focus(review);
+        self.frame();
         self.settle();
         self
     }
