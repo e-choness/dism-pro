@@ -527,7 +527,9 @@ fn page<L>(m: &Model<L>, cx: &mut Cx<'_, Msg>) {
     );
 }
 
-fn picker<L>(m: &Model<L>, cx: &mut Cx<'_, Msg>) {
+/// The in-app picker, as [`view`] shows it while it's open; a test's own page may put it there
+/// too.
+pub(crate) fn picker<L>(m: &Model<L>, cx: &mut Cx<'_, Msg>) {
     let folder = &m.folder;
     let status = match folder.listing() {
         _ if !folder.is_empty() => None,

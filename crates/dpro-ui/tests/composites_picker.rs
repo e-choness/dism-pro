@@ -20,7 +20,8 @@ mod picker;
 
 use dpro_app::picker::{BATCH, ListError, Listing};
 use dpro_ui::{
-    Insert, KeyCode, Mods, NodeId, Role, TABLE_BODY, TextEdit,
+    Cx, Element, FakeText, Input, Insert, KeyCode, KeyEvent, Mods, Motion, NodeId, Role, Style,
+    TABLE_BODY, TextEdit, Ui,
     accesskit::Role as AkRole,
     composite::{
         ERROR_TITLE, PICKER_CANCEL, PICKER_CLOSE, PICKER_DRIVES, PICKER_ERROR, PICKER_PATH,
@@ -28,9 +29,9 @@ use dpro_ui::{
     },
 };
 use picker::{
-    Answer, CANCEL, CHOSEN, CLOSE, DRIVES_LABEL, ENTRIES, LOADING, Model, Msg, NOTHING_CHOSEN,
-    PAGE, PATH_LABEL, REGION, ROW, Run, SELECT, Step, TITLE, UP_LABEL, entry_name, key, root,
-    start,
+    Answer, BROWSE, CANCEL, CHOSEN, CLOSE, DRIVES_LABEL, ENTRIES, LOADING, Model, Msg,
+    NOTHING_CHOSEN, OPEN, PAGE, PATH_LABEL, PICKER, REGION, ROW, Run, SELECT, START_SIZE, Step,
+    TITLE, UP_LABEL, entry_name, key, root, start,
 };
 
 const NONE: Mods = Mods {
@@ -501,4 +502,161 @@ fn a_picker_at_rest_asks_for_nothing() {
     run.settle();
     assert!(!run.ui.wants_frame());
     assert!(!run.ui.wants_build());
+}
+
+// ---- wave 3: slice 7c's focus memo × slice 6e's sheet -------------------------------------------
+
+/// "Scan again", before Browse… on [`two_controls`]' page.
+const SCAN: dpro_ui::Key = dpro_ui::Key::name("scan");
+const SCAN_LABEL: &str = "Scan again";
+
+/// The fixture's page with "Scan again" before Browse…, so Browse… is neither the page's first
+/// control nor the first place Tab lands in the sheet's parent; the fixture's picker over it.
+fn two_controls(m: &Model, cx: &mut Cx<'_, Msg>) {
+    cx.add_with(
+        Element::stack(ROW).style(Style {
+            grow: 1.0,
+            ..Style::default()
+        }),
+        |cx| {
+            if m.open {
+                picker::picker(m, cx);
+            } else {
+                cx.add_with(Element::stack(PAGE), |cx| {
+                    cx.add(Element::button(SCAN, SCAN_LABEL, Msg::Go));
+                    cx.add(Element::button(OPEN, BROWSE, Msg::Browse));
+                });
+            }
+        },
+    );
+}
+
+/// [`two_controls`]' page, hosted as [`Run`] hosts the fixture's: an event, its messages and a
+/// frame; then the pick Browse… asked for, answered `Unavailable` as a `WinPE` does, and a frame.
+struct TwoControls {
+    ui: Ui<Msg>,
+    model: Model,
+    msgs: Vec<Msg>,
+}
+
+impl TwoControls {
+    fn new() -> Self {
+        let mut page = Self {
+            ui: Ui::new(START_SIZE, 1.0, Motion::STANDARD),
+            model: Model::new(),
+            msgs: Vec::new(),
+        };
+        page.ui.set_active(true);
+        page.frame();
+        page
+    }
+
+    /// As the platform's: built again if the table asks (its first build guesses its rows).
+    fn frame(&mut self) {
+        for _ in 0..3 {
+            let model = &self.model;
+            self.ui.build(|cx| two_controls(model, cx));
+            self.ui.layout(&mut FakeText);
+            self.ui.take_messages(&mut self.msgs);
+            let fitted = !self.msgs.is_empty();
+            for m in self.msgs.drain(..) {
+                self.model.update(m);
+            }
+            if !fitted && !self.ui.wants_build() {
+                break;
+            }
+        }
+        self.ui.clear_damage();
+    }
+
+    fn key(&mut self, key: KeyCode) {
+        let down = Input::Key(KeyEvent {
+            key,
+            down: true,
+            mods: NONE,
+        });
+        self.ui.dispatch(down, &mut self.msgs);
+        for m in self.msgs.drain(..) {
+            self.model.update(m);
+        }
+        self.frame();
+        if self.model.take_ask() {
+            self.model.update(Msg::Picked(Answer::Unavailable));
+            self.frame();
+        }
+    }
+
+    fn browse(&self) -> Option<NodeId> {
+        self.ui.find(&[ROW, PAGE, OPEN])
+    }
+
+    fn is_under(&self, id: NodeId, ancestor: NodeId) -> bool {
+        id == ancestor || self.ui.children(ancestor).any(|c| self.is_under(id, c))
+    }
+}
+
+/// Wave 3 (TD-0009 A3.5 (12) × A4.4, A4.5): the picker sheet's Esc gives focus back to what
+/// opened it through the memo its scope took (slice 7c's `FocusMemo`), found by its keys, though
+/// the sheet took the page away and closing it built Browse… anew. Browse… isn't the page's first
+/// control, so slice 6d's fallback (the first place Tab lands in the scope's parent) would have
+/// put focus on "Scan again". The scope appears, and takes its memo, in the frame after Browse…'s
+/// event, where the pick's answer opens the sheet; focus moving about in the sheet doesn't change
+/// it.
+#[test]
+fn the_picker_s_esc_gives_focus_back_to_its_rebuilt_opener_by_its_memo() {
+    let mut page = TwoControls::new();
+    let opener = page.browse().expect("Browse…");
+    page.ui.set_focus(Some(opener));
+    page.key(KeyCode::Enter);
+    assert!(page.model.open, "Unavailable opened the in-app picker");
+    assert!(page.browse().is_none(), "the sheet took the page away");
+    let sheet = page.ui.find(&[ROW, PICKER]).expect("the picker");
+    page.key(KeyCode::Tab);
+    let focus = page.ui.focus().expect("focus in the sheet");
+    assert!(page.is_under(focus, sheet), "Tab stays in the sheet");
+
+    page.key(KeyCode::Escape);
+    assert!(!page.model.open, "Esc closed the picker");
+    let again = page.browse().expect("Browse… again");
+    assert_ne!(again, opener, "the page built Browse… anew");
+    assert_eq!(page.ui.focus(), Some(again), "focus is back on Browse…");
+    let scan = page.ui.find(&[ROW, PAGE, SCAN]);
+    assert!(scan.is_some() && page.ui.focus() != scan);
+    assert!(page.ui.focus_visible(), "the keyboard's ring stays");
+}
+
+/// Wave 3 (TD-0009 A3.5 (12) × A4.4): Up pressed until the root disables Up under the focus,
+/// which parks there (slice 7c) rather than falling to the window. Enter and Alt+Up there send
+/// nothing, Tab leaves it for the drive list, and Esc from the parked focus still closes the
+/// picker with focus back on Browse….
+#[test]
+fn up_at_the_root_parks_focus_on_up_and_esc_still_closes() {
+    let parked = || {
+        let mut run = Run::with(Model::new());
+        open_listed(&mut run);
+        let up = run.part(PICKER_UP).expect("Up");
+        run.ui.set_focus(Some(up));
+        run.step(key(KeyCode::Enter, NONE));
+        run.step(key(KeyCode::Enter, NONE));
+        assert_eq!(run.model.folder.folder(), Some(root().as_path()));
+        let up = run.part(PICKER_UP).expect("Up");
+        assert!(!run.ui.info(up).expect("Up").enabled, "Up is off at a root");
+        assert_eq!(run.ui.focus(), Some(up), "focus parks on it");
+        run.model.last = None;
+        run
+    };
+
+    let mut run = parked();
+    run.step(key(KeyCode::Enter, NONE));
+    run.step(key(KeyCode::Up, ALT));
+    assert_eq!(run.model.last, None, "a parked Up sends nothing");
+    assert_eq!(run.model.folder.folder(), Some(root().as_path()));
+    run.step(key(KeyCode::Tab, NONE));
+    assert_eq!(run.ui.focus(), run.part(PICKER_DRIVES), "Tab leaves it");
+
+    let mut run = parked();
+    run.step(key(KeyCode::Escape, NONE));
+    assert_eq!(run.model.last, Some(Msg::Close), "Esc sends close");
+    assert!(run.picker().is_none());
+    assert_eq!(run.ui.focus(), run.opener(), "focus is back on Browse…");
 }
