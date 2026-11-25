@@ -5,8 +5,10 @@
 //!
 //! Every exe it checks must also not import, by name, a function newer than the oldest Windows it
 //! runs on (`RUNTIME_ONLY`): those are looked up at run time, so the exe still starts where
-//! they're missing. `--exe <path>…` checks only that, on probes that aren't shipped (G1's shell
-//! example, TD-0009 A4.9).
+//! they're missing. Nor may it import a DLL that only one path loads at run time
+//! (`RUNTIME_ONLY_DLLS`: the shell's, for the system file dialog). `--exe <path>…` checks only
+//! that, on probes that aren't shipped (G1's shell example, TD-0009 A4.9; the file dialog probe,
+//! A3.5 (12)).
 
 use std::{
     env, fs,
@@ -26,6 +28,22 @@ const RUNTIME_ONLY: &[(&str, &str)] = &[(
     "Windows 10 1709 and later: the vendored accesskit_windows looks it up with GetProcAddress \
      (TD-0009 A4.5, its PATCHES.md item 7)",
 )];
+
+/// DLLs no checked exe may import or delay-load, with where they're loaded instead. Base `WinPE`
+/// has neither: an exe that imported one wouldn't start there, where the in-app picker stands in
+/// for the dialog.
+const RUNTIME_ONLY_DLLS: &[(&str, &str)] = &[
+    (
+        "shell32.dll",
+        "dpro-win's file dialog loads it from System32 at run time, for the dialog's start folder \
+         (TD-0009 A3.5 (12))",
+    ),
+    (
+        "comdlg32.dll",
+        "the file dialog is CLSID_FileOpenDialog, which ole32 (itself loaded at run time) brings \
+         in (TD-0009 A3.5 (12))",
+    ),
+];
 
 pub(crate) fn run(root: &Path, args: &[String]) -> Result<()> {
     if let [flag, dir] = args
@@ -104,31 +122,41 @@ fn check_runtime_only(exes: &[String]) -> Result<()> {
         report_runtime_only(exe, &early);
     }
     if failures > 0 {
-        return Err(format!("{failures} executable(s) import a run-time-only function").into());
+        return Err(
+            format!("{failures} executable(s) import a run-time-only function or DLL").into(),
+        );
     }
     Ok(())
 }
 
-/// The [`RUNTIME_ONLY`] functions among `imports`, as `function (dll): why`.
+/// The [`RUNTIME_ONLY`] functions among `imports`, as `function (dll): why`, then the
+/// [`RUNTIME_ONLY_DLLS`] among them, as `dll: why`.
 fn imported_runtime_only(imports: &[pe::Import]) -> Vec<String> {
-    imports
-        .iter()
-        .flat_map(|i| {
-            i.functions.iter().filter_map(move |f| {
-                RUNTIME_ONLY
-                    .iter()
-                    .find(|(name, _)| name == f)
-                    .map(|(_, why)| format!("{f} ({}): {why}", i.dll))
-            })
+    let functions = imports.iter().flat_map(|i| {
+        i.functions.iter().filter_map(move |f| {
+            RUNTIME_ONLY
+                .iter()
+                .find(|(name, _)| name == f)
+                .map(|(_, why)| format!("{f} ({}): {why}", i.dll))
         })
-        .collect()
+    });
+    let dlls = imports.iter().filter_map(|i| {
+        RUNTIME_ONLY_DLLS
+            .iter()
+            .find(|(name, _)| i.dll.eq_ignore_ascii_case(name))
+            .map(|(_, why)| {
+                let note = if i.delay_loaded { " (delay-load)" } else { "" };
+                format!("{}{note}: {why}", i.dll)
+            })
+    });
+    functions.chain(dlls).collect()
 }
 
 fn report_runtime_only(label: &str, early: &[String]) {
     if early.is_empty() {
         return;
     }
-    println!("pe-compat: FAIL {label} imports functions it must look up at run time:");
+    println!("pe-compat: FAIL {label} imports functions or DLLs it must look up at run time:");
     for f in early {
         println!("    {f}");
     }
@@ -313,5 +341,24 @@ mod tests {
             assert_eq!(found.len(), 1, "{found:?}");
             assert!(found[0].starts_with("UiaRaiseNotificationEvent (UIAutomationCore.dll): "));
         }
+    }
+
+    /// The file dialog's DLLs (TD-0009 A3.5 (12)) are loaded at run time: importing or
+    /// delay-loading either is reported, whatever its case; ole32, which the GUI may import,
+    /// isn't.
+    #[test]
+    fn importing_the_shell_or_the_common_dialogs_is_reported() {
+        let looked_up = pe::tests::synthetic_pe(&["KERNEL32.dll", "ole32.dll"], &[]);
+        let imports = pe::imports(&looked_up).unwrap();
+        assert_eq!(imported_runtime_only(&imports), Vec::<String>::new());
+
+        let bytes = pe::tests::synthetic_pe(&["KERNEL32.dll", "SHELL32.dll"], &["comdlg32.dll"]);
+        let found = imported_runtime_only(&pe::imports(&bytes).unwrap());
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert!(found[0].starts_with("SHELL32.dll: "), "{found:?}");
+        assert!(
+            found[1].starts_with("comdlg32.dll (delay-load): "),
+            "{found:?}"
+        );
     }
 }

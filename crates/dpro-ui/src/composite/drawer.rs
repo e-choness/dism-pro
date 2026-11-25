@@ -108,6 +108,17 @@ pub struct Callout<'s> {
     pub text: &'s str,
 }
 
+/// How a drawer's body sits between its header and its footer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Body {
+    /// A vertical scroll viewport: what the page puts in it scrolls (the Preview drawer).
+    Scroll,
+    /// A column that fills the space and doesn't scroll, for a body that scrolls itself: a
+    /// table inside a scroll viewport would be given its whole height and build every row (the
+    /// in-app picker, slice 6e).
+    Fill,
+}
+
 /// Whether a drawer beside a page in `width` logical pixels (the window less the rail) would leave
 /// the page narrower than [`drawer::PAGE_MIN`]: then it's a sheet over the page instead.
 #[must_use]
@@ -134,6 +145,21 @@ impl<M: Clone> Cx<'_, M> {
         d: &DrawerFrame<'_, M>,
         body: impl FnOnce(&mut Cx<'_, M>),
     ) -> NodeId {
+        self.drawer_with(key, d, Body::Scroll, |cx| {
+            body(cx);
+            NIL
+        })
+    }
+
+    /// A drawer whose body is laid out as `kind` says. `body` builds it and returns the node
+    /// opening focuses, or [`NIL`] for the body's first control (else Close).
+    pub(super) fn drawer_with(
+        &mut self,
+        key: Key,
+        d: &DrawerFrame<'_, M>,
+        kind: Body,
+        body: impl FnOnce(&mut Cx<'_, M>) -> u32,
+    ) -> NodeId {
         let size = if d.sheet {
             Style {
                 grow: 1.0,
@@ -149,7 +175,7 @@ impl<M: Clone> Cx<'_, M> {
                 ..Style::default()
             }
         };
-        let (mut close, mut viewport) = (NIL, NIL);
+        let (mut close, mut viewport, mut focus) = (NIL, NIL, NIL);
         let id = self.add_with(
             Element::scope(key)
                 .on_escape(d.close)
@@ -159,9 +185,13 @@ impl<M: Clone> Cx<'_, M> {
                 .landmark(Landmark::Region { kind: d.region }),
             |cx| {
                 close = header(cx, d);
+                let el = match kind {
+                    Body::Scroll => Element::scroll(DRAWER_BODY, Axes::Y),
+                    Body::Fill => Element::stack(DRAWER_BODY),
+                };
                 viewport = cx
                     .add_with(
-                        Element::scroll(DRAWER_BODY, Axes::Y).style(Style {
+                        el.style(Style {
                             grow: 1.0,
                             gap: drawer::GAP,
                             padding: Insets {
@@ -172,16 +202,18 @@ impl<M: Clone> Cx<'_, M> {
                             },
                             ..Style::default()
                         }),
-                        body,
+                        |cx| focus = body(cx),
                     )
                     .index;
                 footer(cx, &d.footer);
             },
         );
-        // Opening moves focus to the body's first control, or to Close if it has none.
+        // Opening moves focus where the body says, else to its first control, else to Close.
         if self.ui.scope_opened(id.index) {
-            let first = self.ui.first_stop_below(viewport);
-            self.ui.move_focus(if first == NIL { close } else { first });
+            if focus == NIL {
+                focus = self.ui.first_stop_below(viewport);
+            }
+            self.ui.move_focus(if focus == NIL { close } else { focus });
         }
         self.slide_in(id, Edge::End);
         id

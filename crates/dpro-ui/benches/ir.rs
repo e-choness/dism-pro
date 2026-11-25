@@ -54,6 +54,10 @@
 //!   category cleaned while its Review has focus, which goes to the next card's
 //!   (`event.remove_focused`); and the drawer's close with a client listening
 //!   (`a11y::a11y_update.focus_restore`).
+//! - `composite_picker` (TD-0009 A3.7's U19, slice 6e), in a group of its own: the picker page of
+//!   `fixtures/picker.rs`, warmed by its session, the picker open on a folder of 10,000
+//!   subfolders; the wake that brings the first batch, taken into the model and its first screen
+//!   of rows built, laid out and painted (`picker_listing.first_screen`).
 //!
 //! C1: `docker compose run --rm bench-gate`.
 
@@ -61,6 +65,8 @@
 
 #[path = "fixtures/drawer.rs"]
 mod drawer_page;
+#[path = "fixtures/picker.rs"]
+mod picker_page;
 
 #[path = "fixtures/composites.rs"]
 mod composites;
@@ -962,9 +968,42 @@ library_benchmark_group!(name = notice, benchmarks = [notice_event, live_toast])
 
 // ---- end notice --------------------------------------------------------------------------------
 
+// ---- composite_picker (TD-0009 A3.7 U19; slice 6e) ---------------------------------------------
+
+// Slice 6e: the in-app path picker (TD-0009 A3.5 (12), A3.7's U19). `fixtures/picker.rs`'s page,
+// warmed by its session, in a group of its own, as the drawer's is. A3.7's U19 is
+// `composite::picker_listing.first_screen`.
+
+/// The picker page after its session, painted, then the picker opened on a folder of 10,000
+/// subfolders whose first batch hasn't come; and the wake that brings it.
+fn picker_waiting() -> (Box<picker_page::Run>, picker_page::Step) {
+    let mut run = picker_page::Run::painted(picker_page::Model::new(), Theme::LIGHT).warmed();
+    run.step(picker_page::Step::Update(picker_page::Msg::Open));
+    run.settle();
+    (
+        Box::new(run),
+        picker_page::Step::Update(picker_page::Msg::Listed),
+    )
+}
+
+// U19: the first batch (512 of the 10,000 entries) taken into the model, and the first screen of
+// rows built, laid out and painted. The listing itself runs off the UI thread, and isn't counted.
+#[library_benchmark]
+#[bench::first_screen(setup = picker_waiting)]
+fn picker_listing(
+    (mut run, step): (Box<picker_page::Run>, picker_page::Step),
+) -> Box<picker_page::Run> {
+    run.step(black_box(step));
+    run
+}
+
+library_benchmark_group!(name = composite_picker, benchmarks = [picker_listing]);
+
+// ---- end composite_picker ----------------------------------------------------------------------
+
 main!(
     // Instruction counts only: the cache simulation would slow every run for metrics nothing gates.
     config = LibraryBenchmarkConfig::default().tool(Callgrind::with_args(["--cache-sim=no"]));
     library_benchmark_groups = interact, paint, popup, table, a11y, composite, grouped,
-        composite_drawer, notice
+        composite_drawer, notice, composite_picker
 );

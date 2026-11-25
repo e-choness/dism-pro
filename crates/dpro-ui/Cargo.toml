@@ -61,5 +61,11 @@ name = "shell"
 [[example]]
 name = "drawer"
 
+# TD-0009 A3.9's G1 Picker check and A3.7's U19: slice 6e's in-app picker in a real window over a
+# real folder, listed off the UI thread; `.github/scripts/ui-gates.ps1` times it over 10,000
+# folders.
+[[example]]
+name = "picker"
+
 [lints]
 workspace = true

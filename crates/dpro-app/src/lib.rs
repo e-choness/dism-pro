@@ -8,8 +8,10 @@
 
 pub mod announce;
 pub mod badges;
+pub mod display;
 mod fold;
 pub mod palette;
+pub mod picker;
 pub mod table;
 
 /// A revision counter. Views compare it to skip rebuilding what didn't change (TD-0009 §5.1).

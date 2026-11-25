@@ -966,6 +966,17 @@ pub mod tokens {
         /// The buttons' least height.
         pub const BUTTON_H: f32 = 40.0;
     }
+
+    // Slice 6e: the in-app path picker (TD-0009 A3.5 (12)).
+
+    /// The in-app path picker's path row. The rest is the drawer frame's sheet: its sides,
+    /// header, gaps and footer are [`drawer`]'s.
+    pub mod picker {
+        /// The path row's controls' least height, and Up's square: a field's.
+        pub const CONTROL_H: f32 = 32.0;
+        /// The drive list's least width: `C:\` and its chevron at 100 % text.
+        pub const DRIVES_W: f32 = 88.0;
+    }
 }
 
 #[cfg(test)]

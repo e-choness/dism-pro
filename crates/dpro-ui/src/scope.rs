@@ -8,23 +8,27 @@
 //!   keys, so an opener a sheet's page built anew is found again (A4.4, slice 7c); if it went, as
 //!   a memo falls back (`focus.rs`). Opened with nothing focused, the successor rule decides.
 //!   Focus the user moved out of the scope stays where it went.
+//! - A scope may name an Up button (the in-app picker's, A3.5 (12)): Alt+Up anywhere in it, and
+//!   Backspace on its table's rows, press it.
 //!
 //! The drawer (A3.5 (6)) and the in-app picker use it. General focus restoration is A4's
 //! (`focus.rs`).
 
 use crate::{
-    Element, FocusMemo, Key, Ui,
+    Element, FocusMemo, Key, KeyCode, KeyEvent, NodeId, TABLE_BODY, Ui,
     tree::{Extra, NIL},
 };
 
 /// An open scope: its node, what Esc sends it, the memo of the node focused when it appeared,
-/// and whether it appeared in this build (its owner moves focus into it once).
+/// whether it appeared in this build (its owner moves focus into it once), and its Up button.
 #[derive(Debug)]
 pub(crate) struct ScopeSlot<M> {
     node: u32,
     on_escape: Option<fn() -> M>,
     memo: Option<FocusMemo>,
     opened: bool,
+    /// What Alt+Up and Backspace in the table press ([`Ui::set_scope_up`]).
+    up: Option<NodeId>,
 }
 
 impl<M> Element<'_, M> {
@@ -76,6 +80,7 @@ impl<M> Ui<M> {
             on_escape,
             memo,
             opened: true,
+            up: None,
         });
     }
 
@@ -86,6 +91,56 @@ impl<M> Ui<M> {
             .iter_mut()
             .find(|s| s.node == i)
             .is_some_and(|s| std::mem::replace(&mut s.opened, false))
+    }
+
+    /// Scope node `i`'s Up button is node `button` (its owner says so on every build): Alt+Up
+    /// anywhere in the scope, and Backspace on its table's rows, press it
+    /// ([`Ui::scope_up_key`]).
+    pub(crate) fn set_scope_up(&mut self, i: u32, button: u32) {
+        let up = self.id(button);
+        if let Some(s) = self.scopes.iter_mut().find(|s| s.node == i) {
+            s.up = up;
+        }
+    }
+
+    /// The Up button key `k` presses, if it's Alt+Up, or Backspace on a table's row or its empty
+    /// rows: the button of the nearest scope holding the focus that has one, or with focus
+    /// outside every scope, for Alt+Up, the window's open scope's (the last opened with one).
+    /// `None` while that button is disabled (a picker at a root), so the key goes on.
+    pub(crate) fn scope_up_key(&self, k: KeyEvent) -> Option<u32> {
+        let m = k.mods;
+        if !k.down || m.ctrl || m.shift || m.win || self.scopes.is_empty() {
+            return None;
+        }
+        let alt_up = k.key == KeyCode::Up && m.alt;
+        let back = k.key == KeyCode::Backspace && !m.alt && self.in_table_rows(self.focus);
+        if !(alt_up || back) {
+            return None;
+        }
+        let (mut button, mut inside, mut at) = (None, false, self.focus);
+        while at != NIL && button.is_none() {
+            if let Some(s) = self.scopes.iter().find(|s| s.node == at) {
+                inside = true;
+                button = s.up;
+            }
+            at = self.nodes[at as usize].parent;
+        }
+        if !inside && alt_up {
+            button = self.scopes.iter().rev().find_map(|s| s.up);
+        }
+        button
+            .and_then(|id| self.index(id))
+            .filter(|&i| self.nodes[i as usize].interactive())
+    }
+
+    /// Whether node `i` is a table's row, or a table's rows' viewport (focused when it has no
+    /// rows).
+    fn in_table_rows(&self, i: u32) -> bool {
+        i != NIL
+            && (self.row_place(i).is_some() || {
+                let n = &self.nodes[i as usize];
+                n.key == TABLE_BODY && n.scroll != NIL
+            })
     }
 
     /// Node `i` is being freed: if it's a scope, it's forgotten, and its memo kept for the

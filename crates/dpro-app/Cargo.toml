@@ -9,6 +9,8 @@ publish.workspace = true
 
 [dependencies]
 dpro-core.workspace = true
+# The picker's error enums (coding standards §3; TD-0009 A3.5 (12), slice 6e).
+thiserror.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true

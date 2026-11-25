@@ -141,9 +141,16 @@ case "${task}" in
       --example drivers_t3 --target "${t}" "$@"
     cargo xwin build --locked --release -p dpro-win --features gui --example bare_window \
       --target "${t}" "$@"
+    # G1's picker dialog probe: the system file dialog modal to a window (TD-0009 A3.5 (12)). It
+    # loads ole32 and shell32 at run time, so it imports neither shell32 nor comdlg32.
+    cargo xwin build --locked --release -p dpro-win --features gui --example file_dialog_t3 \
+      --target "${t}" "$@"
+    cargo xtask pe-compat --exe "target/${t}/release/examples/file_dialog_t3.exe"
     cargo xwin build --locked --release -p dpro-ui --example shell --target "${t}" "$@"
     # G1's Drawer probe: slice 6d's drawer page in a real window (TD-0009 A3.9).
     cargo xwin build --locked --release -p dpro-ui --example drawer --target "${t}" "$@"
+    # G1's Picker probe and U19: slice 6e's in-app picker over a real folder (TD-0009 A3.9).
+    cargo xwin build --locked --release -p dpro-ui --example picker --target "${t}" "$@"
     # The probe statically imports no function its adapter looks up at run time (TD-0009 A4.9).
     cargo xtask pe-compat --exe "target/${t}/release/examples/shell.exe"
     # The unit-test binary of package $1: cargo prints "Executable unittests src/lib.rs (<path>)".
@@ -160,6 +167,7 @@ case "${task}" in
       | tee /dev/stderr | sed -n 's/^ *Executable tests\/mcp_stdio\.rs (\(.*\))$/\1/p')
     rm -rf dist-t3
     mkdir -p dist-t3
+    cp "target/${t}/release/examples/file_dialog_t3.exe" dist-t3/
     cp "target/${t}/release/examples/"{regf_dump,pipe_t3,wim_t3,drivers_t3,ffi-check-source}.exe \
       "target/${t}/release/examples/"{bare_window,shell}.exe dist-t3/
     cp "${win_tests:?no dpro-win test binary}" dist-t3/dpro-win-tests.exe
@@ -167,6 +175,7 @@ case "${task}" in
     cp "${adapter_tests:?no accesskit_windows test binary}" dist-t3/accesskit-windows-tests.exe
     cp "${mcp_tests:?no dismpro-cli mcp test binary}" dist-t3/dismpro-cli-mcp-tests.exe
     cp "target/${t}/release/examples/drawer.exe" dist-t3/
+    cp "target/${t}/release/examples/picker.exe" dist-t3/
     ;;
   build)
     # Ship binaries only: xtask is a host tool, and dist/ starts empty so no stale exe lingers.
